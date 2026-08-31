@@ -68,3 +68,58 @@ func TestManagerStartupRetainsAndReportsInvalidOwnershipMarker(t *testing.T) {
 		t.Errorf("invalid workspace was removed: %v", statErr)
 	}
 }
+
+func TestReconcileOwnedAttemptsImmediatelyRemovesOnlyValidOwnedWorkspaces(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManager(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := manager.Create(context.Background(), "attempt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(root, "provenance-job-foreign")
+	if err := os.Mkdir(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(root, "operator-data")
+	if err := os.Mkdir(unrelated, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.ReconcileOwnedAttempts(context.Background()); err != nil {
+		t.Fatalf("ReconcileOwnedAttempts() error = %v", err)
+	}
+	if _, err := os.Stat(owned.Root()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned workspace remains: %v", err)
+	}
+	for _, path := range []string{foreign, unrelated} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("foreign path %q changed: %v", path, err)
+		}
+	}
+}
+
+func TestReconcileOwnedAttemptsFailsClosedOnAmbiguousMarker(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManager(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(root, "provenance-job-invalid")
+	if err := os.Mkdir(invalid, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(invalid, workspaceMarkerName), []byte(`{"version":1,"jobId":"attempt","createdAt":"invalid"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = manager.ReconcileOwnedAttempts(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("ReconcileOwnedAttempts() error = %v", err)
+	}
+	if _, statErr := os.Stat(invalid); statErr != nil {
+		t.Fatalf("ambiguous workspace was removed: %v", statErr)
+	}
+}

@@ -24,6 +24,17 @@ type workspaceMarker struct {
 }
 
 func (m *Manager) Reconcile(ctx context.Context, now time.Time) error {
+	return m.reconcile(ctx, now, false)
+}
+
+// ReconcileOwnedAttempts removes every valid owned workspace after the caller
+// has acquired the runner's exclusive instance lock. It must not be used while
+// another process can own workspaces beneath the same manager root.
+func (m *Manager) ReconcileOwnedAttempts(ctx context.Context) error {
+	return m.reconcile(ctx, time.Now().UTC(), true)
+}
+
+func (m *Manager) reconcile(ctx context.Context, now time.Time, removeFresh bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -54,7 +65,7 @@ func (m *Manager) Reconcile(ctx context.Context, now time.Time) error {
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("inspect workspace %q: invalid ownership marker", entry.Name()))
 			continue
 		}
-		if now.Sub(marker.CreatedAt) < m.orphanTTL {
+		if !removeFresh && now.Sub(marker.CreatedAt) < m.orphanTTL {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

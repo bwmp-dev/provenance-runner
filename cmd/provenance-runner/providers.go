@@ -26,35 +26,35 @@ const gvisorReconciliationTimeout = 15 * time.Second
 
 type providerRegistry struct {
 	*execution.Registry
-	instanceLock *instancelock.Lock
+	instanceLocks *instancelock.Set
 }
 
 func (r *providerRegistry) Close() error {
 	if r == nil {
 		return nil
 	}
-	return r.instanceLock.Close()
+	return r.instanceLocks.Close()
 }
 
 func registryForProvider(ctx context.Context, providerName string, lookup environmentLookup) (*providerRegistry, error) {
 	providers := []execution.EnvironmentProvider{processprovider.New()}
-	var instanceLock *instancelock.Lock
+	var instanceLocks *instancelock.Set
 	if providerName == paper.ProviderName {
-		provider, lock, err := paperProviderFromEnvironment(ctx, lookup)
+		provider, locks, err := paperProviderFromEnvironment(ctx, lookup)
 		if err != nil {
 			return nil, err
 		}
-		instanceLock = lock
+		instanceLocks = locks
 		providers = append(providers, provider)
 	}
 	registry, err := execution.NewRegistry(providers...)
 	if err != nil {
-		return nil, errors.Join(err, instanceLock.Close())
+		return nil, errors.Join(err, instanceLocks.Close())
 	}
-	return &providerRegistry{Registry: registry, instanceLock: instanceLock}, nil
+	return &providerRegistry{Registry: registry, instanceLocks: instanceLocks}, nil
 }
 
-func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup) (*paper.Provider, *instancelock.Lock, error) {
+func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup) (*paper.Provider, *instancelock.Set, error) {
 	catalog, err := operatorCatalog(lookup)
 	if err != nil {
 		return nil, nil, err
@@ -120,12 +120,15 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup)
 	if err != nil {
 		return nil, nil, err
 	}
-	instanceLock, err := instancelock.Acquire(filepath.Join(bundleRoot, ".provenance-runner.lock"))
+	instanceLocks, err := instancelock.AcquireAll(
+		filepath.Join(bundleRoot, ".provenance-runner.lock"),
+		filepath.Join(workspaceRoot, ".provenance-runner.lock"),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("initialize Paper runner instance: %w", err)
 	}
-	fail := func(constructionErr error) (*paper.Provider, *instancelock.Lock, error) {
-		return nil, nil, errors.Join(constructionErr, instanceLock.Close())
+	fail := func(constructionErr error) (*paper.Provider, *instancelock.Set, error) {
+		return nil, nil, errors.Join(constructionErr, instanceLocks.Close())
 	}
 
 	manager, err := workspace.NewManager(workspaceRoot)
@@ -148,6 +151,9 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup)
 	defer cancelReconcile()
 	if err := sandbox.Reconcile(reconcileContext); err != nil {
 		return fail(fmt.Errorf("reconcile gVisor state: %w", err))
+	}
+	if err := manager.ReconcileOwnedAttempts(reconcileContext); err != nil {
+		return fail(fmt.Errorf("reconcile owned attempt workspaces: %w", err))
 	}
 
 	sharedCache, err := artifact.NewCache(filepath.Join(cacheRoot, "content"), artifact.CacheOptions{
@@ -174,7 +180,7 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup)
 	if err != nil {
 		return fail(err)
 	}
-	return provider, instanceLock, nil
+	return provider, instanceLocks, nil
 }
 
 func operatorCatalog(lookup environmentLookup) (paper.Catalog, error) {

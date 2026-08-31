@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,6 +104,74 @@ func TestPaperRegistryLockPreventsConcurrentReconciliation(t *testing.T) {
 	}
 }
 
+func TestPaperRegistryImmediatelyRemovesOwnedCrashWorkspaceWhileLocked(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("gVisor provider construction requires Linux")
+	}
+	values := paperEnvironment(t)
+	owned := filepath.Join(values["PROVENANCE_WORKSPACE_ROOT"], "provenance-job-crashed")
+	if err := os.Mkdir(owned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := fmt.Sprintf(`{"version":1,"jobId":"attempt-1","createdAt":%q}`, time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(owned, ".provenance-workspace.json"), []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := registryForProvider(context.Background(), "paper", func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.Close()
+	if _, err := os.Stat(owned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned crash workspace remains: %v", err)
+	}
+}
+
+func TestPaperRegistriesWithSharedWorkspaceAndDistinctBundlesContendBeforeCleanup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("gVisor provider construction requires Linux")
+	}
+	firstValues := paperEnvironment(t)
+	first, err := registryForProvider(context.Background(), "paper", func(name string) string { return firstValues[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+
+	owned := filepath.Join(firstValues["PROVENANCE_WORKSPACE_ROOT"], "provenance-job-active")
+	if err := os.Mkdir(owned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := fmt.Sprintf(`{"version":1,"jobId":"attempt-1","createdAt":%q}`, time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(owned, ".provenance-workspace.json"), []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	secondValues := make(map[string]string, len(firstValues))
+	for name, value := range firstValues {
+		secondValues[name] = value
+	}
+	secondValues["PROVENANCE_GVISOR_BUNDLE_ROOT"] = filepath.Join(filepath.Dir(firstValues["PROVENANCE_GVISOR_BUNDLE_ROOT"]), "bundles-second")
+	secondValues["PROVENANCE_GVISOR_STATE_ROOT"] = filepath.Join(filepath.Dir(firstValues["PROVENANCE_GVISOR_STATE_ROOT"]), "state-second")
+	_, err = registryForProvider(context.Background(), "paper", func(name string) string { return secondValues[name] })
+	if !errors.Is(err, instancelock.ErrAlreadyHeld) {
+		t.Fatalf("shared workspace contention error = %v, want ErrAlreadyHeld", err)
+	}
+	if _, err := os.Stat(owned); err != nil {
+		t.Fatalf("contending initialization changed active workspace: %v", err)
+	}
+
+	partialPath := filepath.Join(secondValues["PROVENANCE_GVISOR_BUNDLE_ROOT"], ".provenance-runner.lock")
+	partial, err := instancelock.Acquire(partialPath)
+	if err != nil {
+		t.Fatalf("bundle lock was not released after workspace contention: %v", err)
+	}
+	if err := partial.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPaperRegistryBoundsReconciliationAndReleasesLockOnFailure(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("gVisor provider construction requires Linux")
@@ -128,12 +197,14 @@ func TestPaperRegistryBoundsReconciliationAndReleasesLockOnFailure(t *testing.T)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("bounded reconciliation error = %v, want deadline exceeded", err)
 	}
-	lock, err := instancelock.Acquire(filepath.Join(values["PROVENANCE_GVISOR_BUNDLE_ROOT"], ".provenance-runner.lock"))
-	if err != nil {
-		t.Fatalf("lock remained held after setup failure: %v", err)
-	}
-	if err := lock.Close(); err != nil {
-		t.Fatal(err)
+	for _, root := range []string{values["PROVENANCE_GVISOR_BUNDLE_ROOT"], values["PROVENANCE_WORKSPACE_ROOT"]} {
+		lock, err := instancelock.Acquire(filepath.Join(root, ".provenance-runner.lock"))
+		if err != nil {
+			t.Fatalf("lock for %q remained held after setup failure: %v", root, err)
+		}
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

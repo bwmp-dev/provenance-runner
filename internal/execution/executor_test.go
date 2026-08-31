@@ -109,6 +109,96 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 	}
 }
 
+func TestExecutorRunsObserverImmediatelyBeforeSandboxExecution(t *testing.T) {
+	var phases []string
+	prepared := &fakePrepared{
+		execute: func(context.Context) (ExecutionOutcome, error) {
+			phases = append(phases, "execute")
+			code := 0
+			return ExecutionOutcome{ExitCode: &code}, nil
+		},
+		collect: func(context.Context) (CollectedOutput, error) {
+			phases = append(phases, "collect")
+			return CollectedOutput{}, nil
+		},
+		cleanup: func(context.Context) error {
+			phases = append(phases, "cleanup")
+			return nil
+		},
+	}
+	registry, err := NewRegistry(preparedProvider(prepared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewExecutor(registry, ExecutorOptions{
+		BeforeExecute: func(ctx context.Context, start ExecutionStart) error {
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("observer context error = %v", err)
+			}
+			if start != (ExecutionStart{JobID: "job/test", Provider: "fake", EnvironmentIdentity: "fake/test"}) {
+				t.Fatalf("execution start = %#v", start)
+			}
+			phases = append(phases, "observer")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(context.Background(), validJob())
+	if !result.Passed() {
+		t.Fatalf("result = %#v", result)
+	}
+	want := []string{"observer", "execute", "collect", "cleanup"}
+	if len(phases) != len(want) {
+		t.Fatalf("phases = %v, want %v", phases, want)
+	}
+	for index := range want {
+		if phases[index] != want[index] {
+			t.Fatalf("phases = %v, want %v", phases, want)
+		}
+	}
+}
+
+func TestExecutorObserverFailurePreventsSandboxLaunchAndStillCleansUp(t *testing.T) {
+	executed := false
+	collected := false
+	cleaned := false
+	prepared := &fakePrepared{
+		execute: func(context.Context) (ExecutionOutcome, error) {
+			executed = true
+			return ExecutionOutcome{}, nil
+		},
+		collect: func(context.Context) (CollectedOutput, error) {
+			collected = true
+			return CollectedOutput{}, nil
+		},
+		cleanup: func(context.Context) error {
+			cleaned = true
+			return nil
+		},
+	}
+	registry, err := NewRegistry(preparedProvider(prepared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewExecutor(registry, ExecutorOptions{
+		BeforeExecute: func(context.Context, ExecutionStart) error {
+			return errors.New("persist start failed")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(context.Background(), validJob())
+	if executed || !collected || !cleaned {
+		t.Fatalf("executed = %t, collected = %t, cleaned = %t", executed, collected, cleaned)
+	}
+	if result.Classification != ClassificationInfrastructureFailure || result.Phase != PhaseExecution || result.Failure == nil || result.Failure.Code != "before_execute_failed" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestExecutorUsesRemotePhaseTimeouts(t *testing.T) {
 	var preparationDeadline, executionDeadline, cleanupDeadline time.Time
 	prepared := &fakePrepared{
