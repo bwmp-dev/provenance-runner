@@ -8,20 +8,38 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"runtime"
+	"syscall"
 
+	"github.com/bwmp-dev/provenance-runner/internal/buildinfo"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/gatewayclient"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
 )
 
 const maximumJobBytes = 1 << 20
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	os.Exit(runContext(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(arguments) != 2 || arguments[0] != "execute" {
-		fmt.Fprintln(stderr, "usage: provenance-runner execute <job.json|->")
+	return runContext(context.Background(), arguments, stdin, stdout, stderr)
+}
+
+func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(arguments) != 2 {
+		writeUsage(stderr)
+		return 2
+	}
+	if arguments[0] == "connect" {
+		return runConnect(ctx, arguments[1], stderr)
+	}
+	if arguments[0] != "execute" {
+		writeUsage(stderr)
 		return 2
 	}
 
@@ -49,6 +67,38 @@ func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	return writeResult(stdout, executor.Execute(context.Background(), job))
+}
+
+func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		fmt.Fprintln(stderr, "connect runner: this alpha advertises and requires linux/amd64")
+		return 1
+	}
+	config, err := gatewayclient.LoadConfig(configPath, buildinfo.Version)
+	if err != nil {
+		fmt.Fprintf(stderr, "connect runner: %v\n", err)
+		return 1
+	}
+	client, err := gatewayclient.Dial(config)
+	if err != nil {
+		fmt.Fprintf(stderr, "connect runner: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := client.Close(); err != nil {
+			fmt.Fprintf(stderr, "close gateway connection: %v\n", err)
+		}
+	}()
+	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(stderr, "connect runner: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func writeUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "usage: provenance-runner execute <job.json|->")
+	fmt.Fprintln(writer, "       provenance-runner connect <connect.json>")
 }
 
 func readJob(path string, stdin io.Reader) ([]byte, error) {
