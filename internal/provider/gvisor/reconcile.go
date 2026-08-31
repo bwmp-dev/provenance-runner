@@ -13,6 +13,7 @@ import (
 type bundleMetadata struct {
 	Version     int    `json:"version"`
 	ContainerID string `json:"containerId"`
+	Phase       string `json:"phase"`
 }
 
 func (p *Provider) Reconcile(ctx context.Context) error {
@@ -34,12 +35,23 @@ func (p *Provider) Reconcile(ctx context.Context) error {
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("inspect bundle %q: %w", entry.Name(), err))
 			continue
 		}
-		if metadata.Version != metadataVersion || !validContainerID(metadata.ContainerID) {
+		if metadata.Version != metadataVersion || metadata.Phase != metadataPhasePrepared || !validContainerID(metadata.ContainerID) {
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("inspect bundle %q: invalid ownership metadata", entry.Name()))
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(reconciliationErrors, err)...)
+		}
+		attempted, err := runWasAttempted(bundle)
+		if err != nil {
+			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("inspect bundle %q run-attempt state: %w", entry.Name(), err))
+			continue
+		}
+		if !attempted {
+			if err := removeOwnedBundle(p.config.BundleRoot, bundle); err != nil {
+				reconciliationErrors = append(reconciliationErrors, err)
+			}
+			continue
 		}
 		result := p.runner.Run(ctx, command{
 			Path: p.config.RunscPath,
@@ -54,6 +66,17 @@ func (p *Provider) Reconcile(ctx context.Context) error {
 		}
 	}
 	return errors.Join(reconciliationErrors...)
+}
+
+func runWasAttempted(bundle string) (bool, error) {
+	_, err := os.Lstat(filepath.Join(bundle, attemptName))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 func readMetadata(path string) (bundleMetadata, error) {

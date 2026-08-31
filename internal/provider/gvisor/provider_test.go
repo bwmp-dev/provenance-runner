@@ -68,7 +68,7 @@ func TestPrepareWritesContainedOCIConfiguration(t *testing.T) {
 	if spec.Process.Cwd != "/workspace" {
 		t.Errorf("Process.Cwd = %q", spec.Process.Cwd)
 	}
-	if !reflect.DeepEqual(spec.Process.Env, []string{"A=first", "HOME=/workspace", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TMPDIR=/workspace/tmp", "Z=last"}) {
+	if !reflect.DeepEqual(spec.Process.Env, []string{"A=first", "HOME=/workspace", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TMPDIR=/tmp", "Z=last"}) {
 		t.Errorf("Process.Env = %#v", spec.Process.Env)
 	}
 
@@ -88,16 +88,40 @@ func TestPrepareWritesContainedOCIConfiguration(t *testing.T) {
 	if spec.Linux.Resources.PIDs.Limit != 64 {
 		t.Errorf("PIDs = %#v", spec.Linux.Resources.PIDs)
 	}
-	if !reflect.DeepEqual(spec.Linux.Resources.Devices, []ociDeviceCgroup{{Allow: false, Access: "rwm"}}) {
-		t.Errorf("Devices = %#v", spec.Linux.Resources.Devices)
+	wantDevices := []ociDevice{
+		{Path: "/dev/null", Type: "c", Major: 1, Minor: 3, FileMode: 0o666},
+		{Path: "/dev/zero", Type: "c", Major: 1, Minor: 5, FileMode: 0o666},
+		{Path: "/dev/full", Type: "c", Major: 1, Minor: 7, FileMode: 0o666},
+		{Path: "/dev/random", Type: "c", Major: 1, Minor: 8, FileMode: 0o666},
+		{Path: "/dev/urandom", Type: "c", Major: 1, Minor: 9, FileMode: 0o666},
+		{Path: "/dev/tty", Type: "c", Major: 5, Minor: 0, FileMode: 0o666},
+	}
+	if !reflect.DeepEqual(spec.Linux.Devices, wantDevices) {
+		t.Errorf("Linux.Devices = %#v", spec.Linux.Devices)
+	}
+	if len(spec.Linux.Resources.Devices) != len(spec.Linux.Devices)+1 || spec.Linux.Resources.Devices[0] != (ociDeviceCgroup{Allow: false, Access: "rwm"}) {
+		t.Errorf("device cgroup rules = %#v", spec.Linux.Resources.Devices)
+	}
+	for index, device := range spec.Linux.Devices {
+		rule := spec.Linux.Resources.Devices[index+1]
+		if !rule.Allow || rule.Type != "c" || rule.Major == nil || *rule.Major != device.Major || rule.Minor == nil || *rule.Minor != device.Minor || rule.Access != "rwm" {
+			t.Errorf("device rule %d = %#v for device %#v", index, rule, device)
+		}
+		if device.FileMode != 0o666 || device.UID != 0 || device.GID != 0 {
+			t.Errorf("device ownership/mode = %#v", device)
+		}
 	}
 	if spec.Linux.CgroupsPath != "provenance/"+prepared.containerID {
 		t.Errorf("CgroupsPath = %q", spec.Linux.CgroupsPath)
 	}
 
 	workspace := findMount(t, spec.Mounts, "/workspace")
-	if workspace.Type != "tmpfs" || !containsAll(workspace.Options, "nosuid", "nodev", "mode=0700", "uid=65532", "gid=65532", "size=33554432") {
+	if workspace.Type != "tmpfs" || !containsAll(workspace.Options, "nosuid", "nodev", "mode=0700", "uid=65532", "gid=65532", "size=16777216") {
 		t.Errorf("workspace mount = %#v", workspace)
+	}
+	temporary := findMount(t, spec.Mounts, "/tmp")
+	if temporary.Type != "tmpfs" || !containsAll(temporary.Options, "nosuid", "nodev", "mode=0700", "uid=65532", "gid=65532", "size=16777216") {
+		t.Errorf("temporary mount = %#v", temporary)
 	}
 	inputs := findMount(t, spec.Mounts, "/inputs")
 	if inputs.Source != filepath.Join(roots.inputs, "job-1") || !reflect.DeepEqual(inputs.Options, []string{"rbind", "ro", "nosuid", "nodev", "noexec"}) {
@@ -107,6 +131,9 @@ func TestPrepareWritesContainedOCIConfiguration(t *testing.T) {
 		if strings.Contains(strings.ToLower(mount.Source), "docker.sock") || strings.Contains(strings.ToLower(mount.Destination), "docker.sock") {
 			t.Fatalf("Docker socket exposed by mount %#v", mount)
 		}
+		if strings.HasPrefix(mount.Destination, "/dev") && mount.Type == "bind" {
+			t.Fatalf("host device exposed by bind mount %#v", mount)
+		}
 	}
 	for _, limit := range spec.Process.Rlimits {
 		if limit.Type == "RLIMIT_FSIZE" && (limit.Hard != 32<<20 || limit.Soft != 32<<20) {
@@ -115,6 +142,16 @@ func TestPrepareWritesContainedOCIConfiguration(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(prepared.bundle, metadataName)); err != nil {
 		t.Errorf("metadata file error = %v", err)
+	}
+	metadata, err := readMetadata(filepath.Join(prepared.bundle, metadataName))
+	if err != nil {
+		t.Fatalf("readMetadata() error = %v", err)
+	}
+	if metadata.Phase != metadataPhasePrepared {
+		t.Errorf("metadata phase = %q", metadata.Phase)
+	}
+	if _, err := os.Stat(filepath.Join(prepared.bundle, attemptName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("run-attempt marker exists before Execute: %v", err)
 	}
 	if len(runner.commands()) != 0 {
 		t.Errorf("runtime invoked during preparation: %#v", runner.commands())
@@ -141,6 +178,13 @@ func TestExecuteUsesHardenedRunscFlagsAndCollectsBoundedOutput(t *testing.T) {
 	}
 	if outcome.ExitCode == nil || *outcome.ExitCode != 0 || outcome.Failure != nil {
 		t.Errorf("Execute() outcome = %#v", outcome)
+	}
+	attempt, err := readMetadata(filepath.Join(prepared.bundle, attemptName))
+	if err != nil {
+		t.Fatalf("read run-attempt metadata: %v", err)
+	}
+	if attempt.ContainerID != prepared.containerID || attempt.Phase != metadataPhaseAttempted {
+		t.Errorf("run-attempt metadata = %#v", attempt)
 	}
 	bundle, err := prepared.Collect(context.Background())
 	if err != nil {
@@ -300,6 +344,9 @@ func TestCleanupRetainsBundleForRetryWhenDeleteFails(t *testing.T) {
 		return successResult()
 	}
 	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+	if err := prepared.markRunAttempted(); err != nil {
+		t.Fatalf("markRunAttempted() error = %v", err)
+	}
 	if err := prepared.Cleanup(context.Background()); err == nil {
 		t.Fatal("Cleanup() error = nil")
 	}

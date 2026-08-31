@@ -24,15 +24,19 @@ import (
 )
 
 const (
-	ProviderName           = "gvisor"
-	containerUID    uint32 = 65532
-	containerGID    uint32 = 65532
-	cleanupTimeout         = 10 * time.Second
-	metadataName           = ".provenance-gvisor.json"
-	metadataVersion        = 1
-	// runsc reserves 128 for failures in the runtime command itself.
-	runscFailureExitCode = 128
+	ProviderName                  = "gvisor"
+	containerUID           uint32 = 65532
+	containerGID           uint32 = 65532
+	cleanupTimeout                = 10 * time.Second
+	metadataName                  = ".provenance-gvisor.json"
+	attemptName                   = ".provenance-run-attempted"
+	metadataVersion               = 1
+	metadataPhasePrepared         = "prepared"
+	metadataPhaseAttempted        = "run_attempted"
 )
+
+// runsc reserves 128 for failures in the runtime command itself.
+const runscFailureExitCode = 128
 
 var safeJobID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
@@ -299,6 +303,9 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	if err != nil {
 		return execution.ExecutionOutcome{}, err
 	}
+	if err := e.markRunAttempted(); err != nil {
+		return execution.ExecutionOutcome{}, fmt.Errorf("mark gVisor run attempted: %w", err)
+	}
 	result := e.provider.runner.Run(ctx, command{
 		Path:   e.provider.config.RunscPath,
 		Args:   e.provider.runArguments("run", "--bundle="+e.bundle, e.containerID),
@@ -379,12 +386,18 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	result := e.provider.runner.Run(ctx, command{
-		Path: e.provider.config.RunscPath,
-		Args: e.provider.runArguments("delete", "--force", e.containerID),
-	})
-	if result.Err != nil {
-		return fmt.Errorf("delete gVisor container: %w", result.Err)
+	attempted, err := runWasAttempted(e.bundle)
+	if err != nil {
+		return fmt.Errorf("inspect gVisor run-attempt state: %w", err)
+	}
+	if attempted {
+		result := e.provider.runner.Run(ctx, command{
+			Path: e.provider.config.RunscPath,
+			Args: e.provider.runArguments("delete", "--force", e.containerID),
+		})
+		if result.Err != nil {
+			return fmt.Errorf("delete gVisor container: %w", result.Err)
+		}
 	}
 	if err := removeOwnedBundle(e.provider.config.BundleRoot, e.bundle); err != nil {
 		return err
@@ -394,11 +407,16 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 }
 
 func (e *preparedEnvironment) writeMetadata() error {
-	metadata := bundleMetadata{Version: metadataVersion, ContainerID: e.containerID}
+	metadata := bundleMetadata{Version: metadataVersion, ContainerID: e.containerID, Phase: metadataPhasePrepared}
 	if err := writeJSONFile(filepath.Join(e.bundle, metadataName), metadata); err != nil {
 		return fmt.Errorf("write gVisor bundle metadata: %w", err)
 	}
 	return nil
+}
+
+func (e *preparedEnvironment) markRunAttempted() error {
+	metadata := bundleMetadata{Version: metadataVersion, ContainerID: e.containerID, Phase: metadataPhaseAttempted}
+	return writeJSONFile(filepath.Join(e.bundle, attemptName), metadata)
 }
 
 func (p *Provider) runArguments(arguments ...string) []string {
@@ -424,7 +442,7 @@ func environmentVariables(values map[string]string) []string {
 	merged := map[string]string{
 		"HOME":   "/workspace",
 		"PATH":   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"TMPDIR": "/workspace/tmp",
+		"TMPDIR": "/tmp",
 	}
 	for key, value := range values {
 		merged[key] = value
@@ -534,7 +552,13 @@ func writeJSONFile(path string, value any) error {
 	if _, err := file.Write(content); err != nil {
 		return errors.Join(err, file.Close())
 	}
-	return file.Close()
+	if err := file.Sync(); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 type command struct {

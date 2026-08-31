@@ -54,7 +54,7 @@ func TestRunscSmoke(t *testing.T) {
 
 	config := configuration{
 		Command:     "/bin/sh",
-		Arguments:   []string{"-c", `test "$(id -u)" = 65532 && mkdir -p /workspace/tmp && touch /workspace/ok && ! touch /provenance-root-write-test && test ! -S /run/docker.sock && echo gvisor-smoke-ok`},
+		Arguments:   []string{"-c", `test "$(id -u)" = 65532 && test "$TMPDIR" = /tmp && touch /workspace/ok && touch /tmp/ok && ! touch /provenance-root-write-test && test ! -S /run/docker.sock && echo gvisor-smoke-ok`},
 		Network:     "none",
 		MemoryBytes: 128 << 20,
 		CPUMillis:   500,
