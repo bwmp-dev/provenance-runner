@@ -31,7 +31,22 @@ func NewManager(root string) (*Manager, error) {
 	if err := os.MkdirAll(absoluteRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("create workspace manager root: %w", err)
 	}
-	info, err := os.Stat(absoluteRoot)
+	info, err := os.Lstat(absoluteRoot)
+	if err != nil {
+		return nil, fmt.Errorf("inspect workspace manager root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, errors.New("create workspace manager: root must be a directory and cannot be a symbolic link")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace manager root: %w", err)
+	}
+	absoluteRoot = resolvedRoot
+	if err := os.Chmod(absoluteRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("restrict workspace manager root: %w", err)
+	}
+	info, err = os.Stat(absoluteRoot)
 	if err != nil {
 		return nil, fmt.Errorf("inspect workspace manager root: %w", err)
 	}

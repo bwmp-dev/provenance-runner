@@ -81,6 +81,24 @@ func TestWorkspaceMakesInputsReadableWithoutOpeningManagerRoot(t *testing.T) {
 	}
 }
 
+func TestWorkspaceManagerRejectsSymlinkRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symbolic links requires optional Windows privileges")
+	}
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(link); err == nil {
+		t.Fatal("NewManager() error = nil")
+	}
+}
+
 func TestWorkspaceExtractsVerifiedRuntimeArchive(t *testing.T) {
 	archive := tarGzip(t, []tarEntry{
 		{name: "runtime/", typeflag: tar.TypeDir, mode: 0o755},
