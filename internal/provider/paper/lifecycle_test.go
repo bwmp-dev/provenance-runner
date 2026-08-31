@@ -105,6 +105,42 @@ func TestProbeLifecycleMapsCompletedCommandEvents(t *testing.T) {
 	}
 }
 
+func TestProbeLifecycleAcceptsPinnedProbeOutputTruncationSequence(t *testing.T) {
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}}}}}
+	output := commandProbeOutput(true)
+	output.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":4,"observedBytes":8,"truncated":true}`)
+	output.StructuredEvents = append(output.StructuredEvents[:11], output.StructuredEvents[12:]...)
+	output.StructuredEvents = append(output.StructuredEvents[:11], append([]execution.StructuredEvent{probeStructuredEvent(13, "CLASSIFICATION", `{"code":"command_output_truncated","testId":"version-command"}`)}, output.StructuredEvents[11:]...)...)
+	output.StructuredEvents[12] = probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
+	output.StructuredEvents[13] = probeStructuredEvent(15, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
+
+	events, err := validateProbeLifecycle(output, plan)
+	if err == nil {
+		t.Fatal("validateProbeLifecycle() error = nil for failed command plan")
+	}
+	if strings.Contains(err.Error(), "out of order") || strings.Contains(err.Error(), "contradicts") {
+		t.Fatalf("valid pinned truncation sequence was rejected as contradictory: %v", err)
+	}
+	var foundClassification bool
+	for _, event := range events {
+		if event.Kind == "CLASSIFICATION" && strings.Contains(string(event.Payload), `"code":"command_output_truncated"`) {
+			foundClassification = true
+		}
+	}
+	if !foundClassification {
+		t.Fatalf("stable truncation classification was not preserved in %#v", events)
+	}
+}
+
+func TestProbeLifecycleRejectsUnmarkedShortCommandOutput(t *testing.T) {
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}}}}}
+	output := commandProbeOutput(true)
+	output.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":4,"observedBytes":8,"truncated":false}`)
+	if _, err := validateProbeLifecycle(output, plan); err == nil || !strings.Contains(err.Error(), "unequal capturedBytes") {
+		t.Fatalf("short unmarked output error = %v", err)
+	}
+}
+
 func TestProbeLifecycleRejectsCommandFailureUnknownClassificationAndMissingCompletion(t *testing.T) {
 	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}}}}}
 
@@ -174,6 +210,7 @@ func TestCommandProbeStateRejectsSuccessAfterNegativeEvidence(t *testing.T) {
 				{kind: "COMMAND_REGISTRATION", data: `{"registered":true,"status":"REGISTERED"}`},
 				{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
 				{kind: "COMMAND_OUTPUT", data: `{"truncated":true,"capturedBytes":4,"observedBytes":8}`},
+				{kind: "COMMAND_EXECUTION_COMPLETED", data: `{"status":"COMPLETED","dispatched":true}`},
 			},
 		},
 		{

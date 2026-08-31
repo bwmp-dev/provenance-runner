@@ -168,6 +168,9 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 		if captured > observed {
 			return errors.New("capturedBytes exceeds observedBytes")
 		}
+		if !truncated && captured != observed {
+			return errors.New("non-truncated output has unequal capturedBytes and observedBytes")
+		}
 		s.outputSeen = true
 		s.outputTruncated = truncated
 		if truncated {
@@ -193,7 +196,7 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 			if !s.outputSeen {
 				return errors.New("completed execution has no output event")
 			}
-			if s.failure {
+			if s.failure && !s.outputTruncated {
 				return errors.New("completed execution contradicts earlier failure evidence")
 			}
 		case "TIMED_OUT":
@@ -280,8 +283,8 @@ func (s *commandProbeState) acceptClassification(code string) error {
 			return errors.New("timeout classification has no timeout event")
 		}
 	case "command_output_truncated":
-		if !s.outputTruncated {
-			return errors.New("output truncation classification has no truncated output")
+		if !s.outputTruncated || !s.executionCompleted || s.executionStatus != "COMPLETED" {
+			return errors.New("output truncation classification has no completed truncated execution")
 		}
 	case "command_assertion_failure":
 		if !s.assertionFailure {
