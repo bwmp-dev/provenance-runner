@@ -223,6 +223,82 @@ func TestProbeLifecycleCorrelatesTestPlanTimeout(t *testing.T) {
 	}
 }
 
+func TestProbeLifecycleAcceptsPinnedMultiCommandTimeout(t *testing.T) {
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{
+		{ID: "first-command", Assertions: []commandAssertion{{}}},
+		{ID: "second-command", Assertions: []commandAssertion{{}}},
+	}}
+
+	events, err := validateProbeLifecycle(pinnedMultiCommandTimeoutOutput(), plan)
+	if err == nil {
+		t.Fatal("validateProbeLifecycle() error = nil for timed-out command plan")
+	}
+	if strings.Contains(err.Error(), "missing command completion") || strings.Contains(err.Error(), "second-command") {
+		t.Fatalf("untouched trailing command was treated as incomplete: %v", err)
+	}
+	expectedKinds := []string{
+		"TEST_PLAN", "PROBE_LOADED", "SERVER_LOADED", "STABILIZATION_STARTED", "TARGET_REQUIREMENT",
+		"STABILIZATION_COMPLETED", "SERVER_READY", "COMMAND_REGISTRATION", "COMMAND_EXECUTION_STARTED",
+		"COMMAND_TIMEOUT", "COMMAND_EXECUTION_COMPLETED", "CLASSIFICATION", "COMMAND_TEST_COMPLETED",
+		"TEST_PLAN", "CLEAN_SHUTDOWN_REQUESTED", "SERVER_STOPPED",
+	}
+	if len(events) != len(expectedKinds) {
+		t.Fatalf("mapped event count = %d, want %d", len(events), len(expectedKinds))
+	}
+	for index, expected := range expectedKinds {
+		if events[index].Kind != expected {
+			t.Fatalf("mapped event %d = %s, want %s", index, events[index].Kind, expected)
+		}
+	}
+	if !strings.Contains(string(events[11].Payload), `"code":"command_timeout"`) {
+		t.Fatalf("timeout classification was not preserved: %s", events[11].Payload)
+	}
+}
+
+func TestProbeLifecycleRejectsCommandEventsAroundPinnedTimeout(t *testing.T) {
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{
+		{ID: "first-command", Assertions: []commandAssertion{{}}},
+		{ID: "second-command", Assertions: []commandAssertion{{}}},
+	}}
+	tests := []struct {
+		name      string
+		mutate    func([]execution.StructuredEvent) []execution.StructuredEvent
+		expectErr string
+	}{
+		{
+			name: "gap before timeout",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				return insertProbeEvent(events, 8, probeStructuredEvent(9, "COMMAND_REGISTRATION", `{"testId":"second-command","registered":true,"status":"REGISTERED"}`))
+			},
+			expectErr: "skips configured command",
+		},
+		{
+			name: "later command after timeout",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				return insertProbeEvent(events, 13, probeStructuredEvent(14, "COMMAND_REGISTRATION", `{"testId":"second-command","registered":true,"status":"REGISTERED"}`))
+			},
+			expectErr: "after a timed-out command",
+		},
+		{
+			name: "timed-out command incomplete",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				return removeProbeEvent(events, "COMMAND_EXECUTION_COMPLETED", "first-command")
+			},
+			expectErr: "missing execution completion",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := pinnedMultiCommandTimeoutOutput()
+			output.StructuredEvents = test.mutate(output.StructuredEvents)
+			_, err := validateProbeLifecycle(output, plan)
+			if err == nil || !strings.Contains(err.Error(), test.expectErr) {
+				t.Fatalf("validateProbeLifecycle() error = %v, want %q", err, test.expectErr)
+			}
+		})
+	}
+}
+
 func TestCommandProbeStateRejectsPartialTruncationClassification(t *testing.T) {
 	state := newCommandProbeState(consoleCommandTest{ID: "version-command", Assertions: []commandAssertion{{}, {}}})
 	for _, event := range []struct {
@@ -405,6 +481,51 @@ func commandProbeOutput(passed bool) execution.CollectedOutput {
 		eventBytes += int64(len(event.Payload))
 	}
 	return execution.CollectedOutput{StructuredEvents: events, EvidenceUsage: execution.EvidenceUsage{StructuredEventCount: int64(len(events)), StructuredEventBytes: eventBytes}}
+}
+
+func pinnedMultiCommandTimeoutOutput() execution.CollectedOutput {
+	events := []execution.StructuredEvent{
+		probeStructuredEvent(1, "TEST_PLAN", `{"status":"LOADED","consoleTests":2,"maximumCommandOutputBytes":4096}`),
+		probeStructuredEvent(2, "PROBE_LOADED", `{}`),
+		probeStructuredEvent(3, "SERVER_LOADED", `{}`),
+		probeStructuredEvent(4, "STABILIZATION_STARTED", `{}`),
+		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(6, "STABILIZATION_COMPLETED", `{}`),
+		probeStructuredEvent(7, "SERVER_READY", `{"requirementsSatisfied":true}`),
+		probeStructuredEvent(8, "COMMAND_REGISTRATION", `{"testId":"first-command","registered":true,"status":"REGISTERED"}`),
+		probeStructuredEvent(9, "COMMAND_EXECUTION_STARTED", `{"testId":"first-command","timeoutSeconds":10}`),
+		probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"first-command","timeoutSeconds":10}`),
+		probeStructuredEvent(11, "COMMAND_EXECUTION_COMPLETED", `{"testId":"first-command","status":"TIMED_OUT"}`),
+		probeStructuredEvent(12, "CLASSIFICATION", `{"code":"command_timeout","testId":"first-command"}`),
+		probeStructuredEvent(13, "COMMAND_TEST_COMPLETED", `{"testId":"first-command","passed":false}`),
+		probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":2,"passed":false,"timedOut":true}`),
+		probeStructuredEvent(15, "CLEAN_SHUTDOWN_REQUESTED", `{}`),
+		probeStructuredEvent(16, "SERVER_STOPPED", `{"shutdownRequested":true}`),
+	}
+	var eventBytes int64
+	for _, event := range events {
+		eventBytes += int64(len(event.Payload))
+	}
+	return execution.CollectedOutput{StructuredEvents: events, EvidenceUsage: execution.EvidenceUsage{StructuredEventCount: int64(len(events)), StructuredEventBytes: eventBytes}}
+}
+
+func insertProbeEvent(events []execution.StructuredEvent, index int, event execution.StructuredEvent) []execution.StructuredEvent {
+	return append(events[:index], append([]execution.StructuredEvent{event}, events[index:]...)...)
+}
+
+func removeProbeEvent(events []execution.StructuredEvent, eventType, testID string) []execution.StructuredEvent {
+	for index, event := range events {
+		envelope, err := decodeProbeEnvelope(event.Payload)
+		if err == nil && envelope.Type == eventType {
+			var data struct {
+				TestID string `json:"testId"`
+			}
+			if json.Unmarshal(envelope.Data, &data) == nil && data.TestID == testID {
+				return append(events[:index], events[index+1:]...)
+			}
+		}
+	}
+	return events
 }
 
 func contains(values []string, target string) bool {

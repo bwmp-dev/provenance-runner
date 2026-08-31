@@ -101,6 +101,10 @@ func newCommandProbeState(test consoleCommandTest) *commandProbeState {
 	return &commandProbeState{expectedAssertions: expected, seenAssertions: make(map[string]struct{}, len(expected))}
 }
 
+func (s *commandProbeState) observed() bool {
+	return s.registrationSeen || s.started || s.outputSeen || s.timeoutSeen || s.executionCompleted || s.completionSeen || len(s.seenAssertions) > 0
+}
+
 func (s *commandProbeState) accept(eventType string, data json.RawMessage) error {
 	switch eventType {
 	case "COMMAND_REGISTRATION":
@@ -330,8 +334,12 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 		requirements[strings.ToLower(dependency)] = false
 	}
 	commandTests := make(map[string]*commandProbeState, len(plan.Console))
-	for _, test := range plan.Console {
+	commandOrder := make([]string, len(plan.Console))
+	commandIndexes := make(map[string]int, len(plan.Console))
+	for index, test := range plan.Console {
 		commandTests[test.ID] = newCommandProbeState(test)
+		commandOrder[index] = test.ID
+		commandIndexes[test.ID] = index
 	}
 
 	events := make([]execution.StructuredEvent, 0, len(output.StructuredEvents))
@@ -339,6 +347,25 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 	planLoaded := false
 	planCompleted := false
 	serverReadySatisfied := false
+	nextCommandIndex := 0
+	timedOutCommandIndex := -1
+	commandStateForEvent := func(testID string) (*commandProbeState, int, error) {
+		state, expected := commandTests[testID]
+		if !expected {
+			return nil, 0, fmt.Errorf("references unknown command test %q", testID)
+		}
+		index := commandIndexes[testID]
+		if timedOutCommandIndex >= 0 && index > timedOutCommandIndex {
+			return nil, 0, errors.New("command event occurred after a timed-out command")
+		}
+		if index != nextCommandIndex {
+			if index > nextCommandIndex {
+				return nil, 0, fmt.Errorf("command event skips configured command %q", commandOrder[nextCommandIndex])
+			}
+			return nil, 0, fmt.Errorf("command event for %q occurred after its completion", testID)
+		}
+		return state, index, nil
+	}
 	for _, event := range output.StructuredEvents {
 		if event.Kind != probeEventKind {
 			return events, fmt.Errorf("unexpected structured event kind %q", event.Kind)
@@ -427,12 +454,18 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 			if err != nil {
 				return events, err
 			}
-			state, expected := commandTests[testID]
-			if !expected {
-				return events, fmt.Errorf("probe event %s references unknown command test %q", envelope.Type, testID)
+			state, commandIndex, err := commandStateForEvent(testID)
+			if err != nil {
+				return events, fmt.Errorf("probe event %s: %w", envelope.Type, err)
 			}
 			if err := state.accept(envelope.Type, envelope.Data); err != nil {
 				return events, fmt.Errorf("command test %q: %w", testID, err)
+			}
+			if state.timeoutSeen {
+				timedOutCommandIndex = commandIndex
+			}
+			if state.completionSeen {
+				nextCommandIndex++
 			}
 		case "TARGET_REQUIREMENT":
 			name, satisfied, err := decodeRequirement(envelope.Data)
@@ -459,12 +492,15 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 				if err != nil {
 					return events, fmt.Errorf("command classification %s: %w", code, err)
 				}
-				state, expected := commandTests[testID]
-				if !expected {
-					return events, fmt.Errorf("command classification %s references unknown command test %q", code, testID)
+				state, commandIndex, err := commandStateForEvent(testID)
+				if err != nil {
+					return events, fmt.Errorf("command classification %s: %w", code, err)
 				}
 				if err := state.acceptClassification(code); err != nil {
 					return events, fmt.Errorf("command test %q: %w", testID, err)
+				}
+				if state.timeoutSeen {
+					timedOutCommandIndex = commandIndex
 				}
 			}
 			if lifecycleFailure == nil {
@@ -501,9 +537,19 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 		if !planCompleted {
 			return events, errors.New("missing completed TEST_PLAN event")
 		}
-		for testID, state := range commandTests {
+		for index, testID := range commandOrder {
+			state := commandTests[testID]
+			if timedOutCommandIndex >= 0 && index > timedOutCommandIndex {
+				if state.observed() {
+					return events, fmt.Errorf("command test %q emitted events after a timed-out command", testID)
+				}
+				continue
+			}
 			if !state.completionSeen {
 				return events, fmt.Errorf("missing command completion for %q", testID)
+			}
+			if state.started && !state.executionCompleted {
+				return events, fmt.Errorf("missing execution completion for %q", testID)
 			}
 			if state.failure && lifecycleFailure == nil {
 				lifecycleFailure = fmt.Errorf("command test %q failed", testID)
