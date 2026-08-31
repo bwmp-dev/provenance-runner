@@ -47,6 +47,34 @@ type EnvironmentProvider interface {
 	Resolve(context.Context, Request) (Environment, error)
 }
 
+// IsolatedWorkloadProvider is the trusted composition boundary between a
+// product environment and its sandbox. Job JSON cannot select host paths or
+// read-only mounts directly.
+type IsolatedWorkloadProvider interface {
+	ResolveWorkload(context.Context, Request, IsolatedWorkload) (Environment, error)
+}
+
+type IsolatedWorkload struct {
+	Command        string
+	Arguments      []string
+	Environment    map[string]string
+	InputsPath     string
+	ReadOnlyMounts []ReadOnlyMount
+	Network        string
+	MemoryBytes    int64
+	CPUMillis      int64
+	PIDs           int64
+	DiskBytes      int64
+	MaxLineBytes   int64
+	RedactSecrets  []string
+}
+
+type ReadOnlyMount struct {
+	Source      string
+	Destination string
+	Executable  bool
+}
+
 type Environment interface {
 	Identity() string
 	// Prepare must return ownership of partially allocated resources with its error,

@@ -158,6 +158,61 @@ func TestPrepareWritesContainedOCIConfiguration(t *testing.T) {
 	}
 }
 
+func TestResolveWorkloadMountsOnlyTrustedReadOnlyInputs(t *testing.T) {
+	provider, _, roots := testProvider(t)
+	jobRoot := filepath.Join(roots.inputs, "job-1")
+	runtimeRoot := filepath.Join(jobRoot, "runtime")
+	if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workload := execution.IsolatedWorkload{
+		Command:        "/bin/sh",
+		Arguments:      []string{"-c", "true"},
+		InputsPath:     jobRoot,
+		ReadOnlyMounts: []execution.ReadOnlyMount{{Source: runtimeRoot, Destination: "/runtime", Executable: true}},
+		Network:        "none",
+		MemoryBytes:    256 << 20,
+		CPUMillis:      1000,
+		PIDs:           32,
+		DiskBytes:      64 << 20,
+	}
+	environment, err := provider.ResolveWorkload(context.Background(), execution.Request{
+		JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024},
+	}, workload)
+	if err != nil {
+		t.Fatalf("ResolveWorkload() error = %v", err)
+	}
+	preparedValue, err := environment.Prepare(context.Background())
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	prepared := preparedValue.(*preparedEnvironment)
+	t.Cleanup(func() { _ = prepared.Cleanup(context.Background()) })
+	content, err := os.ReadFile(filepath.Join(prepared.bundle, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec ociSpec
+	if err := json.Unmarshal(content, &spec); err != nil {
+		t.Fatal(err)
+	}
+	mount := findMount(t, spec.Mounts, "/runtime")
+	if mount.Source != runtimeRoot || !containsAll(mount.Options, "bind", "ro", "nosuid", "nodev") || slices.Contains(mount.Options, "noexec") {
+		t.Errorf("runtime mount = %#v", mount)
+	}
+
+	outside := t.TempDir()
+	workload.ReadOnlyMounts[0].Source = outside
+	if _, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, workload); err == nil {
+		t.Error("outside mount ResolveWorkload() error = nil")
+	}
+	workload.ReadOnlyMounts[0].Source = runtimeRoot
+	workload.ReadOnlyMounts[0].Destination = "/etc"
+	if _, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, workload); err == nil {
+		t.Error("unsafe destination ResolveWorkload() error = nil")
+	}
+}
+
 func TestExecuteUsesHardenedRunscFlagsAndCollectsBoundedOutput(t *testing.T) {
 	provider, runner, _ := testProvider(t)
 	runner.run = func(_ context.Context, invocation command) commandResult {

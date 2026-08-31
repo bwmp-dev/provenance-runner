@@ -75,6 +75,85 @@ func (w *Workspace) Root() string {
 	return w.root
 }
 
+func (w *Workspace) WriteFile(ctx context.Context, relativePath string, content []byte, mode os.FileMode) (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return "", ErrWorkspaceClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("write workspace file: %w", err)
+	}
+	cleanedPath, err := cleanRelativePath(relativePath)
+	if err != nil {
+		return "", fmt.Errorf("write workspace file: %w", err)
+	}
+	if mode.Perm()&0o022 != 0 || mode.Perm()&^0o755 != 0 {
+		return "", errors.New("write workspace file: mode is not permitted")
+	}
+	destination := filepath.Join(w.root, cleanedPath)
+	if err := ensureDescendant(w.root, destination); err != nil {
+		return "", fmt.Errorf("write workspace file: %w", err)
+	}
+	if _, err := os.Lstat(destination); err == nil {
+		return "", fmt.Errorf("write workspace file: destination %q already exists", relativePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("write workspace file: inspect destination: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return "", fmt.Errorf("write workspace file: create destination directory: %w", err)
+	}
+	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
+	if err != nil {
+		return "", fmt.Errorf("write workspace file: %w", err)
+	}
+	if _, err := file.Write(content); err != nil {
+		return "", errors.Join(fmt.Errorf("write workspace file: %w", err), file.Close(), os.Remove(destination))
+	}
+	if err := file.Sync(); err != nil {
+		return "", errors.Join(fmt.Errorf("sync workspace file: %w", err), file.Close(), os.Remove(destination))
+	}
+	if err := file.Close(); err != nil {
+		return "", errors.Join(fmt.Errorf("close workspace file: %w", err), os.Remove(destination))
+	}
+	return destination, nil
+}
+
+func (w *Workspace) MakeSandboxReadable(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return ErrWorkspaceClosed
+	}
+	return filepath.WalkDir(w.root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0o755)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("make workspace sandbox-readable: %q is not a regular file", path)
+		}
+		mode := os.FileMode(0o444)
+		if info.Mode().Perm()&0o111 != 0 {
+			mode = 0o555
+		}
+		return os.Chmod(path, mode)
+	})
+}
+
 func (w *Workspace) Materialize(ctx context.Context, relativePath string, entry *artifact.Entry) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

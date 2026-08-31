@@ -55,6 +55,7 @@ type Provider struct {
 }
 
 var _ execution.EnvironmentProvider = (*Provider)(nil)
+var _ execution.IsolatedWorkloadProvider = (*Provider)(nil)
 
 func New(config Config) (*Provider, error) {
 	if runtime.GOOS != "linux" {
@@ -155,12 +156,58 @@ func (p *Provider) Resolve(ctx context.Context, request execution.Request) (exec
 		}
 		return nil, invalidEnvironment(fmt.Errorf("decode trailing environment data: %w", err))
 	}
-	if err := validateConfiguration(config, request.Limits.MaxOutputBytes); err != nil {
-		return nil, invalidEnvironment(err)
-	}
 	inputs, err := p.jobInputs(request.JobID)
 	if err != nil {
 		return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_inputs_unavailable", err)
+	}
+	return p.resolveWorkload(ctx, request, execution.IsolatedWorkload{
+		Command:       config.Command,
+		Arguments:     config.Arguments,
+		Environment:   config.Environment,
+		InputsPath:    inputs,
+		Network:       config.Network,
+		MemoryBytes:   config.MemoryBytes,
+		CPUMillis:     config.CPUMillis,
+		PIDs:          config.PIDs,
+		DiskBytes:     config.DiskBytes,
+		MaxLineBytes:  config.MaxLineBytes,
+		RedactSecrets: config.RedactSecrets,
+	})
+}
+
+func (p *Provider) ResolveWorkload(ctx context.Context, request execution.Request, workload execution.IsolatedWorkload) (execution.Environment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !safeJobID.MatchString(request.JobID) {
+		return nil, invalidEnvironment(errors.New("job ID must contain only letters, numbers, dots, underscores, and hyphens and be at most 128 bytes"))
+	}
+	return p.resolveWorkload(ctx, request, workload)
+}
+
+func (p *Provider) resolveWorkload(ctx context.Context, request execution.Request, workload execution.IsolatedWorkload) (execution.Environment, error) {
+	config := configuration{
+		Command:       workload.Command,
+		Arguments:     append([]string(nil), workload.Arguments...),
+		Environment:   cloneMap(workload.Environment),
+		Network:       workload.Network,
+		MemoryBytes:   workload.MemoryBytes,
+		CPUMillis:     workload.CPUMillis,
+		PIDs:          workload.PIDs,
+		DiskBytes:     workload.DiskBytes,
+		MaxLineBytes:  workload.MaxLineBytes,
+		RedactSecrets: append([]string(nil), workload.RedactSecrets...),
+	}
+	if err := validateConfiguration(config, request.Limits.MaxOutputBytes); err != nil {
+		return nil, invalidEnvironment(err)
+	}
+	inputs, err := p.validateInputPath(workload.InputsPath)
+	if err != nil {
+		return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_inputs_unavailable", err)
+	}
+	mounts, err := p.validateReadOnlyMounts(workload.ReadOnlyMounts)
+	if err != nil {
+		return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_mounts_invalid", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -169,12 +216,24 @@ func (p *Provider) Resolve(ctx context.Context, request execution.Request) (exec
 		provider: p,
 		config:   config,
 		inputs:   inputs,
+		mounts:   mounts,
 		evidenceConfig: evidence.Config{
 			MaxLineBytes:  config.MaxLineBytes,
 			MaxTotalBytes: request.Limits.MaxOutputBytes,
 			Secrets:       append([]string(nil), config.RedactSecrets...),
 		},
 	}, nil
+}
+
+func cloneMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func invalidEnvironment(err error) error {
@@ -221,7 +280,13 @@ func validateConfiguration(config configuration, maxOutputBytes int64) error {
 }
 
 func (p *Provider) jobInputs(jobID string) (string, error) {
-	path := filepath.Join(p.config.InputsRoot, jobID)
+	return p.validateInputPath(filepath.Join(p.config.InputsRoot, jobID))
+}
+
+func (p *Provider) validateInputPath(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("job inputs path is empty")
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", fmt.Errorf("inspect job inputs: %w", err)
@@ -239,10 +304,63 @@ func (p *Provider) jobInputs(jobID string) (string, error) {
 	return resolved, nil
 }
 
+func (p *Provider) validateReadOnlyMounts(requested []execution.ReadOnlyMount) ([]execution.ReadOnlyMount, error) {
+	mounts := make([]execution.ReadOnlyMount, 0, len(requested))
+	destinations := make(map[string]struct{}, len(requested))
+	for _, mount := range requested {
+		resolved, err := p.validateMountSource(mount.Source)
+		if err != nil {
+			return nil, fmt.Errorf("validate mount source: %w", err)
+		}
+		destination := filepath.ToSlash(filepath.Clean(mount.Destination))
+		if !strings.HasPrefix(destination, "/") || destination == "/" || strings.ContainsRune(destination, '\x00') {
+			return nil, fmt.Errorf("mount destination %q must be an absolute container path", mount.Destination)
+		}
+		if destination != "/runtime" && !strings.HasPrefix(destination, "/runtime/") && !strings.HasPrefix(destination, "/workspace/") {
+			return nil, fmt.Errorf("mount destination %q is outside /runtime and /workspace", destination)
+		}
+		if _, exists := destinations[destination]; exists {
+			return nil, fmt.Errorf("duplicate mount destination %q", destination)
+		}
+		destinations[destination] = struct{}{}
+		mounts = append(mounts, execution.ReadOnlyMount{Source: resolved, Destination: destination, Executable: mount.Executable})
+	}
+	return mounts, nil
+}
+
+func (p *Provider) validateMountSource(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("mount source is empty")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureDescendant(p.config.InputsRoot, absolute); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+		return "", errors.New("mount source must be a regular file or directory and cannot be a symbolic link")
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureDescendant(p.config.InputsRoot, resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
 type environment struct {
 	provider       *Provider
 	config         configuration
 	inputs         string
+	mounts         []execution.ReadOnlyMount
 	evidenceConfig evidence.Config
 }
 
@@ -275,7 +393,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err := prepared.writeMetadata(); err != nil {
 		return nil, errors.Join(err, os.RemoveAll(bundle))
 	}
-	spec := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID)
+	spec := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID, e.mounts)
 	if err := writeJSONFile(filepath.Join(bundle, "config.json"), spec); err != nil {
 		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), os.RemoveAll(bundle))
 	}
