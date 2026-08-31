@@ -99,6 +99,23 @@ func TestWorkspaceManagerRejectsSymlinkRoot(t *testing.T) {
 	}
 }
 
+func TestWorkspaceManagerUsesDedicatedDefaultRoot(t *testing.T) {
+	manager, err := NewManager("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(manager.root) == filepath.Clean(os.TempDir()) {
+		t.Fatal("default workspace manager root is the shared temporary directory")
+	}
+	info, err := os.Stat(manager.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Errorf("default manager mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
 func TestWorkspaceExtractsVerifiedRuntimeArchive(t *testing.T) {
 	archive := tarGzip(t, []tarEntry{
 		{name: "runtime/", typeflag: tar.TypeDir, mode: 0o755},

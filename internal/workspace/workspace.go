@@ -22,7 +22,7 @@ type Manager struct {
 
 func NewManager(root string) (*Manager, error) {
 	if root == "" {
-		root = os.TempDir()
+		root = filepath.Join(os.TempDir(), "provenance-workspaces")
 	}
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
