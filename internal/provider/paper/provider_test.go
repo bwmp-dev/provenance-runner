@@ -69,6 +69,9 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 	if !strings.Contains(strings.Join(workload.Arguments, "\n"), "cp -R /inputs/server/. /workspace/") {
 		t.Errorf("workload does not seed writable workspace: %#v", workload.Arguments)
 	}
+	if !strings.Contains(strings.Join(workload.Arguments, "\n"), `if [ "$status" -eq 125 ]; then exit 126`) {
+		t.Errorf("workload does not preserve reserved wrapper exit 125: %#v", workload.Arguments)
+	}
 	joinedArguments := strings.Join(workload.Arguments, "\x00")
 	for _, expected := range []string{
 		"/runtime/bin/java",
@@ -305,6 +308,46 @@ func TestExecutorClassifiesFailedProbeAssertionWhenJVMExitsZero(t *testing.T) {
 	})
 	if result.Execution == nil || result.Execution.ExitCode == nil || *result.Execution.ExitCode != 0 || result.Classification != execution.ClassificationWorkloadFailure || result.Failure == nil || result.Failure.Code != "paper_lifecycle_failed" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestExecutorClassifiesPaperWorkspaceSeedFailureAsInfrastructure(t *testing.T) {
+	payloads := map[string][]byte{
+		"/paper": []byte("Paper"), "/java": testRuntimeArchive(t, "test-jre"), "/target": []byte("target"), "/probe": []byte("probe"),
+	}
+	server, _ := artifactServer(t, payloads)
+	exitCode := workspaceSeedFailureExitCode
+	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{
+		outcome: &execution.ExecutionOutcome{
+			ExitCode: &exitCode,
+			Failure:  execution.NewFailure(execution.ClassificationWorkloadFailure, "gvisor_process_exit_nonzero", "sandboxed process exited with code 125"),
+		},
+		output: &execution.CollectedOutput{},
+	}}
+	provider := testProvider(t, server, sandbox, payloads, "test-jre")
+	config := validConfiguration(server.URL, payloads)
+	config.Dependencies = nil
+	config.TestPlan.RequiredDependencies = nil
+	environmentJSON, _ := json.Marshal(config)
+	registry, err := execution.NewRegistry(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := execution.NewExecutor(registry, execution.ExecutorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(context.Background(), localjob.Job{
+		SchemaVersion: localjob.SchemaVersion,
+		ID:            "paper-seed-failure",
+		Provider:      ProviderName,
+		Environment:   environmentJSON,
+	})
+	if result.Execution == nil || result.Execution.ExitCode == nil || *result.Execution.ExitCode != workspaceSeedFailureExitCode || result.Classification != execution.ClassificationInfrastructureFailure || result.Failure == nil || result.Failure.Code != "paper_workspace_seed_failed" {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Logs == nil || result.Logs.Error != "" {
+		t.Fatalf("collection masked seed failure: %#v", result.Logs)
 	}
 }
 
@@ -673,6 +716,8 @@ func (e *fakeSandboxEnvironment) Prepare(context.Context) (execution.PreparedEnv
 
 type fakePrepared struct {
 	cleaned    bool
+	outcome    *execution.ExecutionOutcome
+	executeErr error
 	output     *execution.CollectedOutput
 	collectErr error
 	cleanupErr error
@@ -699,7 +744,13 @@ func validateTestURL(uri *url.URL) error {
 	return nil
 }
 
-func (*fakePrepared) Execute(context.Context) (execution.ExecutionOutcome, error) {
+func (p *fakePrepared) Execute(context.Context) (execution.ExecutionOutcome, error) {
+	if p.outcome != nil || p.executeErr != nil {
+		if p.outcome == nil {
+			return execution.ExecutionOutcome{}, p.executeErr
+		}
+		return *p.outcome, p.executeErr
+	}
 	exitCode := 0
 	return execution.ExecutionOutcome{ExitCode: &exitCode}, nil
 }

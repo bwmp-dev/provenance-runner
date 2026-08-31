@@ -33,6 +33,7 @@ const (
 	defaultMaximumPreparationBytes = int64(2 << 30)
 	probeEventPrefix               = "PROVENANCE_PROBE_EVENT_V1:"
 	probeEventKind                 = "paper_probe_event"
+	workspaceSeedFailureExitCode   = 125
 )
 
 var safePluginName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_. -]{0,63}$`)
@@ -537,7 +538,7 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 	}
 	arguments := []string{
 		"-cu",
-		`cp -R /inputs/server/. /workspace/ || exit 125; chmod -R u+rwX /workspace || exit 125; "$@"; status=$?; if [ -f /workspace/provenance-probe-events.ndjson ]; then while IFS= read -r event || [ -n "$event" ]; do printf '%s%s\n' 'PROVENANCE_PROBE_EVENT_V1:' "$event"; done < /workspace/provenance-probe-events.ndjson; fi; exit "$status"`,
+		`cp -R /inputs/server/. /workspace/ || exit 125; chmod -R u+rwX /workspace || exit 125; "$@"; status=$?; if [ -f /workspace/provenance-probe-events.ndjson ]; then while IFS= read -r event || [ -n "$event" ]; do printf '%s%s\n' 'PROVENANCE_PROBE_EVENT_V1:' "$event"; done < /workspace/provenance-probe-events.ndjson; fi; if [ "$status" -eq 125 ]; then exit 126; fi; exit "$status"`,
 		"provenance-paper",
 		"/runtime/bin/java",
 	}
@@ -580,18 +581,27 @@ view-distance=2
 `
 
 type preparedEnvironment struct {
-	mu        sync.Mutex
-	workspace *workspace.Workspace
-	delegate  execution.PreparedEnvironment
-	cleaned   bool
-	plan      testPlan
+	mu                sync.Mutex
+	workspace         *workspace.Workspace
+	delegate          execution.PreparedEnvironment
+	cleaned           bool
+	workspaceSeedFail bool
+	plan              testPlan
 }
 
 func (p *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
 	if p.delegate == nil {
 		return execution.ExecutionOutcome{}, errors.New("execute Paper environment: sandbox was not prepared")
 	}
-	return p.delegate.Execute(ctx)
+	outcome, err := p.delegate.Execute(ctx)
+	if outcome.ExitCode != nil && *outcome.ExitCode == workspaceSeedFailureExitCode {
+		p.mu.Lock()
+		p.workspaceSeedFail = true
+		p.mu.Unlock()
+		outcome.Failure = execution.NewFailure(execution.ClassificationInfrastructureFailure, "paper_workspace_seed_failed", "sandbox could not seed its writable Paper workspace")
+		return outcome, nil
+	}
+	return outcome, err
 }
 
 func (p *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedOutput, error) {
@@ -601,6 +611,12 @@ func (p *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 	output, err := p.delegate.Collect(ctx)
 	if err != nil {
 		return output, err
+	}
+	p.mu.Lock()
+	workspaceSeedFail := p.workspaceSeedFail
+	p.mu.Unlock()
+	if workspaceSeedFail {
+		return output, nil
 	}
 	events, lifecycleErr := validateProbeLifecycle(output, p.plan)
 	output.StructuredEvents = events

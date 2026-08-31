@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/bwmp-dev/provenance-runner/internal/instancelock"
 )
 
 func TestPaperRegistryFailsBeforeExecutionWhenOperatorPinsAreMissing(t *testing.T) {
@@ -32,6 +36,101 @@ func TestPaperRegistrySelectsOperatorConfiguredProvider(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("gVisor provider construction requires Linux")
 	}
+	values := paperEnvironment(t)
+	registry, err := registryForProvider(context.Background(), "paper", func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatalf("registryForProvider() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := registry.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+	provider, exists := registry.Provider("paper")
+	if !exists || provider.Name() != "paper" {
+		t.Fatalf("paper provider = %#v, %v", provider, exists)
+	}
+}
+
+func TestPaperRegistryLockPreventsConcurrentReconciliation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("gVisor provider construction requires Linux")
+	}
+	values := paperEnvironment(t)
+	first, err := registryForProvider(context.Background(), "paper", func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeBundle := filepath.Join(values["PROVENANCE_GVISOR_BUNDLE_ROOT"], "active-job")
+	if err := os.Mkdir(activeBundle, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"version":1,"containerId":"provenance-0123456789abcdef0123456789abcdef","phase":"prepared"}`
+	if err := os.WriteFile(filepath.Join(activeBundle, ".provenance-gvisor.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(activeBundle, ".provenance-run-attempted"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = registryForProvider(context.Background(), "paper", func(name string) string { return values[name] })
+	if !errors.Is(err, instancelock.ErrAlreadyHeld) {
+		t.Fatalf("contending registry error = %v, want ErrAlreadyHeld", err)
+	}
+	if _, err := os.Stat(activeBundle); err != nil {
+		t.Fatalf("active bundle changed during lock contention: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(activeBundle); err != nil {
+		t.Fatal(err)
+	}
+	second, err := registryForProvider(context.Background(), "paper", func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatalf("registry after release error = %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPaperRegistryBoundsReconciliationAndReleasesLockOnFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("gVisor provider construction requires Linux")
+	}
+	values := paperEnvironment(t)
+	if err := os.WriteFile(values["PROVENANCE_RUNSC_PATH"], []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	activeBundle := filepath.Join(values["PROVENANCE_GVISOR_BUNDLE_ROOT"], "abandoned-job")
+	if err := os.MkdirAll(activeBundle, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"version":1,"containerId":"provenance-0123456789abcdef0123456789abcdef","phase":"prepared"}`
+	if err := os.WriteFile(filepath.Join(activeBundle, ".provenance-gvisor.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(activeBundle, ".provenance-run-attempted"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := registryForProvider(ctx, "paper", func(name string) string { return values[name] })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bounded reconciliation error = %v, want deadline exceeded", err)
+	}
+	lock, err := instancelock.Acquire(filepath.Join(values["PROVENANCE_GVISOR_BUNDLE_ROOT"], ".provenance-runner.lock"))
+	if err != nil {
+		t.Fatalf("lock remained held after setup failure: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func paperEnvironment(t *testing.T) map[string]string {
+	t.Helper()
 	root := t.TempDir()
 	runsc := filepath.Join(root, "runsc")
 	if err := os.WriteFile(runsc, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
@@ -59,12 +158,5 @@ func TestPaperRegistrySelectsOperatorConfiguredProvider(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	registry, err := registryForProvider(context.Background(), "paper", func(name string) string { return values[name] })
-	if err != nil {
-		t.Fatalf("registryForProvider() error = %v", err)
-	}
-	provider, exists := registry.Provider("paper")
-	if !exists || provider.Name() != "paper" {
-		t.Fatalf("paper provider = %#v, %v", provider, exists)
-	}
+	return values
 }

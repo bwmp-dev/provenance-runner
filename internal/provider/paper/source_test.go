@@ -216,6 +216,36 @@ func TestSecureDialPinsResolvedAddressAndRejectsRebindingSet(t *testing.T) {
 	}
 }
 
+func TestHTTPSClientClearsLegacyTLSDialBypass(t *testing.T) {
+	policy, err := newHTTPSAllowlist([]string{"artifacts.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyTLSDials atomic.Int32
+	var validatedDials atomic.Int32
+	client, err := clientWithSourcePolicy(&http.Client{Transport: &http.Transport{
+		DialTLS: func(string, string) (net.Conn, error) {
+			legacyTLSDials.Add(1)
+			client, server := net.Pipe()
+			_ = server.Close()
+			return client, nil
+		},
+	}}, policy, staticResolver{addresses: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}, dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		validatedDials.Add(1)
+		return nil, errors.New("unexpected validated dial")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := artifact.HTTPSource{URL: "https://artifacts.example.com/file.jar", UserAgent: DownloadUserAgent, Client: client}
+	if err := source.Fetch(context.Background(), io.Discard); err == nil {
+		t.Fatal("Fetch() error = nil")
+	}
+	if legacyTLSDials.Load() != 0 || validatedDials.Load() != 0 {
+		t.Fatalf("legacy/validated dial counts = %d/%d, want 0/0", legacyTLSDials.Load(), validatedDials.Load())
+	}
+}
+
 type initialURLPolicy struct {
 	initial   string
 	redirects sourcePolicy

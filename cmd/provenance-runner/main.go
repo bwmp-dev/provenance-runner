@@ -38,7 +38,12 @@ func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err))
 	}
-	executor, err := execution.NewExecutor(registry, execution.ExecutorOptions{})
+	defer func() {
+		if err := registry.Close(); err != nil {
+			fmt.Fprintf(stderr, "release runner instance: %v\n", err)
+		}
+	}()
+	executor, err := execution.NewExecutor(registry.Registry, execution.ExecutorOptions{})
 	if err != nil {
 		return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err))
 	}

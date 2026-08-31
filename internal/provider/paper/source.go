@@ -146,6 +146,7 @@ func clientWithSourcePolicy(client *http.Client, policy sourcePolicy, resolver a
 		}
 	}
 	transport.Proxy = nil
+	transport.DialTLS = nil
 	transport.DialTLSContext = nil
 	transport.DialContext = secureDialContext(resolver, dialer)
 	configured.Transport = transport
