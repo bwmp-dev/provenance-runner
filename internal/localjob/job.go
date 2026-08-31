@@ -22,12 +22,14 @@ const (
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 type Job struct {
-	SchemaVersion       string          `json:"schemaVersion"`
-	ID                  string          `json:"id"`
-	Provider            string          `json:"provider"`
-	TimeoutMilliseconds int64           `json:"timeoutMilliseconds,omitempty"`
-	MaxOutputBytes      int64           `json:"maxOutputBytes,omitempty"`
-	Environment         json.RawMessage `json:"environment"`
+	SchemaVersion                       string          `json:"schemaVersion"`
+	ID                                  string          `json:"id"`
+	Provider                            string          `json:"provider"`
+	TimeoutMilliseconds                 int64           `json:"timeoutMilliseconds,omitempty"`
+	PreparationTimeoutMilliseconds      int64           `json:"preparationTimeoutMilliseconds,omitempty"`
+	GracefulShutdownTimeoutMilliseconds int64           `json:"gracefulShutdownTimeoutMilliseconds,omitempty"`
+	MaxOutputBytes                      int64           `json:"maxOutputBytes,omitempty"`
+	Environment                         json.RawMessage `json:"environment"`
 }
 
 func Decode(data []byte) (Job, error) {
@@ -63,8 +65,17 @@ func (j Job) Validate() error {
 	if err := validateIdentifier("provider", j.Provider, 64); err != nil {
 		return err
 	}
-	if j.TimeoutMilliseconds < 0 || j.TimeoutMilliseconds > MaximumTimeout.Milliseconds() {
-		return fmt.Errorf("timeoutMilliseconds must be between 1 and %d when set", MaximumTimeout.Milliseconds())
+	if err := validateTimeout("timeoutMilliseconds", j.TimeoutMilliseconds); err != nil {
+		return err
+	}
+	if err := validateTimeout("preparationTimeoutMilliseconds", j.PreparationTimeoutMilliseconds); err != nil {
+		return err
+	}
+	if err := validateTimeout("gracefulShutdownTimeoutMilliseconds", j.GracefulShutdownTimeoutMilliseconds); err != nil {
+		return err
+	}
+	if (j.PreparationTimeoutMilliseconds == 0) != (j.GracefulShutdownTimeoutMilliseconds == 0) {
+		return fmt.Errorf("preparationTimeoutMilliseconds and gracefulShutdownTimeoutMilliseconds must be set together")
 	}
 	if j.MaxOutputBytes < 0 || j.MaxOutputBytes > MaximumOutputBytes {
 		return fmt.Errorf("maxOutputBytes must be between 1 and %d when set", MaximumOutputBytes)
@@ -80,6 +91,24 @@ func (j Job) Timeout() time.Duration {
 		return DefaultTimeout
 	}
 	return time.Duration(j.TimeoutMilliseconds) * time.Millisecond
+}
+
+func (j Job) UsesPhaseTimeouts() bool {
+	return j.PreparationTimeoutMilliseconds != 0
+}
+
+func (j Job) PreparationTimeout() time.Duration {
+	if j.PreparationTimeoutMilliseconds == 0 {
+		return j.Timeout()
+	}
+	return time.Duration(j.PreparationTimeoutMilliseconds) * time.Millisecond
+}
+
+func (j Job) GracefulShutdownTimeout() time.Duration {
+	if j.GracefulShutdownTimeoutMilliseconds == 0 {
+		return 0
+	}
+	return time.Duration(j.GracefulShutdownTimeoutMilliseconds) * time.Millisecond
 }
 
 func (j Job) OutputLimit() int64 {
@@ -98,6 +127,13 @@ func validateIdentifier(field, value string, maximumLength int) error {
 	}
 	if !identifierPattern.MatchString(value) {
 		return fmt.Errorf("%s contains unsupported characters", field)
+	}
+	return nil
+}
+
+func validateTimeout(field string, value int64) error {
+	if value < 0 || value > MaximumTimeout.Milliseconds() {
+		return fmt.Errorf("%s must be between 1 and %d when set", field, MaximumTimeout.Milliseconds())
 	}
 	return nil
 }

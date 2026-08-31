@@ -55,7 +55,7 @@ The `paper` environment uses the pinned environment ID `paper-1.21.8-60-linux-am
 
 The job cannot provide or replace the trusted probe, Paper, Java, prepared runtime, host paths, gVisor configuration, or download allowlist. Runtime network access is `none`.
 
-The Paper provider's `AdaptJob` boundary consumes the released runner `JobSpecification`. Every target and dependency `ObjectDownload` must declare a positive `size_bytes`, match its job hash, and fit the provider's configured per-artifact, dependency, and preparation quotas. Those exact sizes flow into the content-addressed cache, which rejects short and oversized responses before workspace creation. The adapter materializes `tests.console` into the trusted probe plan and accepts only the reviewed lifecycle and command event/classification inventory. The gateway transport is not wired yet.
+The Paper provider's `AdaptJob` boundary consumes the released runner `JobSpecification`. Every target and dependency `ObjectDownload` must declare a positive `size_bytes`, match its job hash, and fit the provider's configured per-artifact, dependency, and preparation quotas. Those exact sizes flow into the content-addressed cache, which rejects short and oversized responses before workspace creation. The adapter materializes `tests.console` into the trusted probe plan and accepts only the reviewed lifecycle and command event/classification inventory. Remote preparation, execution, and graceful-shutdown timeouts remain distinct: preparation starts before resolution/preparation, execution starts when the prepared workload begins, and graceful shutdown bounds cleanup. The gateway transport is not wired yet.
 
 ## Current evidence limits
 

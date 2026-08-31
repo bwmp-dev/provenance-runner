@@ -68,6 +68,235 @@ var allowedClassificationCodes = map[string]struct{}{
 	"command_assertion_failure":    {},
 }
 
+var commandClassificationCodes = map[string]struct{}{
+	"command_not_registered":       {},
+	"command_registration_failure": {},
+	"command_execution_failure":    {},
+	"command_timeout":              {},
+	"command_output_truncated":     {},
+	"command_assertion_failure":    {},
+}
+
+type commandProbeState struct {
+	expectedAssertions map[string]struct{}
+	seenAssertions     map[string]struct{}
+	registrationSeen   bool
+	registered         bool
+	started            bool
+	outputSeen         bool
+	outputTruncated    bool
+	timeoutSeen        bool
+	assertionFailure   bool
+	executionCompleted bool
+	executionStatus    string
+	completionSeen     bool
+	failure            bool
+}
+
+func newCommandProbeState(test consoleCommandTest) *commandProbeState {
+	expected := make(map[string]struct{}, len(test.Assertions))
+	for index := range test.Assertions {
+		expected[fmt.Sprintf("%s:%d", test.ID, index+1)] = struct{}{}
+	}
+	return &commandProbeState{expectedAssertions: expected, seenAssertions: make(map[string]struct{}, len(expected))}
+}
+
+func (s *commandProbeState) accept(eventType string, data json.RawMessage) error {
+	switch eventType {
+	case "COMMAND_REGISTRATION":
+		if s.registrationSeen || s.started || s.completionSeen {
+			return errors.New("registration event is out of order or duplicated")
+		}
+		registered, err := requiredBoolean(data, "registered")
+		if err != nil {
+			return err
+		}
+		status, err := requiredString(data, "status")
+		if err != nil {
+			return err
+		}
+		if registered && status != "REGISTERED" {
+			return fmt.Errorf("registered command has status %q", status)
+		}
+		if !registered && status != "NOT_REGISTERED" && status != "LOOKUP_FAILED" {
+			return fmt.Errorf("unregistered command has status %q", status)
+		}
+		s.registrationSeen = true
+		s.registered = registered
+		if !registered {
+			s.failure = true
+		}
+	case "COMMAND_EXECUTION_STARTED":
+		if !s.registrationSeen || !s.registered || s.started || s.completionSeen || s.failure {
+			return errors.New("execution start is out of order or follows a failed registration")
+		}
+		if timeout, err := requiredInteger(data, "timeoutSeconds"); err != nil || timeout < 1 {
+			if err != nil {
+				return err
+			}
+			return errors.New("probe event field timeoutSeconds must be positive")
+		}
+		s.started = true
+	case "COMMAND_TIMEOUT":
+		if !s.started || s.executionCompleted || s.completionSeen || s.timeoutSeen {
+			return errors.New("timeout event is out of order or duplicated")
+		}
+		if timeout, err := requiredInteger(data, "timeoutSeconds"); err != nil || timeout < 1 {
+			if err != nil {
+				return err
+			}
+			return errors.New("probe event field timeoutSeconds must be positive")
+		}
+		s.timeoutSeen = true
+		s.failure = true
+	case "COMMAND_OUTPUT":
+		if !s.started || s.executionCompleted || s.completionSeen {
+			return errors.New("output event is out of order or follows execution completion")
+		}
+		truncated, err := requiredBoolean(data, "truncated")
+		if err != nil {
+			return err
+		}
+		captured, err := requiredInteger(data, "capturedBytes")
+		if err != nil {
+			return err
+		}
+		observed, err := requiredInteger(data, "observedBytes")
+		if err != nil {
+			return err
+		}
+		if captured > observed {
+			return errors.New("capturedBytes exceeds observedBytes")
+		}
+		s.outputSeen = true
+		s.outputTruncated = truncated
+		if truncated {
+			s.failure = true
+		}
+	case "COMMAND_EXECUTION_COMPLETED":
+		if !s.started || s.executionCompleted || s.completionSeen {
+			return errors.New("execution completion is out of order or duplicated")
+		}
+		status, err := requiredString(data, "status")
+		if err != nil {
+			return err
+		}
+		switch status {
+		case "COMPLETED":
+			dispatched, err := requiredBoolean(data, "dispatched")
+			if err != nil {
+				return err
+			}
+			if !dispatched {
+				return errors.New("completed execution was not dispatched")
+			}
+			if !s.outputSeen {
+				return errors.New("completed execution has no output event")
+			}
+			if s.failure {
+				return errors.New("completed execution contradicts earlier failure evidence")
+			}
+		case "TIMED_OUT":
+			if !s.timeoutSeen {
+				return errors.New("timed-out execution has no timeout event")
+			}
+			s.failure = true
+		case "EXECUTION_FAILED", "DISPATCH_REJECTED":
+			s.failure = true
+		default:
+			return fmt.Errorf("unsupported execution status %q", status)
+		}
+		s.executionCompleted = true
+		s.executionStatus = status
+	case "COMMAND_ASSERTION":
+		if !s.executionCompleted || s.executionStatus != "COMPLETED" || s.completionSeen {
+			return errors.New("assertion event is out of order or follows failed execution")
+		}
+		assertionID, err := requiredString(data, "assertionId")
+		if err != nil {
+			return err
+		}
+		if _, expected := s.expectedAssertions[assertionID]; !expected {
+			return fmt.Errorf("unknown assertion %q", assertionID)
+		}
+		if _, duplicate := s.seenAssertions[assertionID]; duplicate {
+			return fmt.Errorf("duplicate assertion %q", assertionID)
+		}
+		evaluated, err := requiredBoolean(data, "evaluated")
+		if err != nil {
+			return err
+		}
+		passed, err := requiredBoolean(data, "passed")
+		if err != nil {
+			return err
+		}
+		if !evaluated {
+			return errors.New("assertion was not evaluated")
+		}
+		s.seenAssertions[assertionID] = struct{}{}
+		if !passed {
+			s.failure = true
+			s.assertionFailure = true
+		}
+	case "COMMAND_TEST_COMPLETED":
+		if s.completionSeen || !s.registrationSeen {
+			return errors.New("command completion is out of order or duplicated")
+		}
+		passed, err := requiredBoolean(data, "passed")
+		if err != nil {
+			return err
+		}
+		if passed {
+			if s.failure || !s.executionCompleted || s.executionStatus != "COMPLETED" || len(s.seenAssertions) != len(s.expectedAssertions) {
+				return errors.New("command claimed success after a failed or incomplete execution")
+			}
+		} else {
+			if !s.failure {
+				return errors.New("command claimed failure without failure evidence")
+			}
+		}
+		s.completionSeen = true
+	default:
+		return fmt.Errorf("unsupported command event %q", eventType)
+	}
+	return nil
+}
+
+func (s *commandProbeState) acceptClassification(code string) error {
+	if !s.registrationSeen || s.completionSeen {
+		return errors.New("classification is out of order")
+	}
+	switch code {
+	case "command_not_registered", "command_registration_failure":
+		if s.registered {
+			return errors.New("registration classification contradicts registered command")
+		}
+	case "command_execution_failure":
+		if !s.executionCompleted || (s.executionStatus != "EXECUTION_FAILED" && s.executionStatus != "DISPATCH_REJECTED") {
+			return errors.New("execution failure classification has no matching execution result")
+		}
+	case "command_timeout":
+		if !s.timeoutSeen {
+			return errors.New("timeout classification has no timeout event")
+		}
+	case "command_output_truncated":
+		if !s.outputTruncated {
+			return errors.New("output truncation classification has no truncated output")
+		}
+	case "command_assertion_failure":
+		if !s.assertionFailure {
+			return errors.New("assertion failure classification has no failed assertion")
+		}
+	}
+	s.failure = true
+	return nil
+}
+
+func isCommandClassification(code string) bool {
+	_, ok := commandClassificationCodes[code]
+	return ok
+}
+
 func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]execution.StructuredEvent, error) {
 	if output.StructuredEventError != "" {
 		return nil, fmt.Errorf("probe event channel is malformed: %s", output.StructuredEventError)
@@ -90,9 +319,9 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 	for _, dependency := range plan.RequiredDependencies {
 		requirements[strings.ToLower(dependency)] = false
 	}
-	commandTests := make(map[string]bool, len(plan.Console))
+	commandTests := make(map[string]*commandProbeState, len(plan.Console))
 	for _, test := range plan.Console {
-		commandTests[test.ID] = false
+		commandTests[test.ID] = newCommandProbeState(test)
 	}
 
 	events := make([]execution.StructuredEvent, 0, len(output.StructuredEvents))
@@ -177,25 +406,12 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 			if err != nil {
 				return events, err
 			}
-			completed, expected := commandTests[testID]
+			state, expected := commandTests[testID]
 			if !expected {
 				return events, fmt.Errorf("probe event %s references unknown command test %q", envelope.Type, testID)
 			}
-			if completed && envelope.Type != "COMMAND_TEST_COMPLETED" {
-				return events, fmt.Errorf("probe event %s occurred after command test %q completed", envelope.Type, testID)
-			}
-			if envelope.Type == "COMMAND_TEST_COMPLETED" {
-				if completed {
-					return events, fmt.Errorf("duplicate command completion for %q", testID)
-				}
-				passed, err := requiredBoolean(envelope.Data, "passed")
-				if err != nil {
-					return events, err
-				}
-				commandTests[testID] = true
-				if !passed && lifecycleFailure == nil {
-					lifecycleFailure = fmt.Errorf("command test %q failed", testID)
-				}
+			if err := state.accept(envelope.Type, envelope.Data); err != nil {
+				return events, fmt.Errorf("command test %q: %w", testID, err)
 			}
 		case "TARGET_REQUIREMENT":
 			name, satisfied, err := decodeRequirement(envelope.Data)
@@ -216,6 +432,19 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 			code, err := classificationCode(envelope.Data)
 			if err != nil {
 				return events, err
+			}
+			if isCommandClassification(code) {
+				testID, err := requiredString(envelope.Data, "testId")
+				if err != nil {
+					return events, fmt.Errorf("command classification %s: %w", code, err)
+				}
+				state, expected := commandTests[testID]
+				if !expected {
+					return events, fmt.Errorf("command classification %s references unknown command test %q", code, testID)
+				}
+				if err := state.acceptClassification(code); err != nil {
+					return events, fmt.Errorf("command test %q: %w", testID, err)
+				}
 			}
 			if lifecycleFailure == nil {
 				lifecycleFailure = fmt.Errorf("probe classified the workload as %s", code)
@@ -251,9 +480,12 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 		if !planCompleted {
 			return events, errors.New("missing completed TEST_PLAN event")
 		}
-		for testID, completed := range commandTests {
-			if !completed {
+		for testID, state := range commandTests {
+			if !state.completionSeen {
 				return events, fmt.Errorf("missing command completion for %q", testID)
+			}
+			if state.failure && lifecycleFailure == nil {
+				lifecycleFailure = fmt.Errorf("command test %q failed", testID)
 			}
 		}
 	}

@@ -89,7 +89,7 @@ func TestProbeLifecycleRejectsTerminalAssertionsAndFailureEvents(t *testing.T) {
 }
 
 func TestProbeLifecycleMapsCompletedCommandEvents(t *testing.T) {
-	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command"}}}
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}}}}}
 	events, err := validateProbeLifecycle(commandProbeOutput(true), plan)
 	if err != nil {
 		t.Fatalf("validateProbeLifecycle() error = %v", err)
@@ -106,7 +106,7 @@ func TestProbeLifecycleMapsCompletedCommandEvents(t *testing.T) {
 }
 
 func TestProbeLifecycleRejectsCommandFailureUnknownClassificationAndMissingCompletion(t *testing.T) {
-	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command"}}}
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}}}}}
 
 	failed := commandProbeOutput(false)
 	if _, err := validateProbeLifecycle(failed, plan); err == nil || !strings.Contains(err.Error(), "command") {
@@ -130,6 +130,94 @@ func TestProbeLifecycleRejectsCommandFailureUnknownClassificationAndMissingCompl
 	}
 	if _, err := validateProbeLifecycle(missingCompletion, plan); err == nil || !strings.Contains(err.Error(), "missing command completion") {
 		t.Fatalf("missing command completion error = %v", err)
+	}
+}
+
+func TestCommandProbeStateRejectsSuccessAfterNegativeEvidence(t *testing.T) {
+	tests := []struct {
+		name           string
+		classification string
+		events         []struct {
+			kind string
+			data string
+		}
+	}{
+		{
+			name:           "registration failure",
+			classification: "command_not_registered",
+			events: []struct {
+				kind string
+				data string
+			}{
+				{kind: "COMMAND_REGISTRATION", data: `{"registered":false,"status":"NOT_REGISTERED"}`},
+			},
+		},
+		{
+			name:           "timeout",
+			classification: "command_timeout",
+			events: []struct {
+				kind string
+				data string
+			}{
+				{kind: "COMMAND_REGISTRATION", data: `{"registered":true,"status":"REGISTERED"}`},
+				{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
+				{kind: "COMMAND_TIMEOUT", data: `{"timeoutSeconds":1}`},
+			},
+		},
+		{
+			name:           "output truncation",
+			classification: "command_output_truncated",
+			events: []struct {
+				kind string
+				data string
+			}{
+				{kind: "COMMAND_REGISTRATION", data: `{"registered":true,"status":"REGISTERED"}`},
+				{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
+				{kind: "COMMAND_OUTPUT", data: `{"truncated":true,"capturedBytes":4,"observedBytes":8}`},
+			},
+		},
+		{
+			name:           "execution failure",
+			classification: "command_execution_failure",
+			events: []struct {
+				kind string
+				data string
+			}{
+				{kind: "COMMAND_REGISTRATION", data: `{"registered":true,"status":"REGISTERED"}`},
+				{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
+				{kind: "COMMAND_EXECUTION_COMPLETED", data: `{"status":"EXECUTION_FAILED"}`},
+			},
+		},
+		{
+			name:           "assertion failure",
+			classification: "command_assertion_failure",
+			events: []struct {
+				kind string
+				data string
+			}{
+				{kind: "COMMAND_REGISTRATION", data: `{"registered":true,"status":"REGISTERED"}`},
+				{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
+				{kind: "COMMAND_OUTPUT", data: `{"truncated":false,"capturedBytes":4,"observedBytes":4}`},
+				{kind: "COMMAND_EXECUTION_COMPLETED", data: `{"status":"COMPLETED","dispatched":true}`},
+				{kind: "COMMAND_ASSERTION", data: `{"assertionId":"version-command:1","evaluated":true,"passed":false}`},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := newCommandProbeState(consoleCommandTest{ID: "version-command", Assertions: []commandAssertion{{}}})
+			for _, event := range test.events {
+				if err := state.accept(event.kind, json.RawMessage(event.data)); err != nil {
+					t.Fatalf("accept(%s) error = %v", event.kind, err)
+				}
+			}
+			if err := state.acceptClassification(test.classification); err != nil {
+				t.Fatalf("acceptClassification(%s) error = %v", test.classification, err)
+			}
+			if err := state.accept("COMMAND_TEST_COMPLETED", json.RawMessage(`{"passed":true}`)); err == nil {
+				t.Fatal("negative command evidence was allowed to claim success")
+			}
+		})
 	}
 }
 

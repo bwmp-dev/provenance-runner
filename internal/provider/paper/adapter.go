@@ -83,7 +83,15 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if policy.GetNetwork() == nil || policy.GetNetwork().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE {
 		return localjob.Job{}, errors.New("adapt Paper job: effective_policy.network.mode must be none")
 	}
-	timeout, err := remoteTimeout(policy.GetExecutionTimeout())
+	preparationTimeout, err := remoteTimeout("effective_policy.preparation_timeout", policy.GetPreparationTimeout())
+	if err != nil {
+		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
+	}
+	executionTimeout, err := remoteTimeout("effective_policy.execution_timeout", policy.GetExecutionTimeout())
+	if err != nil {
+		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
+	}
+	gracefulShutdownTimeout, err := remoteTimeout("effective_policy.graceful_shutdown_timeout", policy.GetGracefulShutdownTimeout())
 	if err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
@@ -209,12 +217,14 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	}
 
 	job := localjob.Job{
-		SchemaVersion:       localjob.SchemaVersion,
-		ID:                  specification.GetLease().GetJobId(),
-		Provider:            ProviderName,
-		TimeoutMilliseconds: timeout.Milliseconds(),
-		MaxOutputBytes:      normalized.Resources.LogBytes,
-		Environment:         environment,
+		SchemaVersion:                       localjob.SchemaVersion,
+		ID:                                  specification.GetLease().GetJobId(),
+		Provider:                            ProviderName,
+		TimeoutMilliseconds:                 executionTimeout.Milliseconds(),
+		PreparationTimeoutMilliseconds:      preparationTimeout.Milliseconds(),
+		GracefulShutdownTimeoutMilliseconds: gracefulShutdownTimeout.Milliseconds(),
+		MaxOutputBytes:                      normalized.Resources.LogBytes,
+		Environment:                         environment,
 	}
 	if err := job.Validate(); err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
@@ -334,16 +344,16 @@ func validateConsoleTests(tests []consoleCommandTest) error {
 	return nil
 }
 
-func remoteTimeout(duration *durationpb.Duration) (time.Duration, error) {
+func remoteTimeout(field string, duration *durationpb.Duration) (time.Duration, error) {
 	if duration == nil {
-		return 0, errors.New("effective_policy.execution_timeout is required")
+		return 0, fmt.Errorf("%s is required", field)
 	}
 	if err := duration.CheckValid(); err != nil {
-		return 0, errors.New("effective_policy.execution_timeout is invalid")
+		return 0, fmt.Errorf("%s is invalid", field)
 	}
 	value := duration.AsDuration()
 	if value <= 0 || value > localjob.MaximumTimeout || value%time.Millisecond != 0 {
-		return 0, fmt.Errorf("effective_policy.execution_timeout must be a whole number of milliseconds between 1 and %d", localjob.MaximumTimeout.Milliseconds())
+		return 0, fmt.Errorf("%s must be a whole number of milliseconds between 1 and %d", field, localjob.MaximumTimeout.Milliseconds())
 	}
 	return value, nil
 }

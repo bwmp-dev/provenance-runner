@@ -24,7 +24,7 @@ func TestAdaptJobMaterializesRemoteConsolePlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AdaptJob() error = %v", err)
 	}
-	if job.ID != "remote-paper-job" || job.Provider != ProviderName || job.MaxOutputBytes != 1<<20 || job.Timeout() != time.Minute {
+	if job.ID != "remote-paper-job" || job.Provider != ProviderName || job.MaxOutputBytes != 1<<20 || job.Timeout() != time.Minute || job.PreparationTimeout() != 2*time.Minute || job.GracefulShutdownTimeout() != 30*time.Second || !job.UsesPhaseTimeouts() {
 		t.Fatalf("adapted job = %#v", job)
 	}
 	var config configuration
@@ -148,6 +148,18 @@ func TestAdaptJobRejectsDigestAndPolicyMismatches(t *testing.T) {
 			},
 			want: "network.mode must be none",
 		},
+		"missing preparation timeout": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.EffectivePolicy.PreparationTimeout = nil
+			},
+			want: "effective_policy.preparation_timeout is required",
+		},
+		"missing graceful shutdown timeout": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.EffectivePolicy.GracefulShutdownTimeout = nil
+			},
+			want: "effective_policy.graceful_shutdown_timeout is required",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			specification := validRemoteSpecification(t, server.URL, payloads)
@@ -195,10 +207,12 @@ func validRemoteSpecification(t *testing.T, baseURL string, payloads map[string]
 			JavaDistribution: "eclipse-temurin", JavaVersion: "21.0.8+9", OperatingSystem: runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX, Architecture: runnerv1.Architecture_ARCHITECTURE_AMD64,
 		},
 		EffectivePolicy: &runnerv1.EffectivePolicy{
-			Sandbox:          runnerv1.SandboxKind_SANDBOX_KIND_GVISOR,
-			Network:          &runnerv1.NetworkPolicy{Mode: runnerv1.NetworkMode_NETWORK_MODE_NONE},
-			Resources:        &runnerv1.ResourceLimits{CpuMillis: 1500, MemoryBytes: 1 << 30, DiskBytes: 2 << 30, ProcessCount: 64},
-			ExecutionTimeout: durationpb.New(time.Minute),
+			Sandbox:                 runnerv1.SandboxKind_SANDBOX_KIND_GVISOR,
+			Network:                 &runnerv1.NetworkPolicy{Mode: runnerv1.NetworkMode_NETWORK_MODE_NONE},
+			Resources:               &runnerv1.ResourceLimits{CpuMillis: 1500, MemoryBytes: 1 << 30, DiskBytes: 2 << 30, ProcessCount: 64},
+			PreparationTimeout:      durationpb.New(2 * time.Minute),
+			ExecutionTimeout:        durationpb.New(time.Minute),
+			GracefulShutdownTimeout: durationpb.New(30 * time.Second),
 		},
 		Artifact:                    &runnerv1.ObjectDownload{Uri: baseURL + "/target", Digest: targetDigest, Filename: "success.jar", SizeBytes: int64(len(payloads["/target"]))},
 		Dependencies:                []*runnerv1.DependencyInput{{DependencyId: "dependencyfixture", Object: &runnerv1.ObjectDownload{Uri: baseURL + "/dependency", Digest: dependencyDigest, Filename: "dependency.jar", SizeBytes: int64(len(payloads["/dependency"]))}}},

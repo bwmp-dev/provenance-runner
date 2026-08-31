@@ -109,6 +109,57 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 	}
 }
 
+func TestExecutorUsesRemotePhaseTimeouts(t *testing.T) {
+	var preparationDeadline, executionDeadline, cleanupDeadline time.Time
+	prepared := &fakePrepared{
+		execute: func(ctx context.Context) (ExecutionOutcome, error) {
+			var ok bool
+			executionDeadline, ok = ctx.Deadline()
+			if !ok {
+				t.Fatal("execution context has no deadline")
+			}
+			code := 0
+			return ExecutionOutcome{ExitCode: &code}, nil
+		},
+		cleanup: func(ctx context.Context) error {
+			var ok bool
+			cleanupDeadline, ok = ctx.Deadline()
+			if !ok {
+				t.Fatal("cleanup context has no deadline")
+			}
+			return nil
+		},
+	}
+	provider := &fakeProvider{
+		name: "fake",
+		resolve: func(ctx context.Context, _ Request) (Environment, error) {
+			var ok bool
+			preparationDeadline, ok = ctx.Deadline()
+			if !ok {
+				t.Fatal("preparation context has no deadline")
+			}
+			return &fakeEnvironment{identity: "fake/test", prepare: func(context.Context) (PreparedEnvironment, error) {
+				return prepared, nil
+			}}, nil
+		},
+	}
+	job := validJob()
+	job.PreparationTimeoutMilliseconds = 80
+	job.TimeoutMilliseconds = 120
+	job.GracefulShutdownTimeoutMilliseconds = 40
+
+	result := newTestExecutor(t, provider).Execute(context.Background(), job)
+	if !result.Passed() {
+		t.Fatalf("result classification = %q; failure = %#v", result.Classification, result.Failure)
+	}
+	if !executionDeadline.After(preparationDeadline) || executionDeadline.Sub(preparationDeadline) < 20*time.Millisecond {
+		t.Fatalf("execution deadline %v did not start after preparation deadline %v", executionDeadline, preparationDeadline)
+	}
+	if cleanupDeadline.Before(time.Now()) {
+		t.Fatalf("cleanup deadline %v was not created for the graceful-shutdown phase", cleanupDeadline)
+	}
+}
+
 func TestExecutorClassifiesWorkloadFailure(t *testing.T) {
 	code := 7
 	prepared := &fakePrepared{

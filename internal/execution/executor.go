@@ -70,20 +70,20 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 		return finishResult(result)
 	}
 
-	runContext, cancelRun := context.WithTimeout(parent, job.Timeout())
-	defer cancelRun()
+	preparationContext, cancelPreparation := context.WithTimeout(parent, job.PreparationTimeout())
+	defer cancelPreparation()
 
 	result.Phase = PhaseResolution
-	environment, err := provider.Resolve(runContext, Request{
+	environment, err := provider.Resolve(preparationContext, Request{
 		JobID:       job.ID,
 		Environment: job.Environment,
 		Limits:      Limits{MaxOutputBytes: job.OutputLimit()},
 	})
 	if err != nil {
-		setFailure(&result, PhaseResolution, classifyError(parent, runContext, "provider_resolution_failed", err))
+		setFailure(&result, PhaseResolution, classifyError(parent, preparationContext, "provider_resolution_failed", err))
 		return finishResult(result)
 	}
-	if failure := contextFailure(parent, runContext); failure != nil {
+	if failure := contextFailure(parent, preparationContext); failure != nil {
 		setFailure(&result, PhaseResolution, failure)
 		return finishResult(result)
 	}
@@ -94,9 +94,9 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 	result.Environment = &EnvironmentResult{Provider: provider.Name(), Identity: environment.Identity()}
 
 	result.Phase = PhasePreparation
-	prepared, prepareErr := environment.Prepare(runContext)
+	prepared, prepareErr := environment.Prepare(preparationContext)
 	if prepareErr != nil {
-		setFailure(&result, PhasePreparation, classifyError(parent, runContext, "environment_preparation_failed", prepareErr))
+		setFailure(&result, PhasePreparation, classifyError(parent, preparationContext, "environment_preparation_failed", prepareErr))
 	}
 	if prepared == nil {
 		if prepareErr == nil {
@@ -106,15 +106,25 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 	}
 
 	if result.Failure == nil {
-		if failure := contextFailure(parent, runContext); failure != nil {
+		if failure := contextFailure(parent, preparationContext); failure != nil {
 			setFailure(&result, PhasePreparation, failure)
 		} else {
-			executePrepared(parent, runContext, prepared, &result)
+			if job.UsesPhaseTimeouts() {
+				executionContext, cancelExecution := context.WithTimeout(parent, job.Timeout())
+				executePrepared(parent, executionContext, prepared, &result)
+				cancelExecution()
+			} else {
+				executePrepared(parent, preparationContext, prepared, &result)
+			}
 		}
 	}
 
 	collectPrepared(parent, prepared, e.collectionTimeout, &result)
-	cleanupPrepared(parent, prepared, e.cleanupTimeout, &result)
+	cleanupTimeout := e.cleanupTimeout
+	if job.UsesPhaseTimeouts() {
+		cleanupTimeout = job.GracefulShutdownTimeout()
+	}
+	cleanupPrepared(parent, prepared, cleanupTimeout, &result)
 	return finishResult(result)
 }
 
