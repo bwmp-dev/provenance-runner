@@ -26,6 +26,26 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+const (
+	testRunnerID       = "50000000-0000-0000-0000-000000000001"
+	testOrganizationID = "40000000-0000-0000-0000-000000000001"
+)
+
+func TestPlatformGatewayWireProtocolCompatibility(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	client := newClient(validConfig(), nil)
+	if got := client.authenticateMessage().GetAuthenticate().GetProtocolVersion(); got != "1" {
+		t.Fatalf("Authenticate.protocol_version = %q, want platform gateway literal 1", got)
+	}
+	protocols := client.capabilitiesMessage().GetCapabilities().GetProtocolVersions()
+	if len(protocols) != 1 || protocols[0] != "1" {
+		t.Fatalf("Capabilities.protocol_versions = %v, want [1]", protocols)
+	}
+	if _, err := client.validateAuthenticated(authenticatedMessage(now, platformScope()), now); err != nil {
+		t.Fatalf("platform gateway Authenticated literal rejected: %v", err)
+	}
+}
+
 func TestHandshakeCapabilitiesHeartbeatAndDrainOrdering(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	var received []*runnerv1.RunnerMessage
@@ -67,14 +87,14 @@ func TestHandshakeCapabilitiesHeartbeatAndDrainOrdering(t *testing.T) {
 	if len(received) != 4 {
 		t.Fatalf("received %d messages, want 4", len(received))
 	}
-	if got := received[0].GetAuthenticate(); got == nil || got.GetRunnerId() != "runner-1" || got.GetInstanceId() != "instance-1" || got.GetProtocolVersion() != ProtocolVersion || !bytes.Equal(got.GetConnectionCredential(), []byte("credential")) {
+	if got := received[0].GetAuthenticate(); got == nil || got.GetRunnerId() != testRunnerID || got.GetInstanceId() != "instance-1" || got.GetProtocolVersion() != "1" || !bytes.Equal(got.GetConnectionCredential(), []byte("credential")) {
 		t.Fatalf("authenticate = %#v", got)
 	}
 	capabilities := received[1].GetCapabilities()
 	if capabilities == nil || capabilities.GetRunnerVersion() != "test" || capabilities.GetOperatingSystem() != runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX || capabilities.GetArchitecture() != runnerv1.Architecture_ARCHITECTURE_AMD64 {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
-	if fmt.Sprint(capabilities.GetProtocolVersions()) != "[v1]" || fmt.Sprint(capabilities.GetSandboxes()) != "[SANDBOX_KIND_GVISOR]" || fmt.Sprint(capabilities.GetProviders()) != "[SERVER_PROVIDER_PAPER]" {
+	if fmt.Sprint(capabilities.GetProtocolVersions()) != "[1]" || fmt.Sprint(capabilities.GetSandboxes()) != "[SANDBOX_KIND_GVISOR]" || fmt.Sprint(capabilities.GetProviders()) != "[SERVER_PROVIDER_PAPER]" {
 		t.Fatalf("capability lists = protocols %v sandboxes %v providers %v", capabilities.GetProtocolVersions(), capabilities.GetSandboxes(), capabilities.GetProviders())
 	}
 	if capabilities.GetPolicy().GetMaximumNetwork().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE || capabilities.GetPolicy().GetMaximumConcurrentJobs() != 1 {
@@ -106,8 +126,9 @@ func TestAuthenticatedValidationFailsClosed(t *testing.T) {
 		"wrong protocol": func(message *runnerv1.GatewayMessage) { message.GetAuthenticated().ProtocolVersion = "v2" },
 		"wrong runner":   func(message *runnerv1.GatewayMessage) { message.GetAuthenticated().RunnerId = "other" },
 		"wrong scope": func(message *runnerv1.GatewayMessage) {
-			message.GetAuthenticated().OrganizationScope = organizationScope("org-1")
+			message.GetAuthenticated().OrganizationScope = organizationScope(testOrganizationID)
 		},
+		"invalid connection id": func(message *runnerv1.GatewayMessage) { message.GetAuthenticated().ConnectionId = "connection-1" },
 		"expired credential": func(message *runnerv1.GatewayMessage) {
 			message.GetAuthenticated().CredentialExpiresAt = timestamppb.New(now)
 		},
@@ -141,12 +162,12 @@ func TestAuthenticatedValidationFailsClosed(t *testing.T) {
 func TestOrganizationScopeMustMatchExactly(t *testing.T) {
 	now := time.Now().UTC()
 	config := validConfig()
-	config.ExpectedScope = ExpectedScope{Kind: ScopeOrganization, OrganizationID: "org-1"}
+	config.ExpectedScope = ExpectedScope{Kind: ScopeOrganization, OrganizationID: testOrganizationID}
 	client := newClient(config, nil)
-	if _, err := client.validateAuthenticated(authenticatedMessage(now, organizationScope("org-1")), now); err != nil {
+	if _, err := client.validateAuthenticated(authenticatedMessage(now, organizationScope(testOrganizationID)), now); err != nil {
 		t.Fatalf("matching organization scope rejected: %v", err)
 	}
-	for _, scope := range []*runnerv1.OrganizationScope{platformScope(), organizationScope("org-2"), nil} {
+	for _, scope := range []*runnerv1.OrganizationScope{platformScope(), organizationScope("40000000-0000-0000-0000-000000000002"), nil} {
 		if _, err := client.validateAuthenticated(authenticatedMessage(now, scope), now); err == nil {
 			t.Fatalf("scope %#v accepted", scope)
 		}
@@ -281,6 +302,7 @@ func TestConfigIsStrictAndBounded(t *testing.T) {
 	tests := []string{
 		strings.Replace(valid, `"gatewayAddress":"gateway.example:443"`, `"gatewayAddress":"https://gateway.example:443"`, 1),
 		strings.Replace(valid, `"gatewayAddress":"gateway.example:443"`, `"gatewayAddress":"bad_host:443"`, 1),
+		strings.Replace(valid, fmt.Sprintf(`"runnerId":%q`, testRunnerID), `"runnerId":"runner-1"`, 1),
 		strings.Replace(valid, `"kind":"platform"`, `"kind":"platform","organizationId":"org"`, 1),
 		strings.Replace(valid, `"cpuMillis":1000`, `"cpuMillis":0`, 1),
 		strings.TrimSuffix(valid, "}") + `,"unknown":true}`,
@@ -290,6 +312,25 @@ func TestConfigIsStrictAndBounded(t *testing.T) {
 		if _, err := decodeConfig([]byte(input)); err == nil {
 			t.Fatalf("decodeConfig(%s) succeeded", input)
 		}
+	}
+	unicodeInstance := validConfig()
+	unicodeInstance.InstanceID = "instance-世界"
+	if err := unicodeInstance.validate(); err != nil {
+		t.Fatalf("server-compatible UTF-8 instanceId rejected: %v", err)
+	}
+	organization := validConfig()
+	organization.ExpectedScope = ExpectedScope{Kind: ScopeOrganization, OrganizationID: "org-1"}
+	if err := organization.validate(); err == nil || !strings.Contains(err.Error(), "UUID") {
+		t.Fatalf("non-UUID organization scope error = %v", err)
+	}
+	credentialBoundary := validConfig()
+	credentialBoundary.credential = bytes.Repeat([]byte("x"), MaximumCredentialBytes)
+	if err := credentialBoundary.validate(); err != nil {
+		t.Fatalf("maximum-size credential rejected: %v", err)
+	}
+	credentialBoundary.credential = append(credentialBoundary.credential, 'x')
+	if err := credentialBoundary.validate(); err == nil {
+		t.Fatal("oversized credential accepted")
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not expose owner-only file mode bits; connect is Linux/amd64-only")
@@ -313,6 +354,12 @@ func TestConfigIsStrictAndBounded(t *testing.T) {
 	}
 	if !bytes.Equal(config.credential, []byte("secret")) {
 		t.Fatalf("credential = %q", config.credential)
+	}
+	if err := os.WriteFile(credentialPath, bytes.Repeat([]byte("x"), MaximumCredentialBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if config, err := LoadConfig(configPath, "test"); err != nil || len(config.credential) != MaximumCredentialBytes {
+		t.Fatalf("LoadConfig(maximum credential) = %d bytes, %v", len(config.credential), err)
 	}
 	if err := os.Chmod(credentialPath, 0o644); err != nil {
 		t.Fatal(err)
@@ -413,7 +460,7 @@ func validConfig() Config {
 	return Config{
 		SchemaVersion:  ConfigSchemaVersion,
 		GatewayAddress: "gateway.example:443",
-		RunnerID:       "runner-1",
+		RunnerID:       testRunnerID,
 		InstanceID:     "instance-1",
 		CredentialFile: "credential",
 		ExpectedScope:  ExpectedScope{Kind: ScopePlatform},
@@ -424,19 +471,19 @@ func validConfig() Config {
 }
 
 func validConfigJSON(credential string) string {
-	return fmt.Sprintf(`{"schemaVersion":%q,"gatewayAddress":"gateway.example:443","runnerId":"runner-1","instanceId":"instance-1","credentialFile":%q,"expectedScope":{"kind":"platform"},"resources":{"cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":2147483648,"processCount":64}}`, ConfigSchemaVersion, credential)
+	return fmt.Sprintf(`{"schemaVersion":%q,"gatewayAddress":"gateway.example:443","runnerId":%q,"instanceId":"instance-1","credentialFile":%q,"expectedScope":{"kind":"platform"},"resources":{"cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":2147483648,"processCount":64}}`, ConfigSchemaVersion, testRunnerID, credential)
 }
 
 func authenticatedMessage(now time.Time, scope *runnerv1.OrganizationScope) *runnerv1.GatewayMessage {
 	return gatewayMessage(now, &runnerv1.GatewayMessage_Authenticated{Authenticated: &runnerv1.Authenticated{
-		RunnerId:            "runner-1",
-		ConnectionId:        "connection-1",
+		RunnerId:            testRunnerID,
+		ConnectionId:        "60000000-0000-0000-0000-000000000001",
 		OrganizationScope:   scope,
 		CredentialExpiresAt: timestamppb.New(now.Add(time.Hour)),
 		HeartbeatInterval:   durationpb.New(time.Minute),
 		LeaseDuration:       durationpb.New(time.Minute),
 		ServerTime:          timestamppb.New(now),
-		ProtocolVersion:     ProtocolVersion,
+		ProtocolVersion:     "1",
 	}})
 }
 

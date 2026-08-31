@@ -74,6 +74,7 @@ func New(config Config, rpc runnerv1.RunnerGatewayClient) (*Client, error) {
 	if rpc == nil {
 		return nil, errors.New("runner gateway client is required")
 	}
+	config = config.normalized()
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
@@ -345,7 +346,7 @@ func (c *Client) validateAuthenticated(message *runnerv1.GatewayMessage, now tim
 	if authenticated.GetRunnerId() != c.config.RunnerID {
 		return nil, permanent("authenticated runner scope does not match configured runnerId")
 	}
-	if err := validateIdentifier("authenticated.connectionId", authenticated.GetConnectionId(), maximumIdentifierBytes); err != nil {
+	if err := validateUUID("authenticated.connectionId", authenticated.GetConnectionId()); err != nil {
 		return nil, permanent("%v", err)
 	}
 	if authenticated.GetProtocolVersion() != ProtocolVersion {
