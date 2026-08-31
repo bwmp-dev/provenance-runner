@@ -1,8 +1,12 @@
 package paper
 
 const (
-	AlphaEnvironmentID = "paper-1.21.8-60-linux-amd64-temurin-21.0.8+9"
-	DownloadUserAgent  = "Provenance-Runner/0.1.0 (https://github.com/bwmp-dev/provenance-runner)"
+	AlphaEnvironmentID     = "paper-1.21.8-60-linux-amd64-temurin-21.0.8+9"
+	AlphaProbeVersion      = "0.1.0"
+	AlphaProbeSourceCommit = "0741914e16dee1476d8bbd8d7d370eaf8a0eb0c2"
+	AlphaProbeSHA256       = "cc981edc49a1fc27a920c3e39415428d3897eb878e748a6ad2b708972ef6e082"
+	AlphaProbeSizeBytes    = int64(462_392)
+	DownloadUserAgent      = "Provenance-Runner/0.1.0 (https://github.com/bwmp-dev/provenance-runner)"
 )
 
 type ArtifactPin struct {
@@ -34,11 +38,13 @@ type ArchivePin struct {
 }
 
 type Catalog struct {
-	EnvironmentID   string
-	Paper           PaperPin
-	Java            JavaPin
-	Probe           ArtifactPin
-	PreparedRuntime ArchivePin
+	EnvironmentID     string
+	Paper             PaperPin
+	Java              JavaPin
+	ProbeVersion      string
+	ProbeSourceCommit string
+	Probe             ArtifactPin
+	PreparedRuntime   ArchivePin
 }
 
 func AlphaCatalog() Catalog {
@@ -67,6 +73,13 @@ func AlphaCatalog() Catalog {
 				SizeBytes: 51_942_501,
 			},
 			MaximumExpandedBytes: 164_834_866,
+		},
+		ProbeVersion:      AlphaProbeVersion,
+		ProbeSourceCommit: AlphaProbeSourceCommit,
+		Probe: ArtifactPin{
+			SHA256:    AlphaProbeSHA256,
+			Filename:  "paper-probe.jar",
+			SizeBytes: AlphaProbeSizeBytes,
 		},
 	}
 }

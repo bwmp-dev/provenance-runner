@@ -6,14 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 )
-
-var safeFailureCode = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
 type probeEnvelope struct {
 	Timestamp string          `json:"timestamp"`
@@ -32,19 +29,43 @@ var requiredProbeOrder = []string{
 }
 
 var allowedProbeEventTypes = map[string]struct{}{
-	"PROBE_LOADED":             {},
-	"SERVER_LOADED":            {},
-	"SERVER_READY":             {},
-	"SERVER_STOPPED":           {},
-	"METADATA_INSPECTION":      {},
-	"METADATA_SUGGESTION":      {},
-	"PLUGIN_STATE":             {},
-	"LIFECYCLE_EXCEPTION":      {},
-	"CLASSIFICATION":           {},
-	"TARGET_REQUIREMENT":       {},
-	"STABILIZATION_STARTED":    {},
-	"STABILIZATION_COMPLETED":  {},
-	"CLEAN_SHUTDOWN_REQUESTED": {},
+	"PROBE_LOADED":                {},
+	"SERVER_LOADED":               {},
+	"SERVER_READY":                {},
+	"SERVER_STOPPED":              {},
+	"METADATA_INSPECTION":         {},
+	"METADATA_SUGGESTION":         {},
+	"PLUGIN_STATE":                {},
+	"LIFECYCLE_EXCEPTION":         {},
+	"CLASSIFICATION":              {},
+	"TARGET_REQUIREMENT":          {},
+	"STABILIZATION_STARTED":       {},
+	"STABILIZATION_COMPLETED":     {},
+	"TEST_PLAN":                   {},
+	"COMMAND_REGISTRATION":        {},
+	"COMMAND_EXECUTION_STARTED":   {},
+	"COMMAND_EXECUTION_COMPLETED": {},
+	"COMMAND_TIMEOUT":             {},
+	"COMMAND_OUTPUT":              {},
+	"COMMAND_ASSERTION":           {},
+	"COMMAND_TEST_COMPLETED":      {},
+	"CLEAN_SHUTDOWN_REQUESTED":    {},
+}
+
+var allowedClassificationCodes = map[string]struct{}{
+	"plugin_not_found":             {},
+	"invalid_metadata":             {},
+	"missing_required_dependency":  {},
+	"failed_required_dependency":   {},
+	"on_load_failure":              {},
+	"on_enable_failure":            {},
+	"invalid_test_plan":            {},
+	"command_not_registered":       {},
+	"command_registration_failure": {},
+	"command_execution_failure":    {},
+	"command_timeout":              {},
+	"command_output_truncated":     {},
+	"command_assertion_failure":    {},
 }
 
 func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]execution.StructuredEvent, error) {
@@ -69,9 +90,16 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 	for _, dependency := range plan.RequiredDependencies {
 		requirements[strings.ToLower(dependency)] = false
 	}
+	commandTests := make(map[string]bool, len(plan.Console))
+	for _, test := range plan.Console {
+		commandTests[test.ID] = false
+	}
 
 	events := make([]execution.StructuredEvent, 0, len(output.StructuredEvents))
 	var lifecycleFailure error
+	planLoaded := false
+	planCompleted := false
+	serverReadySatisfied := false
 	for _, event := range output.StructuredEvents {
 		if event.Kind != probeEventKind {
 			return events, fmt.Errorf("unexpected structured event kind %q", event.Kind)
@@ -100,6 +128,75 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 		})
 
 		switch envelope.Type {
+		case "TEST_PLAN":
+			status, err := requiredString(envelope.Data, "status")
+			if err != nil {
+				return events, err
+			}
+			switch status {
+			case "LOADED":
+				if planLoaded {
+					return events, errors.New("duplicate loaded TEST_PLAN event")
+				}
+				count, err := requiredInteger(envelope.Data, "consoleTests")
+				if err != nil || count != int64(len(plan.Console)) {
+					return events, errors.New("loaded TEST_PLAN consoleTests does not match the materialized plan")
+				}
+				planLoaded = true
+			case "COMPLETED":
+				if !planLoaded || planCompleted || len(plan.Console) == 0 || seenRequired["CLEAN_SHUTDOWN_REQUESTED"] {
+					return events, errors.New("completed TEST_PLAN event is unexpected")
+				}
+				count, err := requiredInteger(envelope.Data, "consoleTests")
+				if err != nil || count != int64(len(plan.Console)) {
+					return events, errors.New("completed TEST_PLAN consoleTests does not match the materialized plan")
+				}
+				passed, err := requiredBoolean(envelope.Data, "passed")
+				if err != nil {
+					return events, err
+				}
+				if _, err := requiredBoolean(envelope.Data, "timedOut"); err != nil {
+					return events, err
+				}
+				planCompleted = true
+				if !passed && lifecycleFailure == nil {
+					lifecycleFailure = errors.New("probe reported a failed console test plan")
+				}
+			case "INVALID":
+				if lifecycleFailure == nil {
+					lifecycleFailure = errors.New("probe rejected the materialized test plan")
+				}
+			default:
+				return events, fmt.Errorf("unexpected TEST_PLAN status %q", status)
+			}
+		case "COMMAND_REGISTRATION", "COMMAND_EXECUTION_STARTED", "COMMAND_EXECUTION_COMPLETED", "COMMAND_TIMEOUT", "COMMAND_OUTPUT", "COMMAND_ASSERTION", "COMMAND_TEST_COMPLETED":
+			if !seenRequired["SERVER_READY"] || seenRequired["CLEAN_SHUTDOWN_REQUESTED"] {
+				return events, fmt.Errorf("probe event %s occurred outside the command execution window", envelope.Type)
+			}
+			testID, err := requiredString(envelope.Data, "testId")
+			if err != nil {
+				return events, err
+			}
+			completed, expected := commandTests[testID]
+			if !expected {
+				return events, fmt.Errorf("probe event %s references unknown command test %q", envelope.Type, testID)
+			}
+			if completed && envelope.Type != "COMMAND_TEST_COMPLETED" {
+				return events, fmt.Errorf("probe event %s occurred after command test %q completed", envelope.Type, testID)
+			}
+			if envelope.Type == "COMMAND_TEST_COMPLETED" {
+				if completed {
+					return events, fmt.Errorf("duplicate command completion for %q", testID)
+				}
+				passed, err := requiredBoolean(envelope.Data, "passed")
+				if err != nil {
+					return events, err
+				}
+				commandTests[testID] = true
+				if !passed && lifecycleFailure == nil {
+					lifecycleFailure = fmt.Errorf("command test %q failed", testID)
+				}
+			}
 		case "TARGET_REQUIREMENT":
 			name, satisfied, err := decodeRequirement(envelope.Data)
 			if err != nil {
@@ -130,8 +227,11 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 		case "SERVER_READY":
 			if ok, err := requiredBoolean(envelope.Data, "requirementsSatisfied"); err != nil {
 				return events, err
-			} else if !ok && lifecycleFailure == nil {
-				lifecycleFailure = errors.New("probe reported unsatisfied server-ready requirements")
+			} else {
+				serverReadySatisfied = ok
+				if !ok && lifecycleFailure == nil {
+					lifecycleFailure = errors.New("probe reported unsatisfied server-ready requirements")
+				}
 			}
 		case "SERVER_STOPPED":
 			if ok, err := requiredBoolean(envelope.Data, "shutdownRequested"); err != nil {
@@ -143,6 +243,19 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 	}
 	if nextRequired != len(requiredProbeOrder) {
 		return events, fmt.Errorf("missing required probe event %s", requiredProbeOrder[nextRequired])
+	}
+	if !planLoaded {
+		return events, errors.New("missing loaded TEST_PLAN event")
+	}
+	if len(plan.Console) > 0 && serverReadySatisfied {
+		if !planCompleted {
+			return events, errors.New("missing completed TEST_PLAN event")
+		}
+		for testID, completed := range commandTests {
+			if !completed {
+				return events, fmt.Errorf("missing command completion for %q", testID)
+			}
+		}
 	}
 	for name, satisfied := range requirements {
 		if !satisfied && lifecycleFailure == nil {
@@ -193,10 +306,45 @@ func classificationCode(data json.RawMessage) (string, error) {
 	var classification struct {
 		Code string `json:"code"`
 	}
-	if err := json.Unmarshal(data, &classification); err != nil || !safeFailureCode.MatchString(classification.Code) {
+	if err := json.Unmarshal(data, &classification); err != nil {
 		return "", errors.New("CLASSIFICATION contains an invalid code")
 	}
+	if _, allowed := allowedClassificationCodes[classification.Code]; !allowed {
+		return "", errors.New("CLASSIFICATION contains an unsupported code")
+	}
 	return classification.Code, nil
+}
+
+func requiredString(data json.RawMessage, field string) (string, error) {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(data, &values); err != nil {
+		return "", fmt.Errorf("%s event data is invalid", field)
+	}
+	encoded, exists := values[field]
+	if !exists {
+		return "", fmt.Errorf("probe event is missing %s", field)
+	}
+	var value string
+	if err := json.Unmarshal(encoded, &value); err != nil || value == "" {
+		return "", fmt.Errorf("probe event field %s must be a non-empty string", field)
+	}
+	return value, nil
+}
+
+func requiredInteger(data json.RawMessage, field string) (int64, error) {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(data, &values); err != nil {
+		return 0, fmt.Errorf("%s event data is invalid", field)
+	}
+	encoded, exists := values[field]
+	if !exists {
+		return 0, fmt.Errorf("probe event is missing %s", field)
+	}
+	var value int64
+	if err := json.Unmarshal(encoded, &value); err != nil || value < 0 {
+		return 0, fmt.Errorf("probe event field %s must be a non-negative integer", field)
+	}
+	return value, nil
 }
 
 func requiredBoolean(data json.RawMessage, field string) (bool, error) {
