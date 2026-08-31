@@ -80,6 +80,7 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 		"-Dprovenance.probe.target=SuccessFixture",
 		"-Dprovenance.probe.requiredDependencies=DependencyFixture",
 		"-Dprovenance.probe.events=/workspace/provenance-probe-events.ndjson",
+		"-Dprovenance.probe.testPlan=/workspace/provenance-test-plan.json",
 		"-Dprovenance.probe.stabilizationMillis=25",
 		"-Dprovenance.probe.requestShutdown=true",
 		"/workspace/paper.jar",
@@ -284,7 +285,7 @@ func TestExecutorClassifiesFailedProbeAssertionWhenJVMExitsZero(t *testing.T) {
 	}
 	server, _ := artifactServer(t, payloads)
 	output := happyProbeOutput()
-	output.StructuredEvents[3] = probeStructuredEvent(4, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
+	replaceProbeEvent(t, &output, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
 	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{output: &output}}
 	provider := testProvider(t, server, sandbox, payloads, "test-jre")
 	config := validConfiguration(server.URL, payloads)
@@ -420,6 +421,9 @@ func TestAlphaCatalogPinsStablePaperAndTemurin(t *testing.T) {
 	if catalog.Java.Distribution != "eclipse-temurin" || catalog.Java.Version != "21.0.8+9" || catalog.Java.Artifact.SHA256 != "968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03" {
 		t.Errorf("Java pin = %#v", catalog.Java)
 	}
+	if catalog.ProbeVersion != AlphaProbeVersion || catalog.ProbeSourceCommit != AlphaProbeSourceCommit || catalog.Probe.SHA256 != AlphaProbeSHA256 || catalog.Probe.SizeBytes != AlphaProbeSizeBytes {
+		t.Errorf("probe pin = %#v", catalog)
+	}
 	if !strings.HasPrefix(DownloadUserAgent, "Provenance-") || !strings.Contains(DownloadUserAgent, "github.com/bwmp-dev/provenance-runner") {
 		t.Errorf("DownloadUserAgent = %q", DownloadUserAgent)
 	}
@@ -504,8 +508,10 @@ func testProvider(t *testing.T, server *httptest.Server, sandbox *fakeSandboxPro
 		Java: JavaPin{Distribution: "eclipse-temurin", Version: "21.0.8+9", OS: "linux", Architecture: "amd64", ArchiveRoot: javaRoot, Artifact: ArtifactPin{
 			URI: server.URL + "/java", SHA256: artifact.SHA256(payloads["/java"]).String(), Filename: "java.tar.gz", SizeBytes: int64(len(payloads["/java"])),
 		}, MaximumExpandedBytes: 1 << 20},
-		Probe:           ArtifactPin{URI: server.URL + "/probe", SHA256: artifact.SHA256(payloads["/probe"]).String(), Filename: "paper-probe.jar", SizeBytes: int64(len(payloads["/probe"]))},
-		PreparedRuntime: ArchivePin{Artifact: ArtifactPin{URI: server.URL + "/prepared-runtime", SHA256: artifact.SHA256(payloads["/prepared-runtime"]).String(), Filename: "prepared-runtime.tar.gz", SizeBytes: int64(len(payloads["/prepared-runtime"]))}, MaximumExpandedBytes: 1 << 20},
+		ProbeVersion:      "test",
+		ProbeSourceCommit: "test",
+		Probe:             ArtifactPin{URI: server.URL + "/probe", SHA256: artifact.SHA256(payloads["/probe"]).String(), Filename: "paper-probe.jar", SizeBytes: int64(len(payloads["/probe"]))},
+		PreparedRuntime:   ArchivePin{Artifact: ArtifactPin{URI: server.URL + "/prepared-runtime", SHA256: artifact.SHA256(payloads["/prepared-runtime"]).String(), Filename: "prepared-runtime.tar.gz", SizeBytes: int64(len(payloads["/prepared-runtime"]))}, MaximumExpandedBytes: 1 << 20},
 	}
 	localDialer := dialerFunc(func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
@@ -770,15 +776,16 @@ func (p *fakePrepared) Cleanup(context.Context) error {
 
 func happyProbeOutput() execution.CollectedOutput {
 	events := []execution.StructuredEvent{
-		probeStructuredEvent(1, "PROBE_LOADED", `{}`),
-		probeStructuredEvent(2, "SERVER_LOADED", `{}`),
-		probeStructuredEvent(3, "STABILIZATION_STARTED", `{}`),
-		probeStructuredEvent(4, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
-		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"name":"DependencyFixture","configured":true,"loaded":true,"enabled":true}`),
-		probeStructuredEvent(6, "STABILIZATION_COMPLETED", `{}`),
-		probeStructuredEvent(7, "SERVER_READY", `{"requirementsSatisfied":true}`),
-		probeStructuredEvent(8, "CLEAN_SHUTDOWN_REQUESTED", `{}`),
-		probeStructuredEvent(9, "SERVER_STOPPED", `{"shutdownRequested":true}`),
+		probeStructuredEvent(1, "TEST_PLAN", `{"status":"LOADED","consoleTests":0,"maximumCommandOutputBytes":4096}`),
+		probeStructuredEvent(2, "PROBE_LOADED", `{}`),
+		probeStructuredEvent(3, "SERVER_LOADED", `{}`),
+		probeStructuredEvent(4, "STABILIZATION_STARTED", `{}`),
+		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(6, "TARGET_REQUIREMENT", `{"name":"DependencyFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(7, "STABILIZATION_COMPLETED", `{}`),
+		probeStructuredEvent(8, "SERVER_READY", `{"requirementsSatisfied":true}`),
+		probeStructuredEvent(9, "CLEAN_SHUTDOWN_REQUESTED", `{}`),
+		probeStructuredEvent(10, "SERVER_STOPPED", `{"shutdownRequested":true}`),
 	}
 	var eventBytes int64
 	for _, event := range events {

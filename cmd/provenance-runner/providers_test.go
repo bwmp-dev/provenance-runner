@@ -32,6 +32,14 @@ func TestPaperRegistryRejectsBadOperatorPinBeforeRuntimeSetup(t *testing.T) {
 	}
 }
 
+func TestOperatorCatalogRejectsAWellFormedButUnpinnedProbe(t *testing.T) {
+	values := paperEnvironment(t)
+	values["PROVENANCE_PAPER_PROBE_SHA256"] = strings.Repeat("a", 64)
+	if _, err := operatorCatalog(func(name string) string { return values[name] }); err == nil || !strings.Contains(err.Error(), "must be probe 0.1.0") {
+		t.Fatalf("operatorCatalog() error = %v", err)
+	}
+}
+
 func TestPaperRegistrySelectsOperatorConfiguredProvider(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("gVisor provider construction requires Linux")
@@ -138,8 +146,8 @@ func paperEnvironment(t *testing.T) map[string]string {
 	}
 	values := map[string]string{
 		"PROVENANCE_PAPER_PROBE_URI":                           "https://artifacts.example.com/paper-probe.jar",
-		"PROVENANCE_PAPER_PROBE_SHA256":                        strings.Repeat("a", 64),
-		"PROVENANCE_PAPER_PROBE_SIZE_BYTES":                    "1024",
+		"PROVENANCE_PAPER_PROBE_SHA256":                        "cc981edc49a1fc27a920c3e39415428d3897eb878e748a6ad2b708972ef6e082",
+		"PROVENANCE_PAPER_PROBE_SIZE_BYTES":                    "462392",
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_URI":                "https://artifacts.example.com/prepared-runtime.tar.gz",
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256":             strings.Repeat("b", 64),
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_SIZE_BYTES":         "2048",

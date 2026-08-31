@@ -149,9 +149,25 @@ type dependencyReference struct {
 }
 
 type testPlan struct {
-	TargetPlugin              string   `json:"targetPlugin"`
-	RequiredDependencies      []string `json:"requiredDependencies,omitempty"`
-	StabilizationMilliseconds int64    `json:"stabilizationMilliseconds,omitempty"`
+	TargetPlugin              string               `json:"targetPlugin"`
+	RequiredDependencies      []string             `json:"requiredDependencies,omitempty"`
+	StabilizationMilliseconds int64                `json:"stabilizationMilliseconds,omitempty"`
+	Console                   []consoleCommandTest `json:"console,omitempty"`
+}
+
+type consoleCommandTest struct {
+	ID             string             `json:"id"`
+	Command        string             `json:"command"`
+	TimeoutSeconds int64              `json:"timeoutSeconds"`
+	Assertions     []commandAssertion `json:"assertions"`
+}
+
+type commandAssertion struct {
+	Stream             string `json:"stream"`
+	Operator           string `json:"operator,omitempty"`
+	Pattern            string `json:"pattern"`
+	Match              string `json:"match"`
+	MinimumOccurrences *int64 `json:"minimumOccurrences,omitempty"`
 }
 
 type configuration struct {
@@ -355,7 +371,7 @@ type environment struct {
 }
 
 func (e *environment) Identity() string {
-	return fmt.Sprintf("paper/%s/build-%d/paper-sha256:%s/%s/%s/java-sha256:%s/probe-sha256:%s/runtime-sha256:%s/delegate:%s", e.provider.catalog.Paper.GameVersion, e.provider.catalog.Paper.Build, e.provider.catalog.paperDigest, e.provider.catalog.Java.Distribution, e.provider.catalog.Java.Version, e.provider.catalog.javaDigest, e.provider.catalog.probeDigest, e.provider.catalog.runtimeDigest, e.provider.config.Sandbox.Identity())
+	return fmt.Sprintf("paper/%s/build-%d/paper-sha256:%s/%s/%s/java-sha256:%s/probe/%s/source-commit:%s/probe-sha256:%s/runtime-sha256:%s/delegate:%s", e.provider.catalog.Paper.GameVersion, e.provider.catalog.Paper.Build, e.provider.catalog.paperDigest, e.provider.catalog.Java.Distribution, e.provider.catalog.Java.Version, e.provider.catalog.javaDigest, e.provider.catalog.ProbeVersion, e.provider.catalog.ProbeSourceCommit, e.provider.catalog.probeDigest, e.provider.catalog.runtimeDigest, e.provider.config.Sandbox.Identity())
 }
 
 type acquiredArtifacts struct {
@@ -532,6 +548,7 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 		"-Dprovenance.probe.target=" + e.config.TestPlan.TargetPlugin,
 		"-Dprovenance.probe.requiredDependencies=" + strings.Join(required, ","),
 		"-Dprovenance.probe.events=/workspace/provenance-probe-events.ndjson",
+		"-Dprovenance.probe.testPlan=/workspace/provenance-test-plan.json",
 		"-Dprovenance.probe.stabilizationMillis=" + strconv.FormatInt(e.config.TestPlan.StabilizationMilliseconds, 10),
 		"-Dprovenance.probe.requestShutdown=true",
 		"-jar", "/workspace/paper.jar", "--nogui",
@@ -655,6 +672,9 @@ func validateCatalog(catalog Catalog) (resolvedCatalog, error) {
 	}
 	if catalog.Java.Distribution == "" || catalog.Java.Version == "" || catalog.Java.OS != "linux" || catalog.Java.Architecture != "amd64" || catalog.Java.ArchiveRoot == "" {
 		return resolvedCatalog{}, errors.New("catalog Java identity must be a Linux amd64 runtime with an archive root")
+	}
+	if catalog.ProbeVersion == "" || catalog.ProbeSourceCommit == "" {
+		return resolvedCatalog{}, errors.New("catalog probe version and source commit are required")
 	}
 	if strings.ContainsAny(catalog.Java.ArchiveRoot, "\\/") || catalog.Java.ArchiveRoot == "." || catalog.Java.ArchiveRoot == ".." {
 		return resolvedCatalog{}, errors.New("catalog Java archive root is invalid")

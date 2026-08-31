@@ -108,11 +108,13 @@ func TestProviderHonorsJobTimeout(t *testing.T) {
 		"environment":{"PROVENANCE_PROCESS_HELPER":"1"}
 	}`, os.Args[0])
 	job := localjob.Job{
-		SchemaVersion:       localjob.SchemaVersion,
-		ID:                  "job/process-timeout",
-		Provider:            ProviderName,
-		TimeoutMilliseconds: 25,
-		Environment:         json.RawMessage(configuration),
+		SchemaVersion:                       localjob.SchemaVersion,
+		ID:                                  "job/process-timeout",
+		Provider:                            ProviderName,
+		TimeoutMilliseconds:                 25,
+		PreparationTimeoutMilliseconds:      5_000,
+		GracefulShutdownTimeoutMilliseconds: 1_000,
+		Environment:                         json.RawMessage(configuration),
 	}
 	registry, err := execution.NewRegistry(New())
 	if err != nil {

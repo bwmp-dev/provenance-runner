@@ -183,6 +183,9 @@ func operatorCatalog(lookup environmentLookup) (paper.Catalog, error) {
 	if err != nil {
 		return paper.Catalog{}, err
 	}
+	if probe.SHA256 != catalog.Probe.SHA256 || probe.SizeBytes != catalog.Probe.SizeBytes {
+		return paper.Catalog{}, fmt.Errorf("PROVENANCE_PAPER_PROBE must be probe %s from %s with SHA-256 %s and size %d", catalog.ProbeVersion, catalog.ProbeSourceCommit, catalog.Probe.SHA256, catalog.Probe.SizeBytes)
+	}
 	runtimeArtifact, err := operatorArtifactPin(lookup, "PROVENANCE_PAPER_PREPARED_RUNTIME", "paper-prepared-runtime.tar.gz")
 	if err != nil {
 		return paper.Catalog{}, err
