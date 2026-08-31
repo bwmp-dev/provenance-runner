@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/workspace"
 )
 
 const ProviderName = "development-process"
@@ -34,6 +35,7 @@ type configuration struct {
 	Command                string            `json:"command"`
 	Arguments              []string          `json:"arguments,omitempty"`
 	WorkingDirectory       string            `json:"workingDirectory,omitempty"`
+	WorkspaceRoot          string            `json:"workspaceRoot,omitempty"`
 	Environment            map[string]string `json:"environment,omitempty"`
 }
 
@@ -58,6 +60,9 @@ func (*Provider) Resolve(_ context.Context, request execution.Request) (executio
 	if strings.TrimSpace(configuration.Command) == "" {
 		return nil, execution.NewClassifiedError(execution.ClassificationInvalidJob, "invalid_environment", errors.New("command is required"))
 	}
+	if configuration.WorkingDirectory != "" && configuration.WorkspaceRoot != "" {
+		return nil, execution.NewClassifiedError(execution.ClassificationInvalidJob, "invalid_environment", errors.New("workingDirectory and workspaceRoot cannot both be set"))
+	}
 	for key, value := range configuration.Environment {
 		if key == "" || strings.ContainsAny(key, "=\x00") {
 			return nil, execution.NewClassifiedError(execution.ClassificationInvalidJob, "invalid_environment", fmt.Errorf("environment variable name %q is invalid", key))
@@ -69,12 +74,14 @@ func (*Provider) Resolve(_ context.Context, request execution.Request) (executio
 
 	return &environment{
 		configuration: configuration,
+		jobID:         request.JobID,
 		outputLimit:   request.Limits.MaxOutputBytes,
 	}, nil
 }
 
 type environment struct {
 	configuration configuration
+	jobID         string
 	outputLimit   int64
 }
 
@@ -88,14 +95,17 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	}
 
 	workingDirectory := e.configuration.WorkingDirectory
-	ownedWorkingDirectory := false
+	var jobWorkspace *workspace.Workspace
 	if workingDirectory == "" {
-		var err error
-		workingDirectory, err = os.MkdirTemp("", "provenance-runner-")
+		manager, err := workspace.NewManager(e.configuration.WorkspaceRoot)
+		if err != nil {
+			return nil, execution.NewClassifiedError(execution.ClassificationInvalidJob, "invalid_workspace_root", err)
+		}
+		jobWorkspace, err = manager.Create(ctx, e.jobID)
 		if err != nil {
 			return nil, fmt.Errorf("create development process workspace: %w", err)
 		}
-		ownedWorkingDirectory = true
+		workingDirectory = jobWorkspace.Root()
 	} else {
 		absoluteDirectory, err := filepath.Abs(workingDirectory)
 		if err != nil {
@@ -112,18 +122,18 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	}
 
 	return &preparedEnvironment{
-		configuration:         e.configuration,
-		workingDirectory:      workingDirectory,
-		ownedWorkingDirectory: ownedWorkingDirectory,
-		capture:               newOutputCapture(e.outputLimit),
+		configuration:    e.configuration,
+		workingDirectory: workingDirectory,
+		workspace:        jobWorkspace,
+		capture:          newOutputCapture(e.outputLimit),
 	}, nil
 }
 
 type preparedEnvironment struct {
-	configuration         configuration
-	workingDirectory      string
-	ownedWorkingDirectory bool
-	capture               *outputCapture
+	configuration    configuration
+	workingDirectory string
+	workspace        *workspace.Workspace
+	capture          *outputCapture
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
@@ -169,16 +179,10 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 }
 
 func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
-	if !e.ownedWorkingDirectory {
+	if e.workspace == nil {
 		return nil
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(e.workingDirectory); err != nil {
-		return fmt.Errorf("remove development process workspace: %w", err)
-	}
-	return nil
+	return e.workspace.Cleanup(ctx)
 }
 
 func mergedEnvironment(overrides map[string]string) []string {

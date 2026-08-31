@@ -3,8 +3,10 @@ package process
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +126,50 @@ func TestProviderHonorsJobTimeout(t *testing.T) {
 	}
 }
 
+func TestProviderRemovesPerJobWorkspace(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	configuration := fmt.Sprintf(`{
+		"acknowledgeUnsandboxed":true,
+		"command":%q,
+		"arguments":["-test.run=TestProcessHelper","--","working-directory"],
+		"workspaceRoot":%q,
+		"environment":{"PROVENANCE_PROCESS_HELPER":"1"}
+	}`, os.Args[0], workspaceRoot)
+	job := localjob.Job{
+		SchemaVersion: localjob.SchemaVersion,
+		ID:            "job/process-workspace",
+		Provider:      ProviderName,
+		Environment:   json.RawMessage(configuration),
+	}
+	registry, err := execution.NewRegistry(New())
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	executor, err := execution.NewExecutor(registry, execution.ExecutorOptions{})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	result := executor.Execute(context.Background(), job)
+	if !result.Passed() {
+		t.Fatalf("result = %#v", result)
+	}
+	workingDirectory := strings.TrimSpace(result.Logs.Stdout)
+	if workingDirectory == "" {
+		t.Fatal("working directory output is empty")
+	}
+	relative, err := filepath.Rel(workspaceRoot, workingDirectory)
+	if err != nil || relative == "." || strings.HasPrefix(relative, "..") {
+		t.Fatalf("working directory = %q, workspace root = %q, relative = %q, error = %v", workingDirectory, workspaceRoot, relative, err)
+	}
+	if _, err := os.Stat(workingDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace Stat() error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(workspaceRoot); err != nil {
+		t.Fatalf("workspace root Stat() error = %v", err)
+	}
+}
+
 func TestProcessHelper(t *testing.T) {
 	if os.Getenv("PROVENANCE_PROCESS_HELPER") != "1" {
 		return
@@ -138,6 +184,12 @@ func TestProcessHelper(t *testing.T) {
 		os.Exit(9)
 	case "sleep":
 		time.Sleep(time.Minute)
+	case "working-directory":
+		workingDirectory, err := os.Getwd()
+		if err != nil {
+			os.Exit(11)
+		}
+		fmt.Fprint(os.Stdout, workingDirectory)
 	default:
 		os.Exit(10)
 	}
