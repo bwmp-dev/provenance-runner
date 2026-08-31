@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,6 +18,12 @@ var ErrAlreadyHeld = errors.New("runner instance lock is already held")
 type Lock struct {
 	mu     sync.Mutex
 	file   *os.File
+	closed bool
+}
+
+type Set struct {
+	mu     sync.Mutex
+	locks  []*Lock
 	closed bool
 }
 
@@ -79,6 +88,57 @@ func Acquire(path string) (*Lock, error) {
 	return &Lock{file: file}, nil
 }
 
+func AcquireAll(paths ...string) (*Set, error) {
+	unique := make(map[string]string, len(paths))
+	for _, path := range paths {
+		canonical, err := canonicalLockPath(path)
+		if err != nil {
+			return nil, err
+		}
+		key := canonical
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		unique[key] = canonical
+	}
+	keys := make([]string, 0, len(unique))
+	for key := range unique {
+		keys = append(keys, key)
+	}
+	// Canonical ordering prevents overlapping lock sets from acquiring the same
+	// roots in opposite orders.
+	sort.Strings(keys)
+
+	set := &Set{locks: make([]*Lock, 0, len(keys))}
+	for _, key := range keys {
+		lock, err := Acquire(unique[key])
+		if err != nil {
+			return nil, errors.Join(err, set.Close())
+		}
+		set.locks = append(set.locks, lock)
+	}
+	return set, nil
+}
+
+func canonicalLockPath(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("acquire runner instance lock set: path is empty")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("acquire runner instance lock set: resolve path: %w", err)
+	}
+	parent := filepath.Dir(absolute)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", fmt.Errorf("acquire runner instance lock set: create parent: %w", err)
+	}
+	canonicalParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", fmt.Errorf("acquire runner instance lock set: resolve parent: %w", err)
+	}
+	return filepath.Join(canonicalParent, filepath.Base(absolute)), nil
+}
+
 func (l *Lock) Close() error {
 	if l == nil {
 		return nil
@@ -90,4 +150,23 @@ func (l *Lock) Close() error {
 	}
 	l.closed = true
 	return errors.Join(unlockFile(l.file), l.file.Close())
+}
+
+func (s *Set) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	var closeErrors []error
+	for index := len(s.locks) - 1; index >= 0; index-- {
+		if err := s.locks[index].Close(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	return errors.Join(closeErrors...)
 }
