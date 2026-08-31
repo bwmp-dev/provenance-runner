@@ -147,6 +147,24 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 		ObservedBytes:   output.ObservedBytes,
 		OutputTruncated: output.OutputTruncated,
 	}
+	result.StructuredEvents = append([]StructuredEvent(nil), output.StructuredEvents...)
+	for index := range result.StructuredEvents {
+		result.StructuredEvents[index].Payload = append([]byte(nil), result.StructuredEvents[index].Payload...)
+	}
+	if output.CompleteLog != nil {
+		completeLog := *output.CompleteLog
+		completeLog.Data = append([]byte(nil), output.CompleteLog.Data...)
+		result.CompleteLog = &completeLog
+	}
+	result.Usage.RawOutputBytes = output.EvidenceUsage.RawBytesObserved
+	result.Usage.CapturedOutputBytes = output.EvidenceUsage.CapturedBytes
+	result.Usage.StructuredEventCount = output.EvidenceUsage.StructuredEventCount
+	result.Usage.StructuredEventBytes = output.EvidenceUsage.StructuredEventBytes
+	result.Usage.CompleteLogBytes = output.EvidenceUsage.CompleteLogBytes
+	result.Usage.CompressedLogBytes = output.EvidenceUsage.CompressedLogBytes
+	result.Usage.TruncatedLineCount = output.EvidenceUsage.TruncatedLineCount
+	result.Usage.OutputTruncated = output.EvidenceUsage.OutputTruncated
+	result.Usage.StructuredEventsTruncated = output.EvidenceUsage.EventsTruncated
 	if err != nil {
 		result.Logs.Error = err.Error()
 		if result.Failure == nil {

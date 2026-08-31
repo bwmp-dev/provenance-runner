@@ -1,10 +1,13 @@
 package process
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +63,9 @@ func TestProviderExecutesAndBoundsOutput(t *testing.T) {
 	}
 	if result.Cleanup == nil || !result.Cleanup.Succeeded {
 		t.Fatalf("cleanup = %#v", result.Cleanup)
+	}
+	if result.CompleteLog == nil || len(result.CompleteLog.Data) == 0 {
+		t.Fatalf("complete log = %#v", result.CompleteLog)
 	}
 }
 
@@ -124,6 +130,9 @@ func TestProviderHonorsJobTimeout(t *testing.T) {
 	if result.Cleanup == nil || !result.Cleanup.Succeeded {
 		t.Fatalf("cleanup = %#v", result.Cleanup)
 	}
+	if result.CompleteLog == nil || len(result.CompleteLog.Data) == 0 {
+		t.Fatalf("complete log after timeout = %#v", result.CompleteLog)
+	}
 }
 
 func TestProviderRemovesPerJobWorkspace(t *testing.T) {
@@ -170,6 +179,67 @@ func TestProviderRemovesPerJobWorkspace(t *testing.T) {
 	}
 }
 
+func TestProviderProducesSanitizedCompressedEvidence(t *testing.T) {
+	configuration := fmt.Sprintf(`{
+		"acknowledgeUnsandboxed":true,
+		"command":%q,
+		"arguments":["-test.run=TestProcessHelper","--","evidence"],
+		"redactSecrets":["secret-value"],
+		"environment":{"PROVENANCE_PROCESS_HELPER":"1"}
+	}`, os.Args[0])
+	job := localjob.Job{
+		SchemaVersion:  localjob.SchemaVersion,
+		ID:             "job/process-evidence",
+		Provider:       ProviderName,
+		MaxOutputBytes: 4096,
+		Environment:    json.RawMessage(configuration),
+	}
+	registry, err := execution.NewRegistry(New())
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	executor, err := execution.NewExecutor(registry, execution.ExecutorOptions{})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	result := executor.Execute(context.Background(), job)
+	if !result.Passed() {
+		t.Fatalf("result = %#v", result)
+	}
+	want := "[REDACTED] invalid=�\n"
+	if result.Logs == nil || result.Logs.Stdout != want {
+		t.Fatalf("logs = %#v, want stdout %q", result.Logs, want)
+	}
+	if result.CompleteLog == nil || len(result.CompleteLog.Data) == 0 || result.CompleteLog.ContentEncoding != "gzip" {
+		t.Fatalf("complete log = %#v", result.CompleteLog)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(result.CompleteLog.Data))
+	if err != nil {
+		t.Fatalf("gzip.NewReader() error = %v", err)
+	}
+	complete, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if strings.Contains(string(complete), "secret-value") || strings.ContainsRune(string(complete), '\x1b') {
+		t.Fatalf("complete log was not sanitized: %q", complete)
+	}
+	if result.Usage.RawOutputBytes == 0 || result.Usage.CapturedOutputBytes == 0 || result.Usage.CompressedLogBytes != int64(len(result.CompleteLog.Data)) {
+		t.Fatalf("usage = %#v", result.Usage)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if bytes.Contains(encoded, result.CompleteLog.Data) {
+		t.Fatal("structured result contains compressed log payload")
+	}
+}
+
 func TestProcessHelper(t *testing.T) {
 	if os.Getenv("PROVENANCE_PROCESS_HELPER") != "1" {
 		return
@@ -190,15 +260,11 @@ func TestProcessHelper(t *testing.T) {
 			os.Exit(11)
 		}
 		fmt.Fprint(os.Stdout, workingDirectory)
+	case "evidence":
+		_, _ = os.Stdout.Write([]byte("\x1b[31msecret-value\x1b[0m invalid="))
+		_, _ = os.Stdout.Write([]byte{0xff, '\n'})
 	default:
 		os.Exit(10)
 	}
 	os.Exit(0)
-}
-
-func TestNormalizeOutputReplacesInvalidUTF8(t *testing.T) {
-	got := normalizeOutput([]byte{'a', 0xff, 'b'})
-	if got != "a\uFFFDb" {
-		t.Fatalf("normalizeOutput() = %q", got)
-	}
 }

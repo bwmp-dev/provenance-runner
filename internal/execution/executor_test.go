@@ -27,7 +27,32 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 		},
 		collect: func(context.Context) (CollectedOutput, error) {
 			record("collect")
-			return CollectedOutput{Stdout: "ready\n", CapturedBytes: 6, ObservedBytes: 6}, nil
+			return CollectedOutput{
+				Stdout:        "ready\n",
+				CapturedBytes: 6,
+				ObservedBytes: 6,
+				StructuredEvents: []StructuredEvent{{
+					Sequence: 1,
+					Kind:     "probe.ready",
+					Payload:  json.RawMessage(`{"ready":true}`),
+				}},
+				CompleteLog: &CompleteLog{
+					ContentType:       "text/plain; charset=utf-8",
+					ContentEncoding:   "gzip",
+					SHA256:            "digest",
+					UncompressedBytes: 6,
+					CompressedBytes:   10,
+					Data:              []byte("compressed"),
+				},
+				EvidenceUsage: EvidenceUsage{
+					RawBytesObserved:     6,
+					CapturedBytes:        6,
+					StructuredEventCount: 1,
+					StructuredEventBytes: 14,
+					CompleteLogBytes:     6,
+					CompressedLogBytes:   10,
+				},
+			}, nil
 		},
 		cleanup: func(context.Context) error {
 			record("cleanup")
@@ -60,6 +85,15 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 	}
 	if result.Logs == nil || result.Logs.Stdout != "ready\n" {
 		t.Fatalf("logs = %#v", result.Logs)
+	}
+	if len(result.StructuredEvents) != 1 || result.StructuredEvents[0].Kind != "probe.ready" {
+		t.Fatalf("structured events = %#v", result.StructuredEvents)
+	}
+	if result.CompleteLog == nil || string(result.CompleteLog.Data) != "compressed" {
+		t.Fatalf("complete log = %#v", result.CompleteLog)
+	}
+	if result.Usage.StructuredEventCount != 1 || result.Usage.StructuredEventBytes != 14 || result.Usage.CompressedLogBytes != 10 {
+		t.Fatalf("usage = %#v", result.Usage)
 	}
 	if result.Cleanup == nil || !result.Cleanup.Attempted || !result.Cleanup.Succeeded {
 		t.Fatalf("cleanup = %#v", result.Cleanup)

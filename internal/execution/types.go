@@ -66,11 +66,41 @@ type ExecutionOutcome struct {
 }
 
 type CollectedOutput struct {
-	Stdout          string
-	Stderr          string
-	CapturedBytes   int64
-	ObservedBytes   int64
-	OutputTruncated bool
+	Stdout           string
+	Stderr           string
+	CapturedBytes    int64
+	ObservedBytes    int64
+	OutputTruncated  bool
+	StructuredEvents []StructuredEvent
+	CompleteLog      *CompleteLog
+	EvidenceUsage    EvidenceUsage
+}
+
+type StructuredEvent struct {
+	Sequence uint64          `json:"sequence"`
+	Kind     string          `json:"kind"`
+	Payload  json.RawMessage `json:"payload"`
+}
+
+type CompleteLog struct {
+	ContentType       string `json:"contentType"`
+	ContentEncoding   string `json:"contentEncoding"`
+	SHA256            string `json:"sha256"`
+	UncompressedBytes int64  `json:"uncompressedBytes"`
+	CompressedBytes   int64  `json:"compressedBytes"`
+	Data              []byte `json:"-"`
+}
+
+type EvidenceUsage struct {
+	RawBytesObserved     int64
+	CapturedBytes        int64
+	StructuredEventCount int64
+	StructuredEventBytes int64
+	CompleteLogBytes     int64
+	CompressedLogBytes   int64
+	TruncatedLineCount   int64
+	OutputTruncated      bool
+	EventsTruncated      bool
 }
 
 type Failure struct {
@@ -107,19 +137,21 @@ func NewClassifiedError(classification Classification, code string, err error) e
 }
 
 type Result struct {
-	SchemaVersion  string             `json:"schemaVersion"`
-	JobID          string             `json:"jobId,omitempty"`
-	Status         string             `json:"status"`
-	Classification Classification     `json:"classification"`
-	Phase          Phase              `json:"phase"`
-	Environment    *EnvironmentResult `json:"environment,omitempty"`
-	Execution      *ExecutionResult   `json:"execution,omitempty"`
-	Logs           *LogsResult        `json:"logs,omitempty"`
-	Cleanup        *CleanupResult     `json:"cleanup,omitempty"`
-	Usage          UsageResult        `json:"usage"`
-	Failure        *Failure           `json:"failure,omitempty"`
-	StartedAt      time.Time          `json:"startedAt"`
-	CompletedAt    time.Time          `json:"completedAt"`
+	SchemaVersion    string             `json:"schemaVersion"`
+	JobID            string             `json:"jobId,omitempty"`
+	Status           string             `json:"status"`
+	Classification   Classification     `json:"classification"`
+	Phase            Phase              `json:"phase"`
+	Environment      *EnvironmentResult `json:"environment,omitempty"`
+	Execution        *ExecutionResult   `json:"execution,omitempty"`
+	Logs             *LogsResult        `json:"logs,omitempty"`
+	StructuredEvents []StructuredEvent  `json:"structuredEvents,omitempty"`
+	CompleteLog      *CompleteLog       `json:"completeLog,omitempty"`
+	Cleanup          *CleanupResult     `json:"cleanup,omitempty"`
+	Usage            UsageResult        `json:"usage"`
+	Failure          *Failure           `json:"failure,omitempty"`
+	StartedAt        time.Time          `json:"startedAt"`
+	CompletedAt      time.Time          `json:"completedAt"`
 }
 
 type EnvironmentResult struct {
@@ -148,7 +180,16 @@ type CleanupResult struct {
 }
 
 type UsageResult struct {
-	WallTimeMilliseconds int64 `json:"wallTimeMilliseconds"`
+	WallTimeMilliseconds      int64 `json:"wallTimeMilliseconds"`
+	RawOutputBytes            int64 `json:"rawOutputBytes,omitempty"`
+	CapturedOutputBytes       int64 `json:"capturedOutputBytes,omitempty"`
+	StructuredEventCount      int64 `json:"structuredEventCount,omitempty"`
+	StructuredEventBytes      int64 `json:"structuredEventBytes,omitempty"`
+	CompleteLogBytes          int64 `json:"completeLogBytes,omitempty"`
+	CompressedLogBytes        int64 `json:"compressedLogBytes,omitempty"`
+	TruncatedLineCount        int64 `json:"truncatedLineCount,omitempty"`
+	OutputTruncated           bool  `json:"outputTruncated,omitempty"`
+	StructuredEventsTruncated bool  `json:"structuredEventsTruncated,omitempty"`
 }
 
 func (r Result) Passed() bool {

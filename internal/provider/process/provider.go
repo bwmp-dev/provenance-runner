@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/workspace"
 )
@@ -37,6 +38,8 @@ type configuration struct {
 	WorkingDirectory       string            `json:"workingDirectory,omitempty"`
 	WorkspaceRoot          string            `json:"workspaceRoot,omitempty"`
 	Environment            map[string]string `json:"environment,omitempty"`
+	MaxLineBytes           int64             `json:"maxLineBytes,omitempty"`
+	RedactSecrets          []string          `json:"redactSecrets,omitempty"`
 }
 
 func (*Provider) Resolve(_ context.Context, request execution.Request) (execution.Environment, error) {
@@ -71,18 +74,26 @@ func (*Provider) Resolve(_ context.Context, request execution.Request) (executio
 			return nil, execution.NewClassifiedError(execution.ClassificationInvalidJob, "invalid_environment", fmt.Errorf("environment variable %q contains a null byte", key))
 		}
 	}
+	evidenceConfig := evidence.Config{
+		MaxLineBytes:  configuration.MaxLineBytes,
+		MaxTotalBytes: request.Limits.MaxOutputBytes,
+		Secrets:       configuration.RedactSecrets,
+	}
+	if err := evidence.ValidateConfig(evidenceConfig); err != nil {
+		return nil, execution.NewClassifiedError(execution.ClassificationInvalidJob, "invalid_evidence_configuration", err)
+	}
 
 	return &environment{
-		configuration: configuration,
-		jobID:         request.JobID,
-		outputLimit:   request.Limits.MaxOutputBytes,
+		configuration:  configuration,
+		evidenceConfig: evidenceConfig,
+		jobID:          request.JobID,
 	}, nil
 }
 
 type environment struct {
-	configuration configuration
-	jobID         string
-	outputLimit   int64
+	configuration  configuration
+	evidenceConfig evidence.Config
+	jobID          string
 }
 
 func (*environment) Identity() string {
@@ -92,6 +103,10 @@ func (*environment) Identity() string {
 func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironment, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	collector, err := evidence.NewCollector(e.evidenceConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create development process evidence collector: %w", err)
 	}
 
 	workingDirectory := e.configuration.WorkingDirectory
@@ -125,7 +140,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		configuration:    e.configuration,
 		workingDirectory: workingDirectory,
 		workspace:        jobWorkspace,
-		capture:          newOutputCapture(e.outputLimit),
+		evidence:         collector,
 	}, nil
 }
 
@@ -133,17 +148,25 @@ type preparedEnvironment struct {
 	configuration    configuration
 	workingDirectory string
 	workspace        *workspace.Workspace
-	capture          *outputCapture
+	evidence         *evidence.Collector
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
 	command := exec.CommandContext(ctx, e.configuration.Command, e.configuration.Arguments...)
 	command.Dir = e.workingDirectory
 	command.Env = mergedEnvironment(e.configuration.Environment)
-	command.Stdout = e.capture.writer(true)
-	command.Stderr = e.capture.writer(false)
+	stdout, err := e.evidence.RawWriter(evidence.StreamStdout)
+	if err != nil {
+		return execution.ExecutionOutcome{}, err
+	}
+	stderr, err := e.evidence.RawWriter(evidence.StreamStderr)
+	if err != nil {
+		return execution.ExecutionOutcome{}, err
+	}
+	command.Stdout = stdout
+	command.Stderr = stderr
 
-	err := command.Run()
+	err = command.Run()
 	var exitCode *int
 	if command.ProcessState != nil {
 		code := command.ProcessState.ExitCode()
@@ -168,13 +191,44 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 	if err := ctx.Err(); err != nil {
 		return execution.CollectedOutput{}, err
 	}
-	stdout, stderr, captured, observed, truncated := e.capture.collect()
+	bundle, err := e.evidence.Snapshot(ctx)
+	if err != nil {
+		return execution.CollectedOutput{}, err
+	}
+	events := make([]execution.StructuredEvent, len(bundle.Events))
+	for index, event := range bundle.Events {
+		events[index] = execution.StructuredEvent{
+			Sequence: event.Sequence,
+			Kind:     event.Kind,
+			Payload:  append([]byte(nil), event.Payload...),
+		}
+	}
 	return execution.CollectedOutput{
-		Stdout:          stdout,
-		Stderr:          stderr,
-		CapturedBytes:   captured,
-		ObservedBytes:   observed,
-		OutputTruncated: truncated,
+		Stdout:           bundle.Stdout,
+		Stderr:           bundle.Stderr,
+		CapturedBytes:    bundle.Usage.CapturedBytes,
+		ObservedBytes:    bundle.Usage.RawBytesObserved,
+		OutputTruncated:  bundle.Usage.OutputTruncated,
+		StructuredEvents: events,
+		CompleteLog: &execution.CompleteLog{
+			ContentType:       bundle.CompleteLog.ContentType,
+			ContentEncoding:   bundle.CompleteLog.ContentEncoding,
+			SHA256:            bundle.CompleteLog.SHA256,
+			UncompressedBytes: bundle.CompleteLog.UncompressedBytes,
+			CompressedBytes:   bundle.CompleteLog.CompressedBytes,
+			Data:              append([]byte(nil), bundle.CompleteLog.Data...),
+		},
+		EvidenceUsage: execution.EvidenceUsage{
+			RawBytesObserved:     bundle.Usage.RawBytesObserved,
+			CapturedBytes:        bundle.Usage.CapturedBytes,
+			StructuredEventCount: bundle.Usage.StructuredEventCount,
+			StructuredEventBytes: bundle.Usage.StructuredEventBytes,
+			CompleteLogBytes:     bundle.Usage.CompleteLogBytes,
+			CompressedLogBytes:   bundle.Usage.CompressedLogBytes,
+			TruncatedLineCount:   bundle.Usage.TruncatedLineCount,
+			OutputTruncated:      bundle.Usage.OutputTruncated,
+			EventsTruncated:      bundle.Usage.EventsTruncated,
+		},
 	}, nil
 }
 
