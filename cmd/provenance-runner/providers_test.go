@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -100,6 +101,30 @@ func TestPaperRegistryLockPreventsConcurrentReconciliation(t *testing.T) {
 	}
 	if err := second.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPaperRegistryImmediatelyRemovesOwnedCrashWorkspaceWhileLocked(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("gVisor provider construction requires Linux")
+	}
+	values := paperEnvironment(t)
+	owned := filepath.Join(values["PROVENANCE_WORKSPACE_ROOT"], "provenance-job-crashed")
+	if err := os.Mkdir(owned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := fmt.Sprintf(`{"version":1,"jobId":"attempt-1","createdAt":%q}`, time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(owned, ".provenance-workspace.json"), []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := registryForProvider(context.Background(), "paper", func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.Close()
+	if _, err := os.Stat(owned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned crash workspace remains: %v", err)
 	}
 }
 

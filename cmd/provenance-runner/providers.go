@@ -149,6 +149,9 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup)
 	if err := sandbox.Reconcile(reconcileContext); err != nil {
 		return fail(fmt.Errorf("reconcile gVisor state: %w", err))
 	}
+	if err := manager.ReconcileOwnedAttempts(reconcileContext); err != nil {
+		return fail(fmt.Errorf("reconcile owned attempt workspaces: %w", err))
+	}
 
 	sharedCache, err := artifact.NewCache(filepath.Join(cacheRoot, "content"), artifact.CacheOptions{
 		MaximumEntryBytes: cacheEntryLimit,

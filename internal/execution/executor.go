@@ -18,11 +18,19 @@ type Executor struct {
 	registry          *Registry
 	collectionTimeout time.Duration
 	cleanupTimeout    time.Duration
+	beforeExecute     func(context.Context, ExecutionStart) error
 }
 
 type ExecutorOptions struct {
 	CollectionTimeout time.Duration
 	CleanupTimeout    time.Duration
+	BeforeExecute     func(context.Context, ExecutionStart) error
+}
+
+type ExecutionStart struct {
+	JobID               string
+	Provider            string
+	EnvironmentIdentity string
 }
 
 func NewExecutor(registry *Registry, options ExecutorOptions) (*Executor, error) {
@@ -45,6 +53,7 @@ func NewExecutor(registry *Registry, options ExecutorOptions) (*Executor, error)
 		registry:          registry,
 		collectionTimeout: options.CollectionTimeout,
 		cleanupTimeout:    options.CleanupTimeout,
+		beforeExecute:     options.BeforeExecute,
 	}, nil
 }
 
@@ -109,12 +118,13 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 		if failure := contextFailure(parent, preparationContext); failure != nil {
 			setFailure(&result, PhasePreparation, failure)
 		} else {
+			start := ExecutionStart{JobID: job.ID, Provider: provider.Name(), EnvironmentIdentity: result.Environment.Identity}
 			if job.UsesPhaseTimeouts() {
 				executionContext, cancelExecution := context.WithTimeout(parent, job.Timeout())
-				executePrepared(parent, executionContext, prepared, &result)
+				executePrepared(parent, executionContext, prepared, start, e.beforeExecute, &result)
 				cancelExecution()
 			} else {
-				executePrepared(parent, preparationContext, prepared, &result)
+				executePrepared(parent, preparationContext, prepared, start, e.beforeExecute, &result)
 			}
 		}
 	}
@@ -128,8 +138,18 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 	return finishResult(result)
 }
 
-func executePrepared(parent, runContext context.Context, prepared PreparedEnvironment, result *Result) {
+func executePrepared(parent, runContext context.Context, prepared PreparedEnvironment, start ExecutionStart, beforeExecute func(context.Context, ExecutionStart) error, result *Result) {
 	result.Phase = PhaseExecution
+	if beforeExecute != nil {
+		if err := beforeExecute(runContext, start); err != nil {
+			setFailure(result, PhaseExecution, classifyError(parent, runContext, "before_execute_failed", err))
+			return
+		}
+		if failure := contextFailure(parent, runContext); failure != nil {
+			setFailure(result, PhaseExecution, failure)
+			return
+		}
+	}
 	outcome, err := prepared.Execute(runContext)
 	result.Execution = &ExecutionResult{ExitCode: outcome.ExitCode}
 	if err != nil {
