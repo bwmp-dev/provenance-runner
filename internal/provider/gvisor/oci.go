@@ -1,6 +1,10 @@
 package gvisor
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/bwmp-dev/provenance-runner/internal/execution"
+)
 
 type ociSpec struct {
 	OCIVersion string     `json:"ociVersion"`
@@ -107,7 +111,7 @@ type ociPIDs struct {
 	Limit int64 `json:"limit"`
 }
 
-func buildSpec(config configuration, rootFS, inputs, containerID string) ociSpec {
+func buildSpec(config configuration, rootFS, inputs, containerID string, readOnlyMounts []execution.ReadOnlyMount) ociSpec {
 	const cpuPeriod = uint64(100_000)
 	command := append([]string{config.Command}, config.Arguments...)
 	emptyCapabilities := []string{}
@@ -119,6 +123,21 @@ func buildSpec(config configuration, rootFS, inputs, containerID string) ociSpec
 	}
 	workspaceBytes := (config.DiskBytes + 1) / 2
 	temporaryBytes := config.DiskBytes - workspaceBytes
+	mounts := []ociMount{
+		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "noexec", "nodev"}},
+		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=0755", "size=65536"}},
+		{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
+		{Destination: "/workspace", Type: "tmpfs", Source: "tmpfs", Options: writableTmpfsOptions(workspaceBytes)},
+		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: writableTmpfsOptions(temporaryBytes)},
+		{Destination: "/inputs", Type: "bind", Source: inputs, Options: []string{"rbind", "ro", "nosuid", "nodev", "noexec"}},
+	}
+	for _, mount := range readOnlyMounts {
+		options := []string{"bind", "ro", "nosuid", "nodev"}
+		if !mount.Executable {
+			options = append(options, "noexec")
+		}
+		mounts = append(mounts, ociMount{Destination: mount.Destination, Type: "bind", Source: mount.Source, Options: options})
+	}
 	return ociSpec{
 		OCIVersion: "1.1.0",
 		Process: ociProcess{
@@ -149,14 +168,7 @@ func buildSpec(config configuration, rootFS, inputs, containerID string) ociSpec
 		},
 		Root:     ociRoot{Path: rootFS, Readonly: true},
 		Hostname: "provenance",
-		Mounts: []ociMount{
-			{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "noexec", "nodev"}},
-			{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=0755", "size=65536"}},
-			{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
-			{Destination: "/workspace", Type: "tmpfs", Source: "tmpfs", Options: writableTmpfsOptions(workspaceBytes)},
-			{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: writableTmpfsOptions(temporaryBytes)},
-			{Destination: "/inputs", Type: "bind", Source: inputs, Options: []string{"rbind", "ro", "nosuid", "nodev", "noexec"}},
-		},
+		Mounts:   mounts,
 		Linux: ociLinux{
 			Namespaces: []ociNamespace{{Type: "pid"}, {Type: "network"}, {Type: "mount"}, {Type: "ipc"}, {Type: "uts"}, {Type: "cgroup"}},
 			Devices:    devices,

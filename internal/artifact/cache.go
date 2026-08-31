@@ -13,20 +13,26 @@ import (
 )
 
 const DefaultMaximumEntryBytes int64 = 1 << 30
+const DefaultMaximumTotalBytes int64 = 16 << 30
 
 var (
-	ErrCacheCorrupt   = errors.New("artifact cache entry is corrupt")
-	ErrDigestMismatch = errors.New("artifact SHA-256 does not match expected digest")
-	ErrEntryTooLarge  = errors.New("artifact exceeds cache entry size limit")
+	ErrCacheCorrupt       = errors.New("artifact cache entry is corrupt")
+	ErrDigestMismatch     = errors.New("artifact SHA-256 does not match expected digest")
+	ErrEntryTooLarge      = errors.New("artifact exceeds cache entry size limit")
+	ErrSizeMismatch       = errors.New("artifact size does not match declared size")
+	ErrCacheQuotaExceeded = errors.New("artifact cache total-byte quota exceeded")
 )
 
 type CacheOptions struct {
 	MaximumEntryBytes int64
+	MaximumTotalBytes int64
 }
 
 type Cache struct {
 	root              string
 	maximumEntryBytes int64
+	maximumTotalBytes int64
+	quotaMu           sync.Mutex
 	lockMu            sync.Mutex
 	locks             map[string]*keyLock
 }
@@ -43,8 +49,17 @@ func NewCache(root string, options CacheOptions) (*Cache, error) {
 	if options.MaximumEntryBytes < 0 {
 		return nil, errors.New("create artifact cache: maximum entry size cannot be negative")
 	}
+	if options.MaximumTotalBytes < 0 {
+		return nil, errors.New("create artifact cache: maximum total size cannot be negative")
+	}
 	if options.MaximumEntryBytes == 0 {
 		options.MaximumEntryBytes = DefaultMaximumEntryBytes
+	}
+	if options.MaximumTotalBytes == 0 {
+		options.MaximumTotalBytes = DefaultMaximumTotalBytes
+	}
+	if options.MaximumEntryBytes > options.MaximumTotalBytes {
+		return nil, errors.New("create artifact cache: entry size limit exceeds total size limit")
 	}
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -66,11 +81,23 @@ func NewCache(root string, options CacheOptions) (*Cache, error) {
 	return &Cache{
 		root:              absoluteRoot,
 		maximumEntryBytes: options.MaximumEntryBytes,
+		maximumTotalBytes: options.MaximumTotalBytes,
 		locks:             make(map[string]*keyLock),
 	}, nil
 }
 
 func (c *Cache) Acquire(ctx context.Context, expected Digest, source Source) (*Entry, error) {
+	return c.acquire(ctx, expected, c.maximumEntryBytes, false, source)
+}
+
+func (c *Cache) AcquireExact(ctx context.Context, expected Digest, expectedBytes int64, source Source) (*Entry, error) {
+	if expectedBytes <= 0 || expectedBytes > c.maximumEntryBytes {
+		return nil, fmt.Errorf("acquire artifact: declared size must be between 1 and %d", c.maximumEntryBytes)
+	}
+	return c.acquire(ctx, expected, expectedBytes, true, source)
+}
+
+func (c *Cache) acquire(ctx context.Context, expected Digest, maximumBytes int64, exact bool, source Source) (*Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("acquire artifact: %w", err)
 	}
@@ -79,16 +106,28 @@ func (c *Cache) Acquire(ctx context.Context, expected Digest, source Source) (*E
 		return nil, fmt.Errorf("acquire artifact: %w", err)
 	}
 	defer unlock()
+	c.quotaMu.Lock()
+	defer c.quotaMu.Unlock()
 
 	entry, exists, err := c.existingEntry(ctx, expected)
 	if err != nil {
 		return nil, err
 	}
 	if exists {
+		if exact && entry.Size() != maximumBytes {
+			return nil, fmt.Errorf("%w: expected %d bytes, cached %d", ErrSizeMismatch, maximumBytes, entry.Size())
+		}
 		return entry, nil
 	}
 	if source == nil {
 		return nil, errors.New("acquire artifact: source is required on a cache miss")
+	}
+	currentBytes, err := c.currentBytes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if maximumBytes > c.maximumTotalBytes-currentBytes {
+		return nil, fmt.Errorf("%w: current %d, requested %d, limit %d", ErrCacheQuotaExceeded, currentBytes, maximumBytes, c.maximumTotalBytes)
 	}
 
 	targetPath := c.entryPath(expected)
@@ -106,7 +145,7 @@ func (c *Cache) Acquire(ctx context.Context, expected Digest, source Source) (*E
 		ctx:     ctx,
 		file:    temporaryFile,
 		hash:    sha256.New(),
-		maximum: c.maximumEntryBytes,
+		maximum: maximumBytes,
 	}
 	fetchErr := source.Fetch(ctx, writer)
 	if fetchErr == nil {
@@ -118,6 +157,10 @@ func (c *Cache) Acquire(ctx context.Context, expected Digest, source Source) (*E
 	if fetchErr != nil {
 		temporaryFile.Close()
 		return nil, fmt.Errorf("acquire artifact: %w", fetchErr)
+	}
+	if exact && writer.written != maximumBytes {
+		temporaryFile.Close()
+		return nil, fmt.Errorf("%w: expected %d bytes, received %d", ErrSizeMismatch, maximumBytes, writer.written)
 	}
 
 	var actual Digest
@@ -148,6 +191,9 @@ func (c *Cache) Acquire(ctx context.Context, expected Digest, source Source) (*E
 		if !exists {
 			return nil, errors.New("publish cache entry atomically: target disappeared")
 		}
+		if exact && entry.Size() != maximumBytes {
+			return nil, fmt.Errorf("%w: expected %d bytes, cached %d", ErrSizeMismatch, maximumBytes, entry.Size())
+		}
 		return entry, nil
 	}
 
@@ -156,6 +202,37 @@ func (c *Cache) Acquire(ctx context.Context, expected Digest, source Source) (*E
 		path:   targetPath,
 		size:   writer.written,
 	}, nil
+}
+
+func (c *Cache) currentBytes(ctx context.Context) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(c.root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("inspect artifact cache quota: symbolic link %q is not permitted", path)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > c.maximumTotalBytes-total {
+			return errors.New("inspect artifact cache quota: invalid or oversized cache content")
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("inspect artifact cache quota: %w", err)
+	}
+	return total, nil
 }
 
 func (c *Cache) existingEntry(ctx context.Context, expected Digest) (*Entry, bool, error) {

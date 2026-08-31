@@ -98,6 +98,55 @@ func TestCacheEnforcesMaximumEntrySize(t *testing.T) {
 	}
 }
 
+func TestCacheAcquireExactStopsAtDeclaredBoundaryAndDoesNotPublish(t *testing.T) {
+	payload := []byte("12345")
+	digest := SHA256(payload)
+	cache := newTestCache(t, CacheOptions{MaximumEntryBytes: 64})
+	var attempted atomic.Int32
+	source := SourceFunc(func(_ context.Context, destination io.Writer) error {
+		for _, value := range payload {
+			attempted.Add(1)
+			if _, err := destination.Write([]byte{value}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if _, err := cache.AcquireExact(context.Background(), digest, int64(len(payload)-1), source); !errors.Is(err, ErrEntryTooLarge) {
+		t.Fatalf("AcquireExact() error = %v, want ErrEntryTooLarge", err)
+	}
+	if attempted.Load() != int32(len(payload)) {
+		t.Fatalf("source write attempts = %d, want %d", attempted.Load(), len(payload))
+	}
+	if _, err := os.Stat(cache.entryPath(digest)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache entry Stat() error = %v, want not exist", err)
+	}
+	entry, err := cache.AcquireExact(context.Background(), digest, int64(len(payload)), bytesSource(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached, err := cache.AcquireExact(context.Background(), digest, int64(len(payload)), nil); err != nil || cached.Size() != int64(len(payload)) || entry.Size() != cached.Size() {
+		t.Fatalf("cached exact acquire = %#v, %v", cached, err)
+	}
+}
+
+func TestCacheEnforcesAggregateQuotaWithoutBreakingExistingEntries(t *testing.T) {
+	firstPayload := []byte("1234")
+	secondPayload := []byte("5678")
+	cache := newTestCache(t, CacheOptions{MaximumEntryBytes: 4, MaximumTotalBytes: 7})
+	firstDigest := SHA256(firstPayload)
+
+	if _, err := cache.AcquireExact(context.Background(), firstDigest, int64(len(firstPayload)), bytesSource(firstPayload)); err != nil {
+		t.Fatalf("AcquireExact(first) error = %v", err)
+	}
+	if _, err := cache.AcquireExact(context.Background(), SHA256(secondPayload), int64(len(secondPayload)), bytesSource(secondPayload)); !errors.Is(err, ErrCacheQuotaExceeded) {
+		t.Fatalf("AcquireExact(second) error = %v, want ErrCacheQuotaExceeded", err)
+	}
+	if _, err := cache.AcquireExact(context.Background(), firstDigest, int64(len(firstPayload)), nil); err != nil {
+		t.Fatalf("AcquireExact(existing) error = %v", err)
+	}
+}
+
 func TestCacheSerializesConcurrentAcquisition(t *testing.T) {
 	payload := []byte("concurrent fixture")
 	digest := SHA256(payload)

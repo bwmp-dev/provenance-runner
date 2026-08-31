@@ -58,6 +58,9 @@ func (p *Provider) Reconcile(ctx context.Context) error {
 			Args: p.runArguments("delete", "--force", metadata.ContainerID),
 		})
 		if result.Err != nil {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(reconciliationErrors, err)...)
+			}
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("delete abandoned container %s: %w", metadata.ContainerID, result.Err))
 			continue
 		}

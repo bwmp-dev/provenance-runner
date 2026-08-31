@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,23 +15,24 @@ import (
 )
 
 type Collector struct {
-	mu              sync.Mutex
-	snapshotMu      sync.Mutex
-	config          Config
-	processors      map[Stream]*rawProcessor
-	stdout          bytes.Buffer
-	stderr          bytes.Buffer
-	tail            []rawTail
-	tailBytes       int64
-	events          []StructuredEvent
-	eventBytes      int64
-	rawObserved     int64
-	captured        int64
-	truncatedLines  int64
-	totalTruncated  bool
-	eventsTruncated bool
-	closed          bool
-	snapshot        *Bundle
+	mu                   sync.Mutex
+	snapshotMu           sync.Mutex
+	config               Config
+	processors           map[Stream]*rawProcessor
+	stdout               bytes.Buffer
+	stderr               bytes.Buffer
+	tail                 []rawTail
+	tailBytes            int64
+	events               []StructuredEvent
+	eventBytes           int64
+	rawObserved          int64
+	captured             int64
+	truncatedLines       int64
+	totalTruncated       bool
+	eventsTruncated      bool
+	structuredEventError string
+	closed               bool
+	snapshot             *Bundle
 }
 
 type rawTail struct {
@@ -73,9 +75,14 @@ func (c *Collector) RecordEvent(ctx context.Context, input EventInput) error {
 	if c.closed {
 		return errors.New("record structured event: collector is closed")
 	}
+	c.recordEventLocked(input)
+	return nil
+}
+
+func (c *Collector) recordEventLocked(input EventInput) {
 	if len(c.events) >= c.config.MaxEvents {
 		c.eventsTruncated = true
-		return nil
+		return
 	}
 	payload := append([]byte(nil), input.Payload...)
 	c.events = append(c.events, StructuredEvent{
@@ -84,7 +91,6 @@ func (c *Collector) RecordEvent(ctx context.Context, input EventInput) error {
 		Payload:  payload,
 	})
 	c.eventBytes += int64(len(payload))
-	return nil
 }
 
 func (c *Collector) Snapshot(ctx context.Context) (Bundle, error) {
@@ -141,7 +147,8 @@ func (c *Collector) Snapshot(ctx context.Context) (Bundle, error) {
 			CompressedBytes:   int64(len(compressed)),
 			Data:              compressed,
 		},
-		Usage: usage,
+		Usage:                usage,
+		StructuredEventError: c.structuredEventError,
 	}
 	c.snapshot = &bundle
 	return cloneBundle(bundle), nil
@@ -157,6 +164,25 @@ func (c *Collector) observeRawBytes(count int64) bool {
 func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if stream == StreamStdout && c.config.StructuredLinePrefix != "" && bytes.HasPrefix(line, []byte(c.config.StructuredLinePrefix)) {
+		if lineTruncated {
+			c.setStructuredEventError("structured event line exceeded the configured line limit")
+			return
+		}
+		payload := bytes.TrimSuffix(line[len(c.config.StructuredLinePrefix):], []byte("\n"))
+		payload = bytes.TrimSuffix(payload, []byte("\r"))
+		input := EventInput{Kind: c.config.StructuredLineKind, Payload: json.RawMessage(payload)}
+		if err := validateEvent(input, c.config.MaxEventBytes); err != nil {
+			c.setStructuredEventError(err.Error())
+			return
+		}
+		c.recordEventLocked(input)
+		return
+	}
+	if rawContentLength(line) > c.config.MaxLineBytes {
+		line = truncateRawLine(line, c.config.MaxLineBytes)
+		lineTruncated = true
+	}
 	if lineTruncated {
 		c.truncatedLines++
 	}
@@ -174,6 +200,34 @@ func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated bool) 
 	c.captured += int64(len(line))
 	c.appendStream(stream, line)
 	c.trackTail(stream, int64(len(line)))
+}
+
+func rawContentLength(line []byte) int64 {
+	content := bytes.TrimSuffix(line, []byte("\n"))
+	return int64(len(bytes.TrimSuffix(content, []byte("\r"))))
+}
+
+func truncateRawLine(line []byte, maximum int64) []byte {
+	newline := bytes.HasSuffix(line, []byte("\n"))
+	content := bytes.TrimSuffix(line, []byte("\n"))
+	content = bytes.TrimSuffix(content, []byte("\r"))
+	content = content[:maximum]
+	for len(content) > 0 && !utf8.Valid(content) {
+		content = content[:len(content)-1]
+	}
+	output := make([]byte, 0, len(content)+len(LineTruncationMarker)+1)
+	output = append(output, content...)
+	output = append(output, LineTruncationMarker...)
+	if newline {
+		output = append(output, '\n')
+	}
+	return output
+}
+
+func (c *Collector) setStructuredEventError(message string) {
+	if c.structuredEventError == "" {
+		c.structuredEventError = message
+	}
 }
 
 func (c *Collector) truncateTotal(content []byte) []byte {

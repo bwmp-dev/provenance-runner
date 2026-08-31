@@ -21,8 +21,15 @@ type rawProcessor struct {
 
 func newRawProcessor(collector *Collector, stream Stream, config Config) *rawProcessor {
 	processor := &rawProcessor{collector: collector, stream: stream}
+	maximumLineBytes := config.MaxLineBytes
+	if stream == StreamStdout && config.StructuredLinePrefix != "" {
+		structuredMaximum := int64(len(config.StructuredLinePrefix)) + config.MaxEventBytes
+		if structuredMaximum > maximumLineBytes {
+			maximumLineBytes = structuredMaximum
+		}
+	}
 	processor.line = lineLimiter{
-		maximum: config.MaxLineBytes,
+		maximum: maximumLineBytes,
 		emit: func(line []byte, truncated bool) {
 			collector.emitRawLine(stream, line, truncated)
 		},
@@ -39,9 +46,7 @@ func (p *rawProcessor) Write(content []byte) (int, error) {
 	if p.finished {
 		return len(content), nil
 	}
-	if p.collector.observeRawBytes(int64(len(content))) {
-		return len(content), nil
-	}
+	p.collector.observeRawBytes(int64(len(content)))
 	p.normalizer.write(content)
 	return len(content), nil
 }
