@@ -10,7 +10,11 @@ The current alpha slice accepts a bounded local job document and emits a structu
 go run ./cmd/provenance-runner execute job.json
 ```
 
-The only built-in provider is `development-process`. It requires
+The local CLI currently registers only `development-process`. It requires
 `"acknowledgeUnsandboxed": true` in its environment configuration because it runs a command
 directly on the host. It is for runner-core development and is not a security boundary.
-Hosted customer workloads require the Linux gVisor provider described by the program plan.
+
+The runner core also includes a Linux gVisor provider for hosted integration. It builds a
+locked-down OCI bundle and invokes `runsc` directly, without a Docker daemon or socket. The
+provider is configured by the trusted host integration rather than the local CLI so job input
+cannot select the root filesystem, state directory, or host mount roots.
