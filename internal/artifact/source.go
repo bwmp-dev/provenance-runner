@@ -47,9 +47,10 @@ func (s FileSource) Fetch(ctx context.Context, destination io.Writer) error {
 }
 
 type HTTPSource struct {
-	URL       string
-	UserAgent string
-	Client    *http.Client
+	URL           string
+	UserAgent     string
+	Client        *http.Client
+	ExpectedBytes int64
 }
 
 func (s HTTPSource) Fetch(ctx context.Context, destination io.Writer) error {
@@ -86,6 +87,9 @@ func (s HTTPSource) Fetch(ctx context.Context, destination io.Writer) error {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("download artifact: unexpected HTTP status %s", response.Status)
+	}
+	if s.ExpectedBytes > 0 && response.ContentLength >= 0 && response.ContentLength != s.ExpectedBytes {
+		return fmt.Errorf("download artifact: %w: expected %d bytes, server declared %d", ErrSizeMismatch, s.ExpectedBytes, response.ContentLength)
 	}
 	if _, err := io.Copy(destination, &contextReader{ctx: ctx, reader: response.Body}); err != nil {
 		return fmt.Errorf("download artifact: %w", err)

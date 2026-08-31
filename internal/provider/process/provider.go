@@ -229,6 +229,7 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			OutputTruncated:      bundle.Usage.OutputTruncated,
 			EventsTruncated:      bundle.Usage.EventsTruncated,
 		},
+		StructuredEventError: bundle.StructuredEventError,
 	}, nil
 }
 

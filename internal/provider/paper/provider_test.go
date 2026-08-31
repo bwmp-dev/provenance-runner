@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/artifact"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/localjob"
 	"github.com/bwmp-dev/provenance-runner/internal/workspace"
 )
 
@@ -39,8 +42,11 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 	config := validConfiguration(server.URL, payloads)
 
 	environment := resolveTestEnvironment(t, provider, "paper-job-1", config)
-	if environment.Identity() != "paper/1.21.8/build-60/eclipse-temurin/21.0.8+9/test-paper-environment" {
-		t.Fatalf("Identity() = %q", environment.Identity())
+	identity := environment.Identity()
+	for _, component := range []string{artifact.SHA256(payloads["/paper"]).String(), artifact.SHA256(payloads["/java"]).String(), artifact.SHA256(payloads["/probe"]).String(), "delegate:gvisor/test/rootfs:test/runsc:test"} {
+		if !strings.Contains(identity, component) {
+			t.Fatalf("Identity() = %q; missing %q", identity, component)
+		}
 	}
 	prepared, err := environment.Prepare(context.Background())
 	if err != nil {
@@ -50,6 +56,9 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 	workspaceRoot := workload.InputsPath
 	if workload.Command != "/bin/sh" || workload.Network != "none" {
 		t.Errorf("workload command/network = %q/%q", workload.Command, workload.Network)
+	}
+	if workload.StructuredOutputPrefix != probeEventPrefix || workload.StructuredOutputKind != probeEventKind {
+		t.Errorf("structured output channel = %q/%q", workload.StructuredOutputPrefix, workload.StructuredOutputKind)
 	}
 	if workload.MemoryBytes != 1<<30 || workload.CPUMillis != 1500 || workload.PIDs != 64 || workload.DiskBytes != 2<<30 {
 		t.Errorf("workload limits = %#v", workload)
@@ -182,6 +191,34 @@ func TestPrepareRejectsDigestMismatchBeforeCreatingWorkspace(t *testing.T) {
 	}
 }
 
+func TestPrepareStopsArtifactOneByteOverDeclarationWithoutCachingIt(t *testing.T) {
+	payloads := map[string][]byte{
+		"/paper": []byte("Paper"), "/java": testRuntimeArchive(t, "test-jre"), "/target": []byte("target-bytes"), "/probe": []byte("probe"),
+	}
+	server, requests := artifactServer(t, payloads)
+	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{}}
+	provider := testProvider(t, server, sandbox, payloads, "test-jre")
+	config := validConfiguration(server.URL, payloads)
+	config.Dependencies = nil
+	config.TestPlan.RequiredDependencies = nil
+	config.Target.SizeBytes--
+	prepared, err := resolveTestEnvironment(t, provider, "paper-job-size", config).Prepare(context.Background())
+	if !errors.Is(err, artifact.ErrSizeMismatch) || prepared != nil {
+		t.Fatalf("Prepare() = %#v, %v", prepared, err)
+	}
+	config.Target.SizeBytes++
+	prepared, err = resolveTestEnvironment(t, provider, "paper-job-size-retry", config).Prepare(context.Background())
+	if err != nil {
+		t.Fatalf("Prepare() retry error = %v", err)
+	}
+	if err := prepared.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if requests.snapshot()["/target"] != 2 {
+		t.Fatalf("target requests = %d, want 2", requests.snapshot()["/target"])
+	}
+}
+
 func TestPreparationFailureReturnsWorkspaceCleanupOwnership(t *testing.T) {
 	payloads := map[string][]byte{
 		"/paper":  []byte("Paper"),
@@ -211,20 +248,82 @@ func TestPreparationFailureReturnsWorkspaceCleanupOwnership(t *testing.T) {
 	}
 }
 
+func TestCleanupAttemptsDelegateAndWorkspaceAndJoinsErrors(t *testing.T) {
+	payloads := map[string][]byte{
+		"/paper": []byte("Paper"), "/java": testRuntimeArchive(t, "test-jre"), "/target": []byte("target"), "/probe": []byte("probe"),
+	}
+	server, _ := artifactServer(t, payloads)
+	delegate := &fakePrepared{cleanupErr: errors.New("delegate cleanup failed")}
+	sandbox := &fakeSandboxProvider{prepared: delegate}
+	provider := testProvider(t, server, sandbox, payloads, "test-jre")
+	config := validConfiguration(server.URL, payloads)
+	config.Dependencies = nil
+	config.TestPlan.RequiredDependencies = nil
+	prepared, err := resolveTestEnvironment(t, provider, "paper-job-cleanup", config).Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = prepared.Cleanup(ctx)
+	if err == nil || !strings.Contains(err.Error(), "delegate cleanup failed") || !errors.Is(err, context.Canceled) || !delegate.cleaned {
+		t.Fatalf("Cleanup() error/attempt = %v/%v", err, delegate.cleaned)
+	}
+	delegate.cleanupErr = nil
+	if err := prepared.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup() retry error = %v", err)
+	}
+}
+
+func TestExecutorClassifiesFailedProbeAssertionWhenJVMExitsZero(t *testing.T) {
+	payloads := map[string][]byte{
+		"/paper": []byte("Paper"), "/java": testRuntimeArchive(t, "test-jre"), "/target": []byte("target"), "/probe": []byte("probe"),
+	}
+	server, _ := artifactServer(t, payloads)
+	output := happyProbeOutput()
+	output.StructuredEvents[3] = probeStructuredEvent(4, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
+	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{output: &output}}
+	provider := testProvider(t, server, sandbox, payloads, "test-jre")
+	config := validConfiguration(server.URL, payloads)
+	config.Dependencies = nil
+	config.TestPlan.RequiredDependencies = nil
+	environmentJSON, _ := json.Marshal(config)
+	registry, err := execution.NewRegistry(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := execution.NewExecutor(registry, execution.ExecutorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(context.Background(), localjob.Job{
+		SchemaVersion:  localjob.SchemaVersion,
+		ID:             "paper-probe-failure",
+		Provider:       ProviderName,
+		Environment:    environmentJSON,
+		MaxOutputBytes: 1 << 20,
+	})
+	if result.Execution == nil || result.Execution.ExitCode == nil || *result.Execution.ExitCode != 0 || result.Classification != execution.ClassificationWorkloadFailure || result.Failure == nil || result.Failure.Code != "paper_lifecycle_failed" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestResolveFailsClosedForUnsupportedOrAmbiguousInput(t *testing.T) {
 	provider, server, payloads := validationTestProvider(t)
 	base := validConfiguration(server.URL, payloads)
 	tests := map[string]func(*configuration){
-		"artifact kind":          func(config *configuration) { config.ArtifactKind = "generic-jar" },
-		"environment pin":        func(config *configuration) { config.EnvironmentID = "paper-latest" },
-		"target plugin":          func(config *configuration) { config.TestPlan.TargetPlugin = "../target" },
-		"memory":                 func(config *configuration) { config.MemoryBytes = 1 },
-		"dependency plugin":      func(config *configuration) { config.Dependencies[0].Plugin = "../dependency" },
-		"unconfigured required":  func(config *configuration) { config.TestPlan.RequiredDependencies = []string{"Missing"} },
-		"non-jar target":         func(config *configuration) { config.Target.Filename = "target.zip" },
-		"non-https target":       func(config *configuration) { config.Target.URI = "http://example.test/target.jar" },
-		"invalid target digest":  func(config *configuration) { config.Target.SHA256 = "bad" },
-		"negative stabilization": func(config *configuration) { config.TestPlan.StabilizationMilliseconds = -1 },
+		"artifact kind":           func(config *configuration) { config.ArtifactKind = "generic-jar" },
+		"environment pin":         func(config *configuration) { config.EnvironmentID = "paper-latest" },
+		"target plugin":           func(config *configuration) { config.TestPlan.TargetPlugin = "../target" },
+		"memory":                  func(config *configuration) { config.MemoryBytes = 1 },
+		"dependency plugin":       func(config *configuration) { config.Dependencies[0].Plugin = "../dependency" },
+		"unconfigured required":   func(config *configuration) { config.TestPlan.RequiredDependencies = []string{"Missing"} },
+		"non-jar target":          func(config *configuration) { config.Target.Filename = "target.zip" },
+		"non-https target":        func(config *configuration) { config.Target.URI = "http://example.test/target.jar" },
+		"invalid target digest":   func(config *configuration) { config.Target.SHA256 = "bad" },
+		"missing target size":     func(config *configuration) { config.Target.SizeBytes = 0 },
+		"insufficient disk quota": func(config *configuration) { config.DiskBytes = 1 << 20 },
+		"negative stabilization":  func(config *configuration) { config.TestPlan.StabilizationMilliseconds = -1 },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -245,6 +344,25 @@ func TestResolveFailsClosedForUnsupportedOrAmbiguousInput(t *testing.T) {
 	unknown := append(content[:len(content)-1], []byte(`,"unknown":true}`)...)
 	if _, err := provider.Resolve(context.Background(), execution.Request{JobID: "job", Environment: unknown, Limits: execution.Limits{MaxOutputBytes: 1024}}); err == nil {
 		t.Error("Resolve(unknown field) error = nil")
+	}
+	probeSubstitution := append(content[:len(content)-1], []byte(`,"probe":{"uri":"https://attacker.example/probe.jar","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","filename":"probe.jar","sizeBytes":1}}`)...)
+	if _, err := provider.Resolve(context.Background(), execution.Request{JobID: "job", Environment: probeSubstitution, Limits: execution.Limits{MaxOutputBytes: 1024}}); err == nil {
+		t.Error("Resolve(job-controlled probe) error = nil")
+	}
+}
+
+func TestResolveEnforcesAggregatePreparationQuotas(t *testing.T) {
+	provider, server, payloads := validationTestProvider(t)
+	config := validConfiguration(server.URL, payloads)
+	content, _ := json.Marshal(config)
+	provider.config.MaximumDependencyBytes = int64(len(payloads["/dependency"]) - 1)
+	if _, err := provider.Resolve(context.Background(), execution.Request{JobID: "job", Environment: content, Limits: execution.Limits{MaxOutputBytes: 1024}}); err == nil || !strings.Contains(err.Error(), "aggregate") {
+		t.Fatalf("dependency quota Resolve() error = %v", err)
+	}
+	provider.config.MaximumDependencyBytes = defaultMaximumDependencyBytes
+	provider.config.MaximumPreparationBytes = 1
+	if _, err := provider.Resolve(context.Background(), execution.Request{JobID: "job", Environment: content, Limits: execution.Limits{MaxOutputBytes: 1024}}); err == nil || !strings.Contains(err.Error(), "preparation limit") {
+		t.Fatalf("preparation quota Resolve() error = %v", err)
 	}
 }
 
@@ -321,6 +439,9 @@ func validationTestProvider(t *testing.T) (*Provider, *httptest.Server, map[stri
 
 func testProvider(t *testing.T, server *httptest.Server, sandbox *fakeSandboxProvider, payloads map[string][]byte, javaRoot string) *Provider {
 	t.Helper()
+	if _, exists := payloads["/prepared-runtime"]; !exists {
+		payloads["/prepared-runtime"] = testPreparedRuntimeArchive(t)
+	}
 	newCache := func() *artifact.Cache {
 		cache, err := artifact.NewCache(t.TempDir(), artifact.CacheOptions{})
 		if err != nil {
@@ -335,23 +456,31 @@ func testProvider(t *testing.T, server *httptest.Server, sandbox *fakeSandboxPro
 	catalog := Catalog{
 		EnvironmentID: "test-paper-environment",
 		Paper: PaperPin{GameVersion: "1.21.8", Build: 60, Artifact: ArtifactPin{
-			URI: server.URL + "/paper", SHA256: artifact.SHA256(payloads["/paper"]).String(), Filename: "paper.jar",
+			URI: server.URL + "/paper", SHA256: artifact.SHA256(payloads["/paper"]).String(), Filename: "paper.jar", SizeBytes: int64(len(payloads["/paper"])),
 		}},
 		Java: JavaPin{Distribution: "eclipse-temurin", Version: "21.0.8+9", OS: "linux", Architecture: "amd64", ArchiveRoot: javaRoot, Artifact: ArtifactPin{
-			URI: server.URL + "/java", SHA256: artifact.SHA256(payloads["/java"]).String(), Filename: "java.tar.gz",
-		}},
+			URI: server.URL + "/java", SHA256: artifact.SHA256(payloads["/java"]).String(), Filename: "java.tar.gz", SizeBytes: int64(len(payloads["/java"])),
+		}, MaximumExpandedBytes: 1 << 20},
+		Probe:           ArtifactPin{URI: server.URL + "/probe", SHA256: artifact.SHA256(payloads["/probe"]).String(), Filename: "paper-probe.jar", SizeBytes: int64(len(payloads["/probe"]))},
+		PreparedRuntime: ArchivePin{Artifact: ArtifactPin{URI: server.URL + "/prepared-runtime", SHA256: artifact.SHA256(payloads["/prepared-runtime"]).String(), Filename: "prepared-runtime.tar.gz", SizeBytes: int64(len(payloads["/prepared-runtime"]))}, MaximumExpandedBytes: 1 << 20},
 	}
+	localDialer := dialerFunc(func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	})
 	provider, err := New(Config{
-		ArtifactCache:   newCache(),
-		PaperCache:      newCache(),
-		JavaCache:       newCache(),
-		Workspaces:      manager,
-		Sandbox:         sandbox,
-		RuntimePreparer: &fakeRuntimePreparer{},
-		Catalog:         catalog,
-		HTTPClient:      server.Client(),
-		inputPolicy:     testSourcePolicy{},
-		pinPolicy:       testSourcePolicy{},
+		ArtifactCache:  newCache(),
+		PaperCache:     newCache(),
+		JavaCache:      newCache(),
+		ProbeCache:     newCache(),
+		RuntimeCache:   newCache(),
+		Workspaces:     manager,
+		Sandbox:        sandbox,
+		Catalog:        catalog,
+		HTTPClient:     server.Client(),
+		inputPolicy:    testSourcePolicy{},
+		pinPolicy:      testSourcePolicy{},
+		sourceResolver: staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
+		sourceDialer:   localDialer,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -363,8 +492,7 @@ func validConfiguration(baseURL string, payloads map[string][]byte) configuratio
 	configuration := configuration{
 		ArtifactKind:  ArtifactKindMinecraftPlugin,
 		EnvironmentID: "test-paper-environment",
-		Target:        artifactReference{URI: baseURL + "/target", SHA256: artifact.SHA256(payloads["/target"]).String(), Filename: "success-1.0.0.jar"},
-		Probe:         artifactReference{URI: baseURL + "/probe", SHA256: artifact.SHA256(payloads["/probe"]).String(), Filename: "paper-probe-0.1.0.jar"},
+		Target:        artifactReference{URI: baseURL + "/target", SHA256: artifact.SHA256(payloads["/target"]).String(), Filename: "success-1.0.0.jar", SizeBytes: int64(len(payloads["/target"]))},
 		TestPlan: testPlan{
 			TargetPlugin:              "SuccessFixture",
 			RequiredDependencies:      []string{"DependencyFixture"},
@@ -379,7 +507,7 @@ func validConfiguration(baseURL string, payloads map[string][]byte) configuratio
 	if dependency, exists := payloads["/dependency"]; exists {
 		configuration.Dependencies = []dependencyReference{{
 			ID: "dependency-one", Plugin: "DependencyFixture",
-			Artifact: artifactReference{URI: baseURL + "/dependency", SHA256: artifact.SHA256(dependency).String(), Filename: "dependency.jar"},
+			Artifact: artifactReference{URI: baseURL + "/dependency", SHA256: artifact.SHA256(dependency).String(), Filename: "dependency.jar", SizeBytes: int64(len(dependency))},
 		}}
 	}
 	return configuration
@@ -473,6 +601,31 @@ func testRuntimeArchive(t *testing.T, root string) []byte {
 	return buffer.Bytes()
 }
 
+func testPreparedRuntimeArchive(t *testing.T) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	gzipWriter.Header.ModTime = unixEpoch
+	tarWriter := tar.NewWriter(gzipWriter)
+	content := []byte("prepared Paper runtime")
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "cache/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "cache/patched-runtime.jar", Mode: 0o644, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
 var unixEpoch = time.Unix(0, 0).UTC()
 
 func assertFileContent(t *testing.T, path string, expected []byte) {
@@ -491,6 +644,8 @@ type fakeSandboxProvider struct {
 	workloads []execution.IsolatedWorkload
 	prepared  *fakePrepared
 }
+
+func (*fakeSandboxProvider) Identity() string { return "gvisor/test/rootfs:test/runsc:test" }
 
 func (p *fakeSandboxProvider) ResolveWorkload(_ context.Context, _ execution.Request, workload execution.IsolatedWorkload) (execution.Environment, error) {
 	p.mu.Lock()
@@ -517,10 +672,22 @@ func (e *fakeSandboxEnvironment) Prepare(context.Context) (execution.PreparedEnv
 }
 
 type fakePrepared struct {
-	cleaned bool
+	cleaned    bool
+	output     *execution.CollectedOutput
+	collectErr error
+	cleanupErr error
 }
 
 type testSourcePolicy struct{}
+
+type staticResolver struct {
+	addresses []netip.Addr
+	err       error
+}
+
+func (r staticResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return append([]netip.Addr(nil), r.addresses...), r.err
+}
 
 func (testSourcePolicy) ValidateInitial(uri *url.URL) error  { return validateTestURL(uri) }
 func (testSourcePolicy) ValidateRedirect(uri *url.URL) error { return validateTestURL(uri) }
@@ -532,32 +699,44 @@ func validateTestURL(uri *url.URL) error {
 	return nil
 }
 
-type fakeRuntimePreparer struct{}
-
-func (*fakeRuntimePreparer) Prepare(_ context.Context, preparation RuntimePreparation) error {
-	if _, err := os.Stat(filepath.Join(preparation.ServerDirectory, "paper.jar")); err != nil {
-		return fmt.Errorf("Paper server was not staged before runtime preparation: %w", err)
-	}
-	if _, err := os.Stat(filepath.Join(preparation.ServerDirectory, "plugins")); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("untrusted plugins were staged before trusted runtime preparation")
-	}
-	cache := filepath.Join(preparation.ServerDirectory, "cache")
-	if err := os.Mkdir(cache, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(cache, "patched-runtime.jar"), []byte("prepared Paper runtime"), 0o600)
-}
-
 func (*fakePrepared) Execute(context.Context) (execution.ExecutionOutcome, error) {
 	exitCode := 0
 	return execution.ExecutionOutcome{ExitCode: &exitCode}, nil
 }
 
-func (*fakePrepared) Collect(context.Context) (execution.CollectedOutput, error) {
-	return execution.CollectedOutput{}, nil
+func (p *fakePrepared) Collect(context.Context) (execution.CollectedOutput, error) {
+	if p.output != nil {
+		return *p.output, p.collectErr
+	}
+	output := happyProbeOutput()
+	return output, p.collectErr
 }
 
 func (p *fakePrepared) Cleanup(context.Context) error {
 	p.cleaned = true
-	return nil
+	return p.cleanupErr
+}
+
+func happyProbeOutput() execution.CollectedOutput {
+	events := []execution.StructuredEvent{
+		probeStructuredEvent(1, "PROBE_LOADED", `{}`),
+		probeStructuredEvent(2, "SERVER_LOADED", `{}`),
+		probeStructuredEvent(3, "STABILIZATION_STARTED", `{}`),
+		probeStructuredEvent(4, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"name":"DependencyFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(6, "STABILIZATION_COMPLETED", `{}`),
+		probeStructuredEvent(7, "SERVER_READY", `{"requirementsSatisfied":true}`),
+		probeStructuredEvent(8, "CLEAN_SHUTDOWN_REQUESTED", `{}`),
+		probeStructuredEvent(9, "SERVER_STOPPED", `{"shutdownRequested":true}`),
+	}
+	var eventBytes int64
+	for _, event := range events {
+		eventBytes += int64(len(event.Payload))
+	}
+	return execution.CollectedOutput{StructuredEvents: events, EvidenceUsage: execution.EvidenceUsage{StructuredEventCount: int64(len(events)), StructuredEventBytes: eventBytes}}
+}
+
+func probeStructuredEvent(sequence uint64, eventType, data string) execution.StructuredEvent {
+	payload := fmt.Sprintf(`{"timestamp":"2026-08-30T00:00:00Z","type":%q,"data":%s}`, eventType, data)
+	return execution.StructuredEvent{Sequence: sequence, Kind: probeEventKind, Payload: json.RawMessage(payload)}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,12 +42,14 @@ const runscFailureExitCode = 128
 var safeJobID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 type Config struct {
-	RunscPath  string
-	RootFS     string
-	StateRoot  string
-	BundleRoot string
-	InputsRoot string
-	Platform   string
+	RunscPath       string
+	RootFS          string
+	StateRoot       string
+	BundleRoot      string
+	InputsRoot      string
+	Platform        string
+	RootFSIdentity  string
+	runtimeIdentity string
 }
 
 type Provider struct {
@@ -70,6 +73,11 @@ func New(config Config) (*Provider, error) {
 		return nil, fmt.Errorf("create gVisor provider: find runsc: %w", err)
 	}
 	config.RunscPath = resolvedRunsc
+	runtimeIdentity, err := executableIdentity(resolvedRunsc)
+	if err != nil {
+		return nil, fmt.Errorf("create gVisor provider: identify runsc: %w", err)
+	}
+	config.runtimeIdentity = runtimeIdentity
 	return newProvider(config, execCommandRunner{})
 }
 
@@ -85,6 +93,12 @@ func newProvider(config Config, runner commandRunner) (*Provider, error) {
 	}
 	if config.Platform != "systrap" && config.Platform != "kvm" {
 		return nil, fmt.Errorf("create gVisor provider: unsupported platform %q", config.Platform)
+	}
+	if config.RootFSIdentity == "" || len(config.RootFSIdentity) > 256 || strings.ContainsAny(config.RootFSIdentity, "\r\n") {
+		return nil, errors.New("create gVisor provider: root filesystem identity is required")
+	}
+	if config.runtimeIdentity == "" {
+		return nil, errors.New("create gVisor provider: runsc runtime identity is required")
 	}
 
 	var err error
@@ -121,6 +135,30 @@ func newProvider(config Config, runner commandRunner) (*Provider, error) {
 
 func (*Provider) Name() string {
 	return ProviderName
+}
+
+func (p *Provider) Identity() string {
+	return fmt.Sprintf("gvisor/%s/rootfs:%s/runsc:%s", p.config.Platform, p.config.RootFSIdentity, p.config.runtimeIdentity)
+}
+
+func executableIdentity(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 512<<20 {
+		return "", errors.New("runsc must be a bounded regular file")
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 type configuration struct {
@@ -201,11 +239,21 @@ func (p *Provider) resolveWorkload(ctx context.Context, request execution.Reques
 	if err := validateConfiguration(config, request.Limits.MaxOutputBytes); err != nil {
 		return nil, invalidEnvironment(err)
 	}
+	evidenceConfig := evidence.Config{
+		MaxLineBytes:         config.MaxLineBytes,
+		MaxTotalBytes:        request.Limits.MaxOutputBytes,
+		Secrets:              append([]string(nil), config.RedactSecrets...),
+		StructuredLinePrefix: workload.StructuredOutputPrefix,
+		StructuredLineKind:   workload.StructuredOutputKind,
+	}
+	if err := evidence.ValidateConfig(evidenceConfig); err != nil {
+		return nil, invalidEnvironment(err)
+	}
 	inputs, err := p.validateInputPath(workload.InputsPath)
 	if err != nil {
 		return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_inputs_unavailable", err)
 	}
-	mounts, err := p.validateReadOnlyMounts(workload.ReadOnlyMounts)
+	mounts, err := p.validateReadOnlyMounts(inputs, workload.ReadOnlyMounts)
 	if err != nil {
 		return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_mounts_invalid", err)
 	}
@@ -213,15 +261,11 @@ func (p *Provider) resolveWorkload(ctx context.Context, request execution.Reques
 		return nil, err
 	}
 	return &environment{
-		provider: p,
-		config:   config,
-		inputs:   inputs,
-		mounts:   mounts,
-		evidenceConfig: evidence.Config{
-			MaxLineBytes:  config.MaxLineBytes,
-			MaxTotalBytes: request.Limits.MaxOutputBytes,
-			Secrets:       append([]string(nil), config.RedactSecrets...),
-		},
+		provider:       p,
+		config:         config,
+		inputs:         inputs,
+		mounts:         mounts,
+		evidenceConfig: evidenceConfig,
 	}, nil
 }
 
@@ -304,11 +348,11 @@ func (p *Provider) validateInputPath(path string) (string, error) {
 	return resolved, nil
 }
 
-func (p *Provider) validateReadOnlyMounts(requested []execution.ReadOnlyMount) ([]execution.ReadOnlyMount, error) {
+func (p *Provider) validateReadOnlyMounts(inputs string, requested []execution.ReadOnlyMount) ([]execution.ReadOnlyMount, error) {
 	mounts := make([]execution.ReadOnlyMount, 0, len(requested))
 	destinations := make(map[string]struct{}, len(requested))
 	for _, mount := range requested {
-		resolved, err := p.validateMountSource(mount.Source)
+		resolved, err := p.validateMountSource(inputs, mount.Source)
 		if err != nil {
 			return nil, fmt.Errorf("validate mount source: %w", err)
 		}
@@ -328,7 +372,7 @@ func (p *Provider) validateReadOnlyMounts(requested []execution.ReadOnlyMount) (
 	return mounts, nil
 }
 
-func (p *Provider) validateMountSource(path string) (string, error) {
+func (p *Provider) validateMountSource(inputs, path string) (string, error) {
 	if path == "" {
 		return "", errors.New("mount source is empty")
 	}
@@ -336,7 +380,7 @@ func (p *Provider) validateMountSource(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := ensureDescendant(p.config.InputsRoot, absolute); err != nil {
+	if err := ensureDescendant(inputs, absolute); err != nil {
 		return "", err
 	}
 	info, err := os.Lstat(absolute)
@@ -350,7 +394,7 @@ func (p *Provider) validateMountSource(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := ensureDescendant(p.config.InputsRoot, resolved); err != nil {
+	if err := ensureDescendant(inputs, resolved); err != nil {
 		return "", err
 	}
 	return resolved, nil
@@ -365,7 +409,7 @@ type environment struct {
 }
 
 func (e *environment) Identity() string {
-	return fmt.Sprintf("%s/%s", ProviderName, e.provider.config.Platform)
+	return e.provider.Identity()
 }
 
 func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironment, error) {
@@ -492,6 +536,7 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			OutputTruncated:      bundle.Usage.OutputTruncated,
 			EventsTruncated:      bundle.Usage.EventsTruncated,
 		},
+		StructuredEventError: bundle.StructuredEventError,
 	}, nil
 }
 

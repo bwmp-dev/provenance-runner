@@ -2,9 +2,12 @@ package paper
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -81,10 +84,19 @@ func TestArtifactRedirectIsRevalidatedBeforeDial(t *testing.T) {
 				t.Fatal(err)
 			}
 			policy := initialURLPolicy{initial: server.URL + "/artifact", redirects: strictValue}
+			client, err := clientWithSourcePolicy(server.Client(), policy,
+				staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
+				dialerFunc(func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
 			source := artifact.HTTPSource{
 				URL:       server.URL + "/artifact",
 				UserAgent: DownloadUserAgent,
-				Client:    clientWithRedirectPolicy(server.Client(), policy),
+				Client:    client,
 			}
 			err = source.Fetch(context.Background(), io.Discard)
 			if err == nil || !strings.Contains(err.Error(), "request failed") {
@@ -98,7 +110,10 @@ func TestArtifactRedirectIsRevalidatedBeforeDial(t *testing.T) {
 }
 
 func TestPinnedSourcesRequireExactInitialURLsAndKnownRedirectHosts(t *testing.T) {
-	policy, err := newPinnedSourcePolicy(AlphaCatalog())
+	catalog := AlphaCatalog()
+	catalog.Probe = ArtifactPin{URI: "https://github.com/bwmp-dev/provenance/releases/download/probe/probe.jar", SHA256: strings.Repeat("a", 64), Filename: "probe.jar", SizeBytes: 1}
+	catalog.PreparedRuntime = ArchivePin{Artifact: ArtifactPin{URI: "https://github.com/bwmp-dev/provenance-runner/releases/download/runtime/runtime.tar.gz", SHA256: strings.Repeat("b", 64), Filename: "runtime.tar.gz", SizeBytes: 1}, MaximumExpandedBytes: 1}
+	policy, err := newPinnedSourcePolicy(catalog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +136,83 @@ func TestPinnedSourcesRequireExactInitialURLsAndKnownRedirectHosts(t *testing.T)
 	disallowedRedirect, _ := url.Parse("https://internal.example/file")
 	if err := policy.ValidateRedirect(disallowedRedirect); err == nil {
 		t.Error("disallowed redirect accepted")
+	}
+}
+
+func TestSecureDialRejectsNonPublicAndMetadataResolution(t *testing.T) {
+	for name, address := range map[string]string{
+		"unspecified IPv4":         "0.0.0.0",
+		"loopback IPv4":            "127.0.0.1",
+		"private IPv4":             "10.0.0.1",
+		"link-local IPv4":          "169.254.169.254",
+		"metadata IPv4":            "100.100.100.200",
+		"CGNAT IPv4":               "100.64.0.1",
+		"protocol assignment IPv4": "192.0.0.9",
+		"documentation IPv4":       "192.0.2.1",
+		"benchmark IPv4":           "198.18.0.1",
+		"documentation 2 IPv4":     "198.51.100.1",
+		"documentation 3 IPv4":     "203.0.113.1",
+		"reserved IPv4":            "240.0.0.1",
+		"multicast IPv4":           "224.0.0.1",
+		"unspecified IPv6":         "::",
+		"loopback IPv6":            "::1",
+		"private IPv6":             "fd00::1",
+		"link-local IPv6":          "fe80::1",
+		"multicast IPv6":           "ff02::1",
+		"discard IPv6":             "100::1",
+		"protocol assignment IPv6": "2001::1",
+		"documentation IPv6":       "2001:db8::1",
+		"documentation 2 IPv6":     "3fff::1",
+		"reserved IPv6":            "5f00::1",
+		"mapped private IPv6":      "::ffff:127.0.0.1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var dials atomic.Int32
+			dial := secureDialContext(
+				staticResolver{addresses: []netip.Addr{netip.MustParseAddr(address)}},
+				dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+					dials.Add(1)
+					return nil, errors.New("unexpected dial")
+				}),
+			)
+			if _, err := dial(context.Background(), "tcp", "artifacts.example.com:443"); err == nil {
+				t.Fatal("secure dial error = nil")
+			}
+			if dials.Load() != 0 {
+				t.Fatalf("dial count = %d", dials.Load())
+			}
+		})
+	}
+}
+
+func TestSecureDialPinsResolvedAddressAndRejectsRebindingSet(t *testing.T) {
+	public := netip.MustParseAddr("93.184.216.34")
+	var dialed string
+	dial := secureDialContext(staticResolver{addresses: []netip.Addr{public}}, dialerFunc(func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialed = address
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}))
+	connection, err := dial(context.Background(), "tcp", "artifacts.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Close()
+	if dialed != "93.184.216.34:443" {
+		t.Fatalf("dialed address = %q", dialed)
+	}
+
+	var rebindingDials atomic.Int32
+	rebinding := secureDialContext(staticResolver{addresses: []netip.Addr{public, netip.MustParseAddr("127.0.0.1")}}, dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		rebindingDials.Add(1)
+		return nil, errors.New("unexpected dial")
+	}))
+	if _, err := rebinding(context.Background(), "tcp", "artifacts.example.com:443"); err == nil {
+		t.Fatal("rebinding resolution error = nil")
+	}
+	if rebindingDials.Load() != 0 {
+		t.Fatalf("rebinding dial count = %d", rebindingDials.Load())
 	}
 }
 

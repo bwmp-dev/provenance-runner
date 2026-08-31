@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -32,11 +33,13 @@ const (
 )
 
 type Config struct {
-	MaxLineBytes  int64
-	MaxTotalBytes int64
-	MaxEvents     int
-	MaxEventBytes int64
-	Secrets       []string
+	MaxLineBytes         int64
+	MaxTotalBytes        int64
+	MaxEvents            int
+	MaxEventBytes        int64
+	Secrets              []string
+	StructuredLinePrefix string
+	StructuredLineKind   string
 }
 
 func ValidateConfig(config Config) error {
@@ -63,8 +66,19 @@ func (c Config) withDefaults() (Config, error) {
 	if c.MaxLineBytes > MaximumLineBytes || c.MaxTotalBytes > MaximumTotalBytes || c.MaxEvents > MaximumEvents || c.MaxEventBytes > MaximumEventBytes {
 		return Config{}, errors.New("evidence configuration exceeds supported limits")
 	}
-	if c.MaxLineBytes > c.MaxTotalBytes {
+	if c.StructuredLinePrefix == "" && c.MaxLineBytes > c.MaxTotalBytes {
 		c.MaxLineBytes = c.MaxTotalBytes
+	}
+	if (c.StructuredLinePrefix == "") != (c.StructuredLineKind == "") {
+		return Config{}, errors.New("structured line prefix and kind must be configured together")
+	}
+	if len(c.StructuredLinePrefix) > 128 || strings.ContainsAny(c.StructuredLinePrefix, "\r\n") || !utf8.ValidString(c.StructuredLinePrefix) {
+		return Config{}, errors.New("structured line prefix is invalid")
+	}
+	if c.StructuredLineKind != "" {
+		if err := validateEvent(EventInput{Kind: c.StructuredLineKind, Payload: json.RawMessage(`{}`)}, c.MaxEventBytes); err != nil {
+			return Config{}, fmt.Errorf("structured line kind: %w", err)
+		}
 	}
 	secretBytes := 0
 	seen := make(map[string]struct{}, len(c.Secrets))
@@ -120,11 +134,12 @@ type Usage struct {
 }
 
 type Bundle struct {
-	Stdout      string
-	Stderr      string
-	Events      []StructuredEvent
-	CompleteLog CompleteLog
-	Usage       Usage
+	Stdout               string
+	Stderr               string
+	Events               []StructuredEvent
+	CompleteLog          CompleteLog
+	Usage                Usage
+	StructuredEventError string
 }
 
 func validateEvent(input EventInput, maximumBytes int64) error {

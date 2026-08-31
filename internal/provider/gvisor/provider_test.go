@@ -206,6 +206,14 @@ func TestResolveWorkloadMountsOnlyTrustedReadOnlyInputs(t *testing.T) {
 	if _, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, workload); err == nil {
 		t.Error("outside mount ResolveWorkload() error = nil")
 	}
+	siblingRuntime := filepath.Join(roots.inputs, "job-2", "runtime")
+	if err := os.MkdirAll(siblingRuntime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workload.ReadOnlyMounts[0].Source = siblingRuntime
+	if _, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, workload); err == nil {
+		t.Error("sibling-job mount ResolveWorkload() error = nil")
+	}
 	workload.ReadOnlyMounts[0].Source = runtimeRoot
 	workload.ReadOnlyMounts[0].Destination = "/etc"
 	if _, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, workload); err == nil {
@@ -283,6 +291,41 @@ func TestExecuteUsesHardenedRunscFlagsAndCollectsBoundedOutput(t *testing.T) {
 	commands = runner.commands()
 	if commandVerb(commands[1].Args) != "delete" || !slices.Contains(commands[1].Args, "--force") {
 		t.Errorf("cleanup args = %#v", commands[1].Args)
+	}
+}
+
+func TestTrustedWorkloadStructuredOutputReachesCollectedEvents(t *testing.T) {
+	provider, runner, roots := testProvider(t)
+	runner.run = func(_ context.Context, invocation command) commandResult {
+		if commandVerb(invocation.Args) == "run" {
+			_, _ = io.WriteString(invocation.Stdout, "ordinary log\nEVENT:{\"state\":\"ready\"}\n")
+		}
+		return successResult()
+	}
+	environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
+		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
+		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
+		StructuredOutputPrefix: "EVENT:", StructuredOutputKind: "probe",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := environment.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepared.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	output, err := prepared.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output.StructuredEvents) != 1 || output.StructuredEvents[0].Kind != "probe" || string(output.StructuredEvents[0].Payload) != `{"state":"ready"}` || strings.Contains(output.Stdout, "EVENT:") {
+		t.Fatalf("output = %#v", output)
+	}
+	if err := prepared.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -476,14 +519,16 @@ func TestNewProviderValidatesTrustedConfiguration(t *testing.T) {
 	if err := os.Mkdir(inputs, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	base := Config{RunscPath: "runsc", RootFS: rootFS, InputsRoot: inputs, StateRoot: filepath.Join(root, "state"), BundleRoot: filepath.Join(root, "bundles")}
+	base := Config{RunscPath: "runsc", RootFS: rootFS, RootFSIdentity: "test-rootfs", runtimeIdentity: "test-runsc", InputsRoot: inputs, StateRoot: filepath.Join(root, "state"), BundleRoot: filepath.Join(root, "bundles")}
 	for name, mutate := range map[string]func(*Config){
-		"missing runsc":  func(config *Config) { config.RunscPath = "" },
-		"missing rootfs": func(config *Config) { config.RootFS = filepath.Join(root, "missing") },
-		"missing inputs": func(config *Config) { config.InputsRoot = filepath.Join(root, "missing") },
-		"empty state":    func(config *Config) { config.StateRoot = "" },
-		"empty bundles":  func(config *Config) { config.BundleRoot = "" },
-		"bad platform":   func(config *Config) { config.Platform = "ptrace" },
+		"missing runsc":            func(config *Config) { config.RunscPath = "" },
+		"missing rootfs":           func(config *Config) { config.RootFS = filepath.Join(root, "missing") },
+		"missing inputs":           func(config *Config) { config.InputsRoot = filepath.Join(root, "missing") },
+		"empty state":              func(config *Config) { config.StateRoot = "" },
+		"empty bundles":            func(config *Config) { config.BundleRoot = "" },
+		"bad platform":             func(config *Config) { config.Platform = "ptrace" },
+		"missing rootfs identity":  func(config *Config) { config.RootFSIdentity = "" },
+		"missing runtime identity": func(config *Config) { config.runtimeIdentity = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := base
@@ -520,12 +565,14 @@ func testProvider(t *testing.T) (*Provider, *fakeCommandRunner, testRoots) {
 	}
 	runner := &fakeCommandRunner{}
 	provider, err := newProvider(Config{
-		RunscPath:  "runsc",
-		RootFS:     rootFS,
-		StateRoot:  filepath.Join(root, "state"),
-		BundleRoot: filepath.Join(root, "bundles"),
-		InputsRoot: inputs,
-		Platform:   "systrap",
+		RunscPath:       "runsc",
+		RootFS:          rootFS,
+		StateRoot:       filepath.Join(root, "state"),
+		BundleRoot:      filepath.Join(root, "bundles"),
+		InputsRoot:      inputs,
+		Platform:        "systrap",
+		RootFSIdentity:  "test-rootfs",
+		runtimeIdentity: "test-runsc",
 	}, runner)
 	if err != nil {
 		t.Fatalf("newProvider() error = %v", err)

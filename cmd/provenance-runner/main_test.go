@@ -51,3 +51,19 @@ func TestRunPrintsUsageForUnknownCommand(t *testing.T) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
+
+func TestRunFailsPaperInitializationBeforeExecutionWhenTrustedPinIsMissing(t *testing.T) {
+	t.Setenv("PROVENANCE_PAPER_PROBE_URI", "")
+	job := `{"schemaVersion":"provenance.local-job/v1alpha1","id":"paper-job","provider":"paper","environment":{}}`
+	var stdout, stderr bytes.Buffer
+	if exitCode := run([]string{"execute", "-"}, strings.NewReader(job), &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("run() exit code = %d", exitCode)
+	}
+	var result execution.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Failure == nil || result.Failure.Code != "runner_initialization_failed" || result.Execution != nil || result.Environment != nil {
+		t.Fatalf("result = %#v", result)
+	}
+}

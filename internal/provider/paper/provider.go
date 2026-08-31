@@ -24,46 +24,61 @@ import (
 )
 
 const (
-	ProviderName                = "paper"
-	ArtifactKindMinecraftPlugin = "minecraft-plugin"
-	minimumMemoryBytes          = int64(512 << 20)
-	maximumDependencies         = 128
+	ProviderName                   = "paper"
+	ArtifactKindMinecraftPlugin    = "minecraft-plugin"
+	minimumMemoryBytes             = int64(512 << 20)
+	maximumDependencies            = 128
+	defaultMaximumArtifactBytes    = int64(512 << 20)
+	defaultMaximumDependencyBytes  = int64(1 << 30)
+	defaultMaximumPreparationBytes = int64(2 << 30)
+	probeEventPrefix               = "PROVENANCE_PROBE_EVENT_V1:"
+	probeEventKind                 = "paper_probe_event"
 )
 
 var safePluginName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_. -]{0,63}$`)
 
 type Config struct {
-	ArtifactCache   *artifact.Cache
-	PaperCache      *artifact.Cache
-	JavaCache       *artifact.Cache
-	Workspaces      *workspace.Manager
-	Sandbox         execution.IsolatedWorkloadProvider
-	RuntimePreparer RuntimePreparer
-	Catalog         Catalog
-	HTTPClient      *http.Client
-	ArtifactHosts   []string
-	inputPolicy     sourcePolicy
-	pinPolicy       sourcePolicy
+	ArtifactCache           *artifact.Cache
+	PaperCache              *artifact.Cache
+	JavaCache               *artifact.Cache
+	ProbeCache              *artifact.Cache
+	RuntimeCache            *artifact.Cache
+	Workspaces              *workspace.Manager
+	Sandbox                 execution.IsolatedWorkloadProvider
+	Catalog                 Catalog
+	HTTPClient              *http.Client
+	ArtifactHosts           []string
+	MaximumArtifactBytes    int64
+	MaximumDependencyBytes  int64
+	MaximumPreparationBytes int64
+	inputPolicy             sourcePolicy
+	pinPolicy               sourcePolicy
+	sourceResolver          addressResolver
+	sourceDialer            contextDialer
 }
 
 type Provider struct {
-	config      Config
-	catalog     resolvedCatalog
-	inputPolicy sourcePolicy
-	pinPolicy   sourcePolicy
+	config         Config
+	catalog        resolvedCatalog
+	inputPolicy    sourcePolicy
+	pinPolicy      sourcePolicy
+	sourceResolver addressResolver
+	sourceDialer   contextDialer
 }
 
 var _ execution.EnvironmentProvider = (*Provider)(nil)
 
 type resolvedCatalog struct {
 	Catalog
-	paperDigest artifact.Digest
-	javaDigest  artifact.Digest
+	paperDigest   artifact.Digest
+	javaDigest    artifact.Digest
+	probeDigest   artifact.Digest
+	runtimeDigest artifact.Digest
 }
 
 func New(config Config) (*Provider, error) {
-	if config.ArtifactCache == nil || config.PaperCache == nil || config.JavaCache == nil {
-		return nil, errors.New("create Paper provider: artifact, Paper, and Java caches are required")
+	if config.ArtifactCache == nil || config.PaperCache == nil || config.JavaCache == nil || config.ProbeCache == nil || config.RuntimeCache == nil {
+		return nil, errors.New("create Paper provider: artifact, Paper, Java, probe, and prepared runtime caches are required")
 	}
 	if config.Workspaces == nil {
 		return nil, errors.New("create Paper provider: workspace manager is required")
@@ -71,8 +86,20 @@ func New(config Config) (*Provider, error) {
 	if config.Sandbox == nil {
 		return nil, errors.New("create Paper provider: isolated workload provider is required")
 	}
-	if config.RuntimePreparer == nil {
-		config.RuntimePreparer = commandRuntimePreparer{}
+	if config.MaximumArtifactBytes == 0 {
+		config.MaximumArtifactBytes = defaultMaximumArtifactBytes
+	}
+	if config.MaximumDependencyBytes == 0 {
+		config.MaximumDependencyBytes = defaultMaximumDependencyBytes
+	}
+	if config.MaximumPreparationBytes == 0 {
+		config.MaximumPreparationBytes = defaultMaximumPreparationBytes
+	}
+	if config.MaximumArtifactBytes < 1 || config.MaximumDependencyBytes < 1 || config.MaximumPreparationBytes < 1 {
+		return nil, errors.New("create Paper provider: preparation limits must be positive")
+	}
+	if config.MaximumPreparationBytes > 64<<30 || config.MaximumArtifactBytes > config.MaximumPreparationBytes || config.MaximumDependencyBytes > config.MaximumPreparationBytes {
+		return nil, errors.New("create Paper provider: preparation limits exceed the supported aggregate boundary")
 	}
 	if config.Catalog.EnvironmentID == "" {
 		config.Catalog = AlphaCatalog()
@@ -80,6 +107,11 @@ func New(config Config) (*Provider, error) {
 	resolved, err := validateCatalog(config.Catalog)
 	if err != nil {
 		return nil, fmt.Errorf("create Paper provider: %w", err)
+	}
+	for _, pin := range []ArtifactPin{resolved.Paper.Artifact, resolved.Java.Artifact, resolved.Probe, resolved.PreparedRuntime.Artifact} {
+		if pin.SizeBytes > config.MaximumArtifactBytes {
+			return nil, fmt.Errorf("create Paper provider: pinned artifact %q exceeds the per-artifact limit", pin.Filename)
+		}
 	}
 	inputPolicy := config.inputPolicy
 	if inputPolicy == nil {
@@ -95,7 +127,7 @@ func New(config Config) (*Provider, error) {
 			return nil, fmt.Errorf("create Paper provider: pinned source policy: %w", err)
 		}
 	}
-	return &Provider{config: config, catalog: resolved, inputPolicy: inputPolicy, pinPolicy: pinPolicy}, nil
+	return &Provider{config: config, catalog: resolved, inputPolicy: inputPolicy, pinPolicy: pinPolicy, sourceResolver: config.sourceResolver, sourceDialer: config.sourceDialer}, nil
 }
 
 func (*Provider) Name() string {
@@ -103,9 +135,10 @@ func (*Provider) Name() string {
 }
 
 type artifactReference struct {
-	URI      string `json:"uri"`
-	SHA256   string `json:"sha256"`
-	Filename string `json:"filename"`
+	URI       string `json:"uri"`
+	SHA256    string `json:"sha256"`
+	Filename  string `json:"filename"`
+	SizeBytes int64  `json:"sizeBytes"`
 }
 
 type dependencyReference struct {
@@ -125,7 +158,6 @@ type configuration struct {
 	EnvironmentID string                `json:"environmentId"`
 	Target        artifactReference     `json:"target"`
 	Dependencies  []dependencyReference `json:"dependencies,omitempty"`
-	Probe         artifactReference     `json:"probe"`
 	TestPlan      testPlan              `json:"testPlan"`
 	MemoryBytes   int64                 `json:"memoryBytes"`
 	CPUMillis     int64                 `json:"cpuMillis"`
@@ -149,7 +181,6 @@ type resolvedDependency struct {
 type resolvedConfiguration struct {
 	configuration
 	target       resolvedReference
-	probe        resolvedReference
 	dependencies []resolvedDependency
 }
 
@@ -170,7 +201,11 @@ func (p *Provider) Resolve(ctx context.Context, request execution.Request) (exec
 		}
 		return nil, invalidEnvironment(fmt.Errorf("decode trailing environment data: %w", err))
 	}
-	resolved, err := resolveConfiguration(config, p.catalog.EnvironmentID, p.inputPolicy)
+	resolved, err := resolveConfiguration(config, p.catalog, p.inputPolicy, preparationLimits{
+		maximumArtifactBytes:    p.config.MaximumArtifactBytes,
+		maximumDependencyBytes:  p.config.MaximumDependencyBytes,
+		maximumPreparationBytes: p.config.MaximumPreparationBytes,
+	})
 	if err != nil {
 		return nil, invalidEnvironment(err)
 	}
@@ -181,12 +216,18 @@ func invalidEnvironment(err error) error {
 	return execution.NewClassifiedError(execution.ClassificationInvalidJob, "invalid_paper_environment", err)
 }
 
-func resolveConfiguration(config configuration, environmentID string, policy sourcePolicy) (resolvedConfiguration, error) {
+type preparationLimits struct {
+	maximumArtifactBytes    int64
+	maximumDependencyBytes  int64
+	maximumPreparationBytes int64
+}
+
+func resolveConfiguration(config configuration, catalog resolvedCatalog, policy sourcePolicy, limits preparationLimits) (resolvedConfiguration, error) {
 	if config.ArtifactKind != ArtifactKindMinecraftPlugin {
 		return resolvedConfiguration{}, fmt.Errorf("artifactKind must be %q", ArtifactKindMinecraftPlugin)
 	}
-	if config.EnvironmentID != environmentID {
-		return resolvedConfiguration{}, fmt.Errorf("environmentId must be the pinned catalog entry %q", environmentID)
+	if config.EnvironmentID != catalog.EnvironmentID {
+		return resolvedConfiguration{}, fmt.Errorf("environmentId must be the pinned catalog entry %q", catalog.EnvironmentID)
 	}
 	if !safePluginName.MatchString(config.TestPlan.TargetPlugin) {
 		return resolvedConfiguration{}, errors.New("testPlan.targetPlugin is invalid")
@@ -209,17 +250,14 @@ func resolveConfiguration(config configuration, environmentID string, policy sou
 	if config.DiskBytes < 1<<20 || config.DiskBytes > 64<<30 {
 		return resolvedConfiguration{}, errors.New("diskBytes must be between 1048576 and 68719476736")
 	}
-	target, err := resolveReference("target", config.Target, policy)
-	if err != nil {
-		return resolvedConfiguration{}, err
-	}
-	probe, err := resolveReference("probe", config.Probe, policy)
+	target, err := resolveReference("target", config.Target, policy, limits.maximumArtifactBytes)
 	if err != nil {
 		return resolvedConfiguration{}, err
 	}
 	seenIDs := make(map[string]struct{}, len(config.Dependencies))
 	seenPlugins := map[string]struct{}{strings.ToLower(config.TestPlan.TargetPlugin): {}}
 	dependencies := make([]resolvedDependency, 0, len(config.Dependencies))
+	var dependencyBytes int64
 	for index, dependency := range config.Dependencies {
 		if dependency.ID == "" || len(dependency.ID) > 128 || strings.ContainsAny(dependency.ID, "\\/\x00") {
 			return resolvedConfiguration{}, fmt.Errorf("dependencies[%d].id is invalid", index)
@@ -236,10 +274,14 @@ func resolveConfiguration(config configuration, environmentID string, policy sou
 			return resolvedConfiguration{}, fmt.Errorf("dependencies[%d].plugin is duplicated", index)
 		}
 		seenPlugins[pluginKey] = struct{}{}
-		resolved, err := resolveReference(fmt.Sprintf("dependencies[%d].artifact", index), dependency.Artifact, policy)
+		resolved, err := resolveReference(fmt.Sprintf("dependencies[%d].artifact", index), dependency.Artifact, policy, limits.maximumArtifactBytes)
 		if err != nil {
 			return resolvedConfiguration{}, err
 		}
+		if resolved.SizeBytes > limits.maximumDependencyBytes-dependencyBytes {
+			return resolvedConfiguration{}, fmt.Errorf("dependency artifacts exceed the aggregate %d-byte limit", limits.maximumDependencyBytes)
+		}
+		dependencyBytes += resolved.SizeBytes
 		dependencies = append(dependencies, resolvedDependency{ID: dependency.ID, Plugin: dependency.Plugin, Artifact: resolved})
 	}
 	for _, required := range config.TestPlan.RequiredDependencies {
@@ -247,10 +289,14 @@ func resolveConfiguration(config configuration, environmentID string, policy sou
 			return resolvedConfiguration{}, fmt.Errorf("required dependency %q is not a configured dependency plugin", required)
 		}
 	}
-	return resolvedConfiguration{configuration: config, target: target, probe: probe, dependencies: dependencies}, nil
+	resolved := resolvedConfiguration{configuration: config, target: target, dependencies: dependencies}
+	if err := validatePreparationBudget(resolved, catalog, dependencyBytes, limits); err != nil {
+		return resolvedConfiguration{}, err
+	}
+	return resolved, nil
 }
 
-func resolveReference(name string, reference artifactReference, policy sourcePolicy) (resolvedReference, error) {
+func resolveReference(name string, reference artifactReference, policy sourcePolicy, maximumBytes int64) (resolvedReference, error) {
 	parsed, err := url.ParseRequestURI(reference.URI)
 	if err != nil {
 		return resolvedReference{}, fmt.Errorf("%s.uri: invalid URL", name)
@@ -261,11 +307,44 @@ func resolveReference(name string, reference artifactReference, policy sourcePol
 	if reference.Filename == "" || filepath.Base(reference.Filename) != reference.Filename || !strings.HasSuffix(strings.ToLower(reference.Filename), ".jar") {
 		return resolvedReference{}, fmt.Errorf("%s.filename must be a plain JAR filename", name)
 	}
+	if reference.SizeBytes <= 0 || reference.SizeBytes > maximumBytes {
+		return resolvedReference{}, fmt.Errorf("%s.sizeBytes must be between 1 and %d", name, maximumBytes)
+	}
 	digest, err := artifact.ParseSHA256(reference.SHA256)
 	if err != nil {
 		return resolvedReference{}, fmt.Errorf("%s.sha256: %w", name, err)
 	}
 	return resolvedReference{artifactReference: reference, digest: digest}, nil
+}
+
+func validatePreparationBudget(config resolvedConfiguration, catalog resolvedCatalog, dependencyBytes int64, limits preparationLimits) error {
+	artifacts := []int64{
+		catalog.Paper.Artifact.SizeBytes,
+		catalog.Java.Artifact.SizeBytes,
+		catalog.Probe.SizeBytes,
+		catalog.PreparedRuntime.Artifact.SizeBytes,
+		config.target.SizeBytes,
+		dependencyBytes,
+	}
+	var downloads int64
+	for _, size := range artifacts {
+		if size == 0 {
+			continue
+		}
+		if size < 0 || size > limits.maximumPreparationBytes-downloads {
+			return fmt.Errorf("declared downloads exceed the aggregate %d-byte preparation limit", limits.maximumPreparationBytes)
+		}
+		downloads += size
+	}
+	workspaceSeed := catalog.PreparedRuntime.MaximumExpandedBytes + catalog.Paper.Artifact.SizeBytes + catalog.Probe.SizeBytes + config.target.SizeBytes + dependencyBytes + 64<<10
+	if workspaceSeed < 0 || workspaceSeed > (config.DiskBytes+1)/2 {
+		return errors.New("diskBytes is too small for the declared prepared server and plugin artifacts")
+	}
+	hostBytes := downloads + catalog.Java.MaximumExpandedBytes + workspaceSeed
+	if hostBytes < downloads || hostBytes > limits.maximumPreparationBytes {
+		return fmt.Errorf("cache and workspace preparation exceed the aggregate %d-byte limit", limits.maximumPreparationBytes)
+	}
+	return nil
 }
 
 type environment struct {
@@ -275,15 +354,16 @@ type environment struct {
 }
 
 func (e *environment) Identity() string {
-	return fmt.Sprintf("paper/%s/build-%d/%s/%s/%s", e.provider.catalog.Paper.GameVersion, e.provider.catalog.Paper.Build, e.provider.catalog.Java.Distribution, e.provider.catalog.Java.Version, e.provider.catalog.EnvironmentID)
+	return fmt.Sprintf("paper/%s/build-%d/paper-sha256:%s/%s/%s/java-sha256:%s/probe-sha256:%s/runtime-sha256:%s/delegate:%s", e.provider.catalog.Paper.GameVersion, e.provider.catalog.Paper.Build, e.provider.catalog.paperDigest, e.provider.catalog.Java.Distribution, e.provider.catalog.Java.Version, e.provider.catalog.javaDigest, e.provider.catalog.probeDigest, e.provider.catalog.runtimeDigest, e.provider.config.Sandbox.Identity())
 }
 
 type acquiredArtifacts struct {
-	paper        *artifact.Entry
-	java         *artifact.Entry
-	target       *artifact.Entry
-	probe        *artifact.Entry
-	dependencies []*artifact.Entry
+	paper           *artifact.Entry
+	java            *artifact.Entry
+	probe           *artifact.Entry
+	preparedRuntime *artifact.Entry
+	target          *artifact.Entry
+	dependencies    []*artifact.Entry
 }
 
 func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironment, error) {
@@ -295,7 +375,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err != nil {
 		return nil, fmt.Errorf("create Paper workspace: %w", err)
 	}
-	prepared := &preparedEnvironment{workspace: jobWorkspace}
+	prepared := &preparedEnvironment{workspace: jobWorkspace, plan: e.config.TestPlan}
 	workload, err := e.materialize(ctx, jobWorkspace, acquired)
 	if err != nil {
 		return prepared, err
@@ -327,13 +407,17 @@ func (e *environment) acquire(ctx context.Context) (acquiredArtifacts, error) {
 	if err != nil {
 		return acquiredArtifacts{}, fmt.Errorf("acquire Java runtime: %w", err)
 	}
+	probeEntry, err := e.acquirePin(ctx, e.provider.config.ProbeCache, e.provider.catalog.Probe, e.provider.catalog.probeDigest)
+	if err != nil {
+		return acquiredArtifacts{}, fmt.Errorf("acquire trusted Paper probe: %w", err)
+	}
+	runtimeEntry, err := e.acquirePin(ctx, e.provider.config.RuntimeCache, e.provider.catalog.PreparedRuntime.Artifact, e.provider.catalog.runtimeDigest)
+	if err != nil {
+		return acquiredArtifacts{}, fmt.Errorf("acquire prepared Paper runtime: %w", err)
+	}
 	target, err := e.acquireReference(ctx, e.config.target)
 	if err != nil {
 		return acquiredArtifacts{}, fmt.Errorf("acquire target plugin: %w", err)
-	}
-	probe, err := e.acquireReference(ctx, e.config.probe)
-	if err != nil {
-		return acquiredArtifacts{}, fmt.Errorf("acquire Paper probe: %w", err)
 	}
 	dependencies := make([]*artifact.Entry, 0, len(e.config.dependencies))
 	for _, dependency := range e.config.dependencies {
@@ -343,26 +427,40 @@ func (e *environment) acquire(ctx context.Context) (acquiredArtifacts, error) {
 		}
 		dependencies = append(dependencies, entry)
 	}
-	return acquiredArtifacts{paper: paperEntry, java: javaEntry, target: target, probe: probe, dependencies: dependencies}, nil
+	return acquiredArtifacts{paper: paperEntry, java: javaEntry, probe: probeEntry, preparedRuntime: runtimeEntry, target: target, dependencies: dependencies}, nil
 }
 
 func (e *environment) acquirePin(ctx context.Context, cache *artifact.Cache, pin ArtifactPin, digest artifact.Digest) (*artifact.Entry, error) {
-	source, err := e.provider.source(pin.URI, e.provider.pinPolicy)
+	source, err := e.provider.source(pin.URI, pin.SizeBytes, e.provider.pinPolicy)
 	if err != nil {
 		return nil, err
 	}
-	return cache.Acquire(ctx, digest, source)
+	entry, err := cache.AcquireExact(ctx, digest, pin.SizeBytes, source)
+	if err != nil {
+		return nil, err
+	}
+	if entry.Size() != pin.SizeBytes {
+		return nil, fmt.Errorf("artifact size is %d bytes, want declared %d", entry.Size(), pin.SizeBytes)
+	}
+	return entry, nil
 }
 
 func (e *environment) acquireReference(ctx context.Context, reference resolvedReference) (*artifact.Entry, error) {
-	source, err := e.provider.source(reference.URI, e.provider.inputPolicy)
+	source, err := e.provider.source(reference.URI, reference.SizeBytes, e.provider.inputPolicy)
 	if err != nil {
 		return nil, err
 	}
-	return e.provider.config.ArtifactCache.Acquire(ctx, reference.digest, source)
+	entry, err := e.provider.config.ArtifactCache.AcquireExact(ctx, reference.digest, reference.SizeBytes, source)
+	if err != nil {
+		return nil, err
+	}
+	if entry.Size() != reference.SizeBytes {
+		return nil, fmt.Errorf("artifact size is %d bytes, want declared %d", entry.Size(), reference.SizeBytes)
+	}
+	return entry, nil
 }
 
-func (p *Provider) source(uri string, policy sourcePolicy) (artifact.Source, error) {
+func (p *Provider) source(uri string, sizeBytes int64, policy sourcePolicy) (artifact.Source, error) {
 	parsed, err := url.ParseRequestURI(uri)
 	if err != nil {
 		return nil, errors.New("invalid artifact URL")
@@ -370,11 +468,15 @@ func (p *Provider) source(uri string, policy sourcePolicy) (artifact.Source, err
 	if err := policy.ValidateInitial(parsed); err != nil {
 		return nil, err
 	}
-	return artifact.HTTPSource{URL: parsed.String(), UserAgent: DownloadUserAgent, Client: clientWithRedirectPolicy(p.config.HTTPClient, policy)}, nil
+	client, err := clientWithSourcePolicy(p.config.HTTPClient, policy, p.sourceResolver, p.sourceDialer)
+	if err != nil {
+		return nil, err
+	}
+	return artifact.HTTPSource{URL: parsed.String(), UserAgent: DownloadUserAgent, Client: client, ExpectedBytes: sizeBytes}, nil
 }
 
 func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.Workspace, acquired acquiredArtifacts) (execution.IsolatedWorkload, error) {
-	javaRoot, err := jobWorkspace.ExtractTarGzip(ctx, "runtime", acquired.java)
+	javaRoot, err := jobWorkspace.ExtractTarGzipBounded(ctx, "runtime", acquired.java, e.provider.catalog.Java.MaximumExpandedBytes)
 	if err != nil {
 		return execution.IsolatedWorkload{}, fmt.Errorf("extract Java runtime: %w", err)
 	}
@@ -384,14 +486,11 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		return execution.IsolatedWorkload{}, errors.New("extracted Java runtime does not contain an executable bin/java")
 	}
+	if _, err := jobWorkspace.ExtractTarGzipBounded(ctx, "server", acquired.preparedRuntime, e.provider.catalog.PreparedRuntime.MaximumExpandedBytes); err != nil {
+		return execution.IsolatedWorkload{}, fmt.Errorf("extract prepared Paper runtime: %w", err)
+	}
 	if _, err := jobWorkspace.Materialize(ctx, "server/paper.jar", acquired.paper); err != nil {
 		return execution.IsolatedWorkload{}, err
-	}
-	if err := e.provider.config.RuntimePreparer.Prepare(ctx, RuntimePreparation{
-		JavaExecutable:  javaExecutable,
-		ServerDirectory: filepath.Join(jobWorkspace.Root(), "server"),
-	}); err != nil {
-		return execution.IsolatedWorkload{}, fmt.Errorf("prepare pinned Paper runtime: %w", err)
 	}
 	if _, err := jobWorkspace.Materialize(ctx, "server/plugins/target.jar", acquired.target); err != nil {
 		return execution.IsolatedWorkload{}, err
@@ -437,25 +536,27 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 		"-jar", "/workspace/paper.jar", "--nogui",
 	}
 	arguments := []string{
-		"-ceu",
-		`cp -R /inputs/server/. /workspace/; chmod -R u+rwX /workspace; exec "$@"`,
+		"-cu",
+		`cp -R /inputs/server/. /workspace/ || exit 125; chmod -R u+rwX /workspace || exit 125; "$@"; status=$?; if [ -f /workspace/provenance-probe-events.ndjson ]; then while IFS= read -r event || [ -n "$event" ]; do printf '%s%s\n' 'PROVENANCE_PROBE_EVENT_V1:' "$event"; done < /workspace/provenance-probe-events.ndjson; fi; exit "$status"`,
 		"provenance-paper",
 		"/runtime/bin/java",
 	}
 	arguments = append(arguments, javaArguments...)
 	return execution.IsolatedWorkload{
-		Command:        "/bin/sh",
-		Arguments:      arguments,
-		Environment:    map[string]string{"JAVA_HOME": "/runtime"},
-		InputsPath:     jobWorkspace.Root(),
-		ReadOnlyMounts: []execution.ReadOnlyMount{{Source: javaHome, Destination: "/runtime", Executable: true}},
-		Network:        "none",
-		MemoryBytes:    e.config.MemoryBytes,
-		CPUMillis:      e.config.CPUMillis,
-		PIDs:           e.config.PIDs,
-		DiskBytes:      e.config.DiskBytes,
-		MaxLineBytes:   e.config.MaxLineBytes,
-		RedactSecrets:  append([]string(nil), e.config.RedactSecrets...),
+		Command:                "/bin/sh",
+		Arguments:              arguments,
+		Environment:            map[string]string{"JAVA_HOME": "/runtime"},
+		InputsPath:             jobWorkspace.Root(),
+		ReadOnlyMounts:         []execution.ReadOnlyMount{{Source: javaHome, Destination: "/runtime", Executable: true}},
+		Network:                "none",
+		MemoryBytes:            e.config.MemoryBytes,
+		CPUMillis:              e.config.CPUMillis,
+		PIDs:                   e.config.PIDs,
+		DiskBytes:              e.config.DiskBytes,
+		MaxLineBytes:           e.config.MaxLineBytes,
+		RedactSecrets:          append([]string(nil), e.config.RedactSecrets...),
+		StructuredOutputPrefix: probeEventPrefix,
+		StructuredOutputKind:   probeEventKind,
 	}, nil
 }
 
@@ -483,6 +584,7 @@ type preparedEnvironment struct {
 	workspace *workspace.Workspace
 	delegate  execution.PreparedEnvironment
 	cleaned   bool
+	plan      testPlan
 }
 
 func (p *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
@@ -496,7 +598,21 @@ func (p *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 	if p.delegate == nil {
 		return execution.CollectedOutput{}, nil
 	}
-	return p.delegate.Collect(ctx)
+	output, err := p.delegate.Collect(ctx)
+	if err != nil {
+		return output, err
+	}
+	events, lifecycleErr := validateProbeLifecycle(output, p.plan)
+	output.StructuredEvents = events
+	output.EvidenceUsage.StructuredEventCount = int64(len(events))
+	output.EvidenceUsage.StructuredEventBytes = 0
+	for _, event := range events {
+		output.EvidenceUsage.StructuredEventBytes += int64(len(event.Payload))
+	}
+	if lifecycleErr != nil {
+		return output, execution.NewClassifiedError(execution.ClassificationWorkloadFailure, "paper_lifecycle_failed", lifecycleErr)
+	}
+	return output, nil
 }
 
 func (p *preparedEnvironment) Cleanup(ctx context.Context) error {
@@ -505,16 +621,16 @@ func (p *preparedEnvironment) Cleanup(ctx context.Context) error {
 	if p.cleaned {
 		return nil
 	}
+	var cleanupErrors []error
 	if p.delegate != nil {
-		if err := p.delegate.Cleanup(ctx); err != nil {
-			return err
-		}
+		cleanupErrors = append(cleanupErrors, p.delegate.Cleanup(ctx))
 	}
-	if err := p.workspace.Cleanup(ctx); err != nil {
-		return err
+	cleanupErrors = append(cleanupErrors, p.workspace.Cleanup(ctx))
+	err := errors.Join(cleanupErrors...)
+	if err == nil {
+		p.cleaned = true
 	}
-	p.cleaned = true
-	return nil
+	return err
 }
 
 func validateCatalog(catalog Catalog) (resolvedCatalog, error) {
@@ -533,6 +649,15 @@ func validateCatalog(catalog Catalog) (resolvedCatalog, error) {
 	if err := validatePin("Java", catalog.Java.Artifact); err != nil {
 		return resolvedCatalog{}, err
 	}
+	if err := validatePin("probe", catalog.Probe); err != nil {
+		return resolvedCatalog{}, err
+	}
+	if err := validatePin("prepared runtime", catalog.PreparedRuntime.Artifact); err != nil {
+		return resolvedCatalog{}, err
+	}
+	if catalog.Java.MaximumExpandedBytes <= 0 || catalog.Java.MaximumExpandedBytes > 1<<30 || catalog.PreparedRuntime.MaximumExpandedBytes <= 0 || catalog.PreparedRuntime.MaximumExpandedBytes > 1<<30 {
+		return resolvedCatalog{}, errors.New("catalog archive expanded-byte limits must be between 1 and 1073741824")
+	}
 	paperDigest, err := artifact.ParseSHA256(catalog.Paper.Artifact.SHA256)
 	if err != nil {
 		return resolvedCatalog{}, fmt.Errorf("catalog Paper SHA-256: %w", err)
@@ -541,7 +666,15 @@ func validateCatalog(catalog Catalog) (resolvedCatalog, error) {
 	if err != nil {
 		return resolvedCatalog{}, fmt.Errorf("catalog Java SHA-256: %w", err)
 	}
-	return resolvedCatalog{Catalog: catalog, paperDigest: paperDigest, javaDigest: javaDigest}, nil
+	probeDigest, err := artifact.ParseSHA256(catalog.Probe.SHA256)
+	if err != nil {
+		return resolvedCatalog{}, fmt.Errorf("catalog probe SHA-256: %w", err)
+	}
+	runtimeDigest, err := artifact.ParseSHA256(catalog.PreparedRuntime.Artifact.SHA256)
+	if err != nil {
+		return resolvedCatalog{}, fmt.Errorf("catalog prepared runtime SHA-256: %w", err)
+	}
+	return resolvedCatalog{Catalog: catalog, paperDigest: paperDigest, javaDigest: javaDigest, probeDigest: probeDigest, runtimeDigest: runtimeDigest}, nil
 }
 
 func validatePin(name string, pin ArtifactPin) error {
@@ -551,6 +684,9 @@ func validatePin(name string, pin ArtifactPin) error {
 	}
 	if pin.Filename == "" || filepath.Base(pin.Filename) != pin.Filename {
 		return fmt.Errorf("catalog %s filename is invalid", name)
+	}
+	if pin.SizeBytes <= 0 {
+		return fmt.Errorf("catalog %s size must be positive", name)
 	}
 	return nil
 }

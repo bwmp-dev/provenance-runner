@@ -231,6 +231,46 @@ func TestCollectorBoundsStructuredEventsIndependently(t *testing.T) {
 	}
 }
 
+func TestCollectorExtractsBoundedStructuredLinesAfterRawOutputTruncation(t *testing.T) {
+	collector, err := NewCollector(Config{
+		MaxLineBytes:         8,
+		MaxTotalBytes:        8,
+		StructuredLinePrefix: "EVENT:",
+		StructuredLineKind:   "probe",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, _ := collector.RawWriter(StreamStdout)
+	_, _ = io.WriteString(stdout, "raw output that fills the capture\nEVENT:{\"ok\":true}\n")
+	bundle, err := collector.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Events) != 1 || bundle.Events[0].Kind != "probe" || string(bundle.Events[0].Payload) != `{"ok":true}` {
+		t.Fatalf("events = %#v", bundle.Events)
+	}
+	if !bundle.Usage.OutputTruncated {
+		t.Error("raw output was not marked truncated")
+	}
+}
+
+func TestCollectorReportsMalformedStructuredLine(t *testing.T) {
+	collector, err := NewCollector(Config{StructuredLinePrefix: "EVENT:", StructuredLineKind: "probe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, _ := collector.RawWriter(StreamStdout)
+	_, _ = io.WriteString(stdout, "EVENT:not-json\n")
+	bundle, err := collector.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.StructuredEventError == "" || len(bundle.Events) != 0 {
+		t.Fatalf("bundle event error/events = %q/%#v", bundle.StructuredEventError, bundle.Events)
+	}
+}
+
 func TestCollectorAcceptsConcurrentRawStreams(t *testing.T) {
 	collector := newTestCollector(t, Config{MaxLineBytes: 128, MaxTotalBytes: 1 << 20})
 	stdout := rawWriter(t, collector, StreamStdout)

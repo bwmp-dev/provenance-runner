@@ -26,6 +26,10 @@ type pendingLink struct {
 }
 
 func (w *Workspace) ExtractTarGzip(ctx context.Context, relativePath string, entry *artifact.Entry) (string, error) {
+	return w.ExtractTarGzipBounded(ctx, relativePath, entry, maximumExpandedBytes)
+}
+
+func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath string, entry *artifact.Entry, maximumExpanded int64) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -37,6 +41,9 @@ func (w *Workspace) ExtractTarGzip(ctx context.Context, relativePath string, ent
 	}
 	if entry == nil {
 		return "", errors.New("extract archive: cache entry is nil")
+	}
+	if maximumExpanded <= 0 || maximumExpanded > maximumExpandedBytes {
+		return "", fmt.Errorf("extract archive: expanded size limit must be between 1 and %d", maximumExpandedBytes)
 	}
 	cleanedPath, err := cleanRelativePath(relativePath)
 	if err != nil {
@@ -97,7 +104,7 @@ func (w *Workspace) ExtractTarGzip(ctx context.Context, relativePath string, ent
 				return "", fmt.Errorf("extract archive directory: %w", err)
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if header.Size < 0 || header.Size > maximumExpandedBytes-expanded {
+			if header.Size < 0 || header.Size > maximumExpanded-expanded {
 				return "", errors.New("extract archive: expanded size limit exceeded")
 			}
 			expanded += header.Size

@@ -51,22 +51,25 @@ type EnvironmentProvider interface {
 // product environment and its sandbox. Job JSON cannot select host paths or
 // read-only mounts directly.
 type IsolatedWorkloadProvider interface {
+	Identity() string
 	ResolveWorkload(context.Context, Request, IsolatedWorkload) (Environment, error)
 }
 
 type IsolatedWorkload struct {
-	Command        string
-	Arguments      []string
-	Environment    map[string]string
-	InputsPath     string
-	ReadOnlyMounts []ReadOnlyMount
-	Network        string
-	MemoryBytes    int64
-	CPUMillis      int64
-	PIDs           int64
-	DiskBytes      int64
-	MaxLineBytes   int64
-	RedactSecrets  []string
+	Command                string
+	Arguments              []string
+	Environment            map[string]string
+	InputsPath             string
+	ReadOnlyMounts         []ReadOnlyMount
+	Network                string
+	MemoryBytes            int64
+	CPUMillis              int64
+	PIDs                   int64
+	DiskBytes              int64
+	MaxLineBytes           int64
+	RedactSecrets          []string
+	StructuredOutputPrefix string
+	StructuredOutputKind   string
 }
 
 type ReadOnlyMount struct {
@@ -94,14 +97,15 @@ type ExecutionOutcome struct {
 }
 
 type CollectedOutput struct {
-	Stdout           string
-	Stderr           string
-	CapturedBytes    int64
-	ObservedBytes    int64
-	OutputTruncated  bool
-	StructuredEvents []StructuredEvent
-	CompleteLog      *CompleteLog
-	EvidenceUsage    EvidenceUsage
+	Stdout               string
+	Stderr               string
+	CapturedBytes        int64
+	ObservedBytes        int64
+	OutputTruncated      bool
+	StructuredEvents     []StructuredEvent
+	CompleteLog          *CompleteLog
+	EvidenceUsage        EvidenceUsage
+	StructuredEventError string
 }
 
 type StructuredEvent struct {

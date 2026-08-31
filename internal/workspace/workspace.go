@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/artifact"
 )
@@ -17,8 +18,11 @@ import (
 var ErrWorkspaceClosed = errors.New("workspace is closed")
 
 type Manager struct {
-	root string
+	root      string
+	orphanTTL time.Duration
 }
+
+const DefaultOrphanTTL = 24 * time.Hour
 
 func NewManager(root string) (*Manager, error) {
 	if root == "" {
@@ -53,7 +57,11 @@ func NewManager(root string) (*Manager, error) {
 	if !info.IsDir() {
 		return nil, errors.New("create workspace manager: root is not a directory")
 	}
-	return &Manager{root: absoluteRoot}, nil
+	manager := &Manager{root: absoluteRoot, orphanTTL: DefaultOrphanTTL}
+	if err := manager.Reconcile(context.Background(), time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	return manager, nil
 }
 
 func (m *Manager) Create(ctx context.Context, jobID string) (*Workspace, error) {
@@ -70,6 +78,10 @@ func (m *Manager) Create(ctx context.Context, jobID string) (*Workspace, error) 
 	if err := os.Chmod(root, 0o700); err != nil {
 		cleanupErr := os.RemoveAll(root)
 		return nil, errors.Join(fmt.Errorf("restrict job workspace: %w", err), cleanupErr)
+	}
+	if err := writeWorkspaceMarker(root, jobID, time.Now().UTC()); err != nil {
+		cleanupErr := os.RemoveAll(root)
+		return nil, errors.Join(err, cleanupErr)
 	}
 	if err := ctx.Err(); err != nil {
 		cleanupErr := os.RemoveAll(root)

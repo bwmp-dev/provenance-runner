@@ -11,7 +11,6 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
-	processprovider "github.com/bwmp-dev/provenance-runner/internal/provider/process"
 )
 
 const maximumJobBytes = 1 << 20
@@ -35,7 +34,7 @@ func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return writeResult(stdout, execution.FailedResult("", execution.PhaseValidation, execution.ClassificationInvalidJob, "invalid_job", err))
 	}
 
-	registry, err := execution.NewRegistry(processprovider.New())
+	registry, err := registryForProvider(context.Background(), job.Provider, os.Getenv)
 	if err != nil {
 		return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err))
 	}
