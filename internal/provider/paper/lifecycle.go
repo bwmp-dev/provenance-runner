@@ -172,7 +172,7 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 			return errors.New("non-truncated output has unequal capturedBytes and observedBytes")
 		}
 		s.outputSeen = true
-		s.outputTruncated = truncated
+		s.outputTruncated = s.outputTruncated || truncated
 		if truncated {
 			s.failure = true
 		}
@@ -196,7 +196,7 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 			if !s.outputSeen {
 				return errors.New("completed execution has no output event")
 			}
-			if s.failure && !s.outputTruncated {
+			if s.failure && (!s.outputTruncated || s.timeoutSeen) {
 				return errors.New("completed execution contradicts earlier failure evidence")
 			}
 		case "TIMED_OUT":
@@ -234,7 +234,11 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 			return err
 		}
 		if !evaluated {
-			return errors.New("assertion was not evaluated")
+			if passed || !s.outputTruncated {
+				return errors.New("assertion was not evaluated outside a truncated output path")
+			}
+			s.seenAssertions[assertionID] = struct{}{}
+			return nil
 		}
 		s.seenAssertions[assertionID] = struct{}{}
 		if !passed {
@@ -285,6 +289,9 @@ func (s *commandProbeState) acceptClassification(code string) error {
 	case "command_output_truncated":
 		if !s.outputTruncated || !s.executionCompleted || s.executionStatus != "COMPLETED" {
 			return errors.New("output truncation classification has no completed truncated execution")
+		}
+		if len(s.seenAssertions) != len(s.expectedAssertions) {
+			return errors.New("output truncation classification has incomplete assertions")
 		}
 	case "command_assertion_failure":
 		if !s.assertionFailure {
@@ -387,8 +394,19 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 				if err != nil {
 					return events, err
 				}
-				if _, err := requiredBoolean(envelope.Data, "timedOut"); err != nil {
+				timedOut, err := requiredBoolean(envelope.Data, "timedOut")
+				if err != nil {
 					return events, err
+				}
+				if passed && timedOut {
+					return events, errors.New("completed TEST_PLAN cannot be both passed and timed out")
+				}
+				commandTimedOut := false
+				for _, state := range commandTests {
+					commandTimedOut = commandTimedOut || state.timeoutSeen
+				}
+				if timedOut != commandTimedOut {
+					return events, errors.New("completed TEST_PLAN timedOut does not match command timeout evidence")
 				}
 				planCompleted = true
 				if !passed && lifecycleFailure == nil {

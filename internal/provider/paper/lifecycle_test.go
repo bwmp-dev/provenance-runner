@@ -106,13 +106,16 @@ func TestProbeLifecycleMapsCompletedCommandEvents(t *testing.T) {
 }
 
 func TestProbeLifecycleAcceptsPinnedProbeOutputTruncationSequence(t *testing.T) {
-	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}}}}}
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}, {}}}}}
 	output := commandProbeOutput(true)
 	output.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":4,"observedBytes":8,"truncated":true}`)
-	output.StructuredEvents = append(output.StructuredEvents[:11], output.StructuredEvents[12:]...)
-	output.StructuredEvents = append(output.StructuredEvents[:11], append([]execution.StructuredEvent{probeStructuredEvent(13, "CLASSIFICATION", `{"code":"command_output_truncated","testId":"version-command"}`)}, output.StructuredEvents[11:]...)...)
-	output.StructuredEvents[12] = probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
-	output.StructuredEvents[13] = probeStructuredEvent(15, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
+	output.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_ASSERTION", `{"testId":"version-command","assertionId":"version-command:1","evaluated":false,"passed":false}`)
+	output.StructuredEvents = append(output.StructuredEvents[:12], append([]execution.StructuredEvent{
+		probeStructuredEvent(13, "COMMAND_ASSERTION", `{"testId":"version-command","assertionId":"version-command:2","evaluated":false,"passed":false}`),
+		probeStructuredEvent(14, "CLASSIFICATION", `{"code":"command_output_truncated","testId":"version-command"}`),
+	}, output.StructuredEvents[12:]...)...)
+	output.StructuredEvents[14] = probeStructuredEvent(15, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
+	output.StructuredEvents[15] = probeStructuredEvent(16, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
 
 	events, err := validateProbeLifecycle(output, plan)
 	if err == nil {
@@ -121,14 +124,123 @@ func TestProbeLifecycleAcceptsPinnedProbeOutputTruncationSequence(t *testing.T) 
 	if strings.Contains(err.Error(), "out of order") || strings.Contains(err.Error(), "contradicts") {
 		t.Fatalf("valid pinned truncation sequence was rejected as contradictory: %v", err)
 	}
-	var foundClassification bool
-	for _, event := range events {
-		if event.Kind == "CLASSIFICATION" && strings.Contains(string(event.Payload), `"code":"command_output_truncated"`) {
-			foundClassification = true
+	expectedKinds := []string{
+		"TEST_PLAN", "PROBE_LOADED", "SERVER_LOADED", "STABILIZATION_STARTED", "TARGET_REQUIREMENT",
+		"STABILIZATION_COMPLETED", "SERVER_READY", "COMMAND_REGISTRATION", "COMMAND_EXECUTION_STARTED",
+		"COMMAND_OUTPUT", "COMMAND_EXECUTION_COMPLETED", "COMMAND_ASSERTION", "COMMAND_ASSERTION",
+		"CLASSIFICATION", "COMMAND_TEST_COMPLETED", "TEST_PLAN", "CLEAN_SHUTDOWN_REQUESTED", "SERVER_STOPPED",
+	}
+	if len(events) != len(expectedKinds) {
+		t.Fatalf("mapped event count = %d, want %d (%#v)", len(events), len(expectedKinds), events)
+	}
+	for index, expected := range expectedKinds {
+		if events[index].Kind != expected {
+			t.Fatalf("mapped event %d = %s, want %s", index, events[index].Kind, expected)
 		}
 	}
-	if !foundClassification {
-		t.Fatalf("stable truncation classification was not preserved in %#v", events)
+	for _, index := range []int{11, 12} {
+		if !strings.Contains(string(events[index].Payload), `"evaluated":false`) || !strings.Contains(string(events[index].Payload), `"passed":false`) {
+			t.Fatalf("unevaluated truncation assertion was not preserved: %s", events[index].Payload)
+		}
+	}
+	if !strings.Contains(string(events[13].Payload), `"code":"command_output_truncated"`) {
+		t.Fatalf("stable truncation classification was not preserved: %s", events[13].Payload)
+	}
+}
+
+func TestCommandProbeStateRejectsUnevaluatedAssertionsOutsideTruncation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		output    string
+		assertion string
+	}{
+		{
+			name:      "normal output",
+			output:    `{"truncated":false,"capturedBytes":4,"observedBytes":4}`,
+			assertion: `{"assertionId":"version-command:1","evaluated":false,"passed":false}`,
+		},
+		{
+			name:      "passed unevaluated assertion after truncation",
+			output:    `{"truncated":true,"capturedBytes":4,"observedBytes":8}`,
+			assertion: `{"assertionId":"version-command:1","evaluated":false,"passed":true}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newCommandProbeState(consoleCommandTest{ID: "version-command", Assertions: []commandAssertion{{}}})
+			for _, event := range []struct {
+				kind string
+				data string
+			}{
+				{kind: "COMMAND_REGISTRATION", data: `{"registered":true,"status":"REGISTERED"}`},
+				{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
+				{kind: "COMMAND_OUTPUT", data: test.output},
+				{kind: "COMMAND_EXECUTION_COMPLETED", data: `{"status":"COMPLETED","dispatched":true}`},
+			} {
+				if err := state.accept(event.kind, json.RawMessage(event.data)); err != nil {
+					t.Fatalf("accept(%s) error = %v", event.kind, err)
+				}
+			}
+			if err := state.accept("COMMAND_ASSERTION", json.RawMessage(test.assertion)); err == nil {
+				t.Fatal("unevaluated assertion unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestProbeLifecycleCorrelatesTestPlanTimeout(t *testing.T) {
+	plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{}}}}}
+
+	noCommandTimeout := commandProbeOutput(true)
+	noCommandTimeout.StructuredEvents[13] = probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":true}`)
+	if _, err := validateProbeLifecycle(noCommandTimeout, plan); err == nil || !strings.Contains(err.Error(), "timedOut does not match command timeout evidence") {
+		t.Fatalf("plan timeout without command timeout error = %v", err)
+	}
+
+	commandTimeout := commandProbeOutput(true)
+	commandTimeout.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"version-command","timeoutSeconds":10}`)
+	commandTimeout.StructuredEvents[10] = probeStructuredEvent(11, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
+	commandTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
+	commandTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
+	commandTimeout.StructuredEvents[13] = probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
+	if _, err := validateProbeLifecycle(commandTimeout, plan); err == nil || !strings.Contains(err.Error(), "timedOut does not match command timeout evidence") {
+		t.Fatalf("command timeout without plan timeout error = %v", err)
+	}
+
+	consistentTimeout := commandProbeOutput(true)
+	consistentTimeout.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"version-command","timeoutSeconds":10}`)
+	consistentTimeout.StructuredEvents[10] = probeStructuredEvent(11, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
+	consistentTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
+	consistentTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
+	consistentTimeout.StructuredEvents[13] = probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":true}`)
+	if _, err := validateProbeLifecycle(consistentTimeout, plan); err == nil || strings.Contains(err.Error(), "timedOut does not match") {
+		t.Fatalf("consistent command/plan timeout error = %v", err)
+	}
+
+	contradictory := commandProbeOutput(true)
+	contradictory.StructuredEvents[13] = probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":true,"timedOut":true}`)
+	if _, err := validateProbeLifecycle(contradictory, plan); err == nil || !strings.Contains(err.Error(), "both passed and timed out") {
+		t.Fatalf("contradictory plan timeout error = %v", err)
+	}
+}
+
+func TestCommandProbeStateRejectsPartialTruncationClassification(t *testing.T) {
+	state := newCommandProbeState(consoleCommandTest{ID: "version-command", Assertions: []commandAssertion{{}, {}}})
+	for _, event := range []struct {
+		kind string
+		data string
+	}{
+		{kind: "COMMAND_REGISTRATION", data: `{"registered":true,"status":"REGISTERED"}`},
+		{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
+		{kind: "COMMAND_OUTPUT", data: `{"truncated":true,"capturedBytes":4,"observedBytes":8}`},
+		{kind: "COMMAND_EXECUTION_COMPLETED", data: `{"status":"COMPLETED","dispatched":true}`},
+		{kind: "COMMAND_ASSERTION", data: `{"assertionId":"version-command:1","evaluated":false,"passed":false}`},
+	} {
+		if err := state.accept(event.kind, json.RawMessage(event.data)); err != nil {
+			t.Fatalf("accept(%s) error = %v", event.kind, err)
+		}
+	}
+	if err := state.acceptClassification("command_output_truncated"); err == nil || !strings.Contains(err.Error(), "incomplete assertions") {
+		t.Fatalf("partial truncation classification error = %v", err)
 	}
 }
 
@@ -211,6 +323,7 @@ func TestCommandProbeStateRejectsSuccessAfterNegativeEvidence(t *testing.T) {
 				{kind: "COMMAND_EXECUTION_STARTED", data: `{"timeoutSeconds":1}`},
 				{kind: "COMMAND_OUTPUT", data: `{"truncated":true,"capturedBytes":4,"observedBytes":8}`},
 				{kind: "COMMAND_EXECUTION_COMPLETED", data: `{"status":"COMPLETED","dispatched":true}`},
+				{kind: "COMMAND_ASSERTION", data: `{"assertionId":"version-command:1","evaluated":false,"passed":false}`},
 			},
 		},
 		{
