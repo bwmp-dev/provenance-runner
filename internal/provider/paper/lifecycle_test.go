@@ -198,20 +198,22 @@ func TestProbeLifecycleCorrelatesTestPlanTimeout(t *testing.T) {
 
 	commandTimeout := commandProbeOutput(true)
 	commandTimeout.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"version-command","timeoutSeconds":10}`)
-	commandTimeout.StructuredEvents[10] = probeStructuredEvent(11, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
-	commandTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
-	commandTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
-	commandTimeout.StructuredEvents[13] = probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
+	commandTimeout.StructuredEvents[10] = probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","testId":"version-command"}`)
+	commandTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
+	commandTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
+	commandTimeout.StructuredEvents[13] = probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
+	commandTimeout.StructuredEvents[14] = probeStructuredEvent(15, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
 	if _, err := validateProbeLifecycle(commandTimeout, plan); err == nil || !strings.Contains(err.Error(), "timedOut does not match command timeout evidence") {
 		t.Fatalf("command timeout without plan timeout error = %v", err)
 	}
 
 	consistentTimeout := commandProbeOutput(true)
 	consistentTimeout.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"version-command","timeoutSeconds":10}`)
-	consistentTimeout.StructuredEvents[10] = probeStructuredEvent(11, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
-	consistentTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
-	consistentTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
-	consistentTimeout.StructuredEvents[13] = probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":true}`)
+	consistentTimeout.StructuredEvents[10] = probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","testId":"version-command"}`)
+	consistentTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
+	consistentTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
+	consistentTimeout.StructuredEvents[13] = probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
+	consistentTimeout.StructuredEvents[14] = probeStructuredEvent(15, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":true}`)
 	if _, err := validateProbeLifecycle(consistentTimeout, plan); err == nil || strings.Contains(err.Error(), "timedOut does not match") {
 		t.Fatalf("consistent command/plan timeout error = %v", err)
 	}
@@ -239,7 +241,7 @@ func TestProbeLifecycleAcceptsPinnedMultiCommandTimeout(t *testing.T) {
 	expectedKinds := []string{
 		"TEST_PLAN", "PROBE_LOADED", "SERVER_LOADED", "STABILIZATION_STARTED", "TARGET_REQUIREMENT",
 		"STABILIZATION_COMPLETED", "SERVER_READY", "COMMAND_REGISTRATION", "COMMAND_EXECUTION_STARTED",
-		"COMMAND_TIMEOUT", "COMMAND_EXECUTION_COMPLETED", "CLASSIFICATION", "COMMAND_TEST_COMPLETED",
+		"COMMAND_TIMEOUT", "CLASSIFICATION", "COMMAND_OUTPUT", "COMMAND_EXECUTION_COMPLETED", "COMMAND_TEST_COMPLETED",
 		"TEST_PLAN", "CLEAN_SHUTDOWN_REQUESTED", "SERVER_STOPPED",
 	}
 	if len(events) != len(expectedKinds) {
@@ -250,8 +252,11 @@ func TestProbeLifecycleAcceptsPinnedMultiCommandTimeout(t *testing.T) {
 			t.Fatalf("mapped event %d = %s, want %s", index, events[index].Kind, expected)
 		}
 	}
-	if !strings.Contains(string(events[11].Payload), `"code":"command_timeout"`) {
-		t.Fatalf("timeout classification was not preserved: %s", events[11].Payload)
+	if !strings.Contains(string(events[10].Payload), `"code":"command_timeout"`) {
+		t.Fatalf("timeout classification was not preserved: %s", events[10].Payload)
+	}
+	if !strings.Contains(string(events[11].Payload), `"capturedBytes":7`) || !strings.Contains(string(events[11].Payload), `"observedBytes":7`) {
+		t.Fatalf("timeout output was not preserved: %s", events[11].Payload)
 	}
 }
 
@@ -275,16 +280,61 @@ func TestProbeLifecycleRejectsCommandEventsAroundPinnedTimeout(t *testing.T) {
 		{
 			name: "later command after timeout",
 			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
-				return insertProbeEvent(events, 13, probeStructuredEvent(14, "COMMAND_REGISTRATION", `{"testId":"second-command","registered":true,"status":"REGISTERED"}`))
+				return insertProbeEvent(events, 14, probeStructuredEvent(14, "COMMAND_REGISTRATION", `{"testId":"second-command","registered":true,"status":"REGISTERED"}`))
 			},
 			expectErr: "after a timed-out command",
 		},
 		{
-			name: "timed-out command incomplete",
+			name: "missing timeout classification",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				return removeProbeEvent(events, "CLASSIFICATION", "first-command")
+			},
+			expectErr: "missing its timeout classification",
+		},
+		{
+			name: "timeout classification after output",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				events[10], events[11] = events[11], events[10]
+				return events
+			},
+			expectErr: "missing its timeout classification",
+		},
+		{
+			name: "missing timeout output",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				return removeProbeEvent(events, "COMMAND_OUTPUT", "first-command")
+			},
+			expectErr: "incomplete timeout trace",
+		},
+		{
+			name: "execution completion before timed-out completion",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				events[12], events[13] = events[13], events[12]
+				return events
+			},
+			expectErr: "after its completion",
+		},
+		{
+			name: "missing execution completion",
 			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
 				return removeProbeEvent(events, "COMMAND_EXECUTION_COMPLETED", "first-command")
 			},
 			expectErr: "missing execution completion",
+		},
+		{
+			name: "contradictory execution failure",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				events[12] = probeStructuredEvent(13, "COMMAND_EXECUTION_COMPLETED", `{"testId":"first-command","status":"EXECUTION_FAILED"}`)
+				return events
+			},
+			expectErr: "contradicts timeout evidence",
+		},
+		{
+			name: "missing command completion",
+			mutate: func(events []execution.StructuredEvent) []execution.StructuredEvent {
+				return removeProbeEvent(events, "COMMAND_TEST_COMPLETED", "first-command")
+			},
+			expectErr: "missing command completion",
 		},
 	}
 	for _, test := range tests {
@@ -495,12 +545,13 @@ func pinnedMultiCommandTimeoutOutput() execution.CollectedOutput {
 		probeStructuredEvent(8, "COMMAND_REGISTRATION", `{"testId":"first-command","registered":true,"status":"REGISTERED"}`),
 		probeStructuredEvent(9, "COMMAND_EXECUTION_STARTED", `{"testId":"first-command","timeoutSeconds":10}`),
 		probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"first-command","timeoutSeconds":10}`),
-		probeStructuredEvent(11, "COMMAND_EXECUTION_COMPLETED", `{"testId":"first-command","status":"TIMED_OUT"}`),
-		probeStructuredEvent(12, "CLASSIFICATION", `{"code":"command_timeout","testId":"first-command"}`),
-		probeStructuredEvent(13, "COMMAND_TEST_COMPLETED", `{"testId":"first-command","passed":false}`),
-		probeStructuredEvent(14, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":2,"passed":false,"timedOut":true}`),
-		probeStructuredEvent(15, "CLEAN_SHUTDOWN_REQUESTED", `{}`),
-		probeStructuredEvent(16, "SERVER_STOPPED", `{"shutdownRequested":true}`),
+		probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","testId":"first-command"}`),
+		probeStructuredEvent(12, "COMMAND_OUTPUT", `{"testId":"first-command","stream":"stdout","lines":["timeout"],"capturedBytes":7,"observedBytes":7,"truncated":false}`),
+		probeStructuredEvent(13, "COMMAND_EXECUTION_COMPLETED", `{"testId":"first-command","status":"TIMED_OUT"}`),
+		probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"first-command","passed":false}`),
+		probeStructuredEvent(15, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":2,"passed":false,"timedOut":true}`),
+		probeStructuredEvent(16, "CLEAN_SHUTDOWN_REQUESTED", `{}`),
+		probeStructuredEvent(17, "SERVER_STOPPED", `{"shutdownRequested":true}`),
 	}
 	var eventBytes int64
 	for _, event := range events {

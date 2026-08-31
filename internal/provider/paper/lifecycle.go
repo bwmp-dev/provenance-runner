@@ -78,19 +78,20 @@ var commandClassificationCodes = map[string]struct{}{
 }
 
 type commandProbeState struct {
-	expectedAssertions map[string]struct{}
-	seenAssertions     map[string]struct{}
-	registrationSeen   bool
-	registered         bool
-	started            bool
-	outputSeen         bool
-	outputTruncated    bool
-	timeoutSeen        bool
-	assertionFailure   bool
-	executionCompleted bool
-	executionStatus    string
-	completionSeen     bool
-	failure            bool
+	expectedAssertions        map[string]struct{}
+	seenAssertions            map[string]struct{}
+	registrationSeen          bool
+	registered                bool
+	started                   bool
+	outputSeen                bool
+	outputTruncated           bool
+	timeoutSeen               bool
+	timeoutClassificationSeen bool
+	assertionFailure          bool
+	executionCompleted        bool
+	executionStatus           string
+	completionSeen            bool
+	failure                   bool
 }
 
 func newCommandProbeState(test consoleCommandTest) *commandProbeState {
@@ -157,6 +158,9 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 		if !s.started || s.executionCompleted || s.completionSeen {
 			return errors.New("output event is out of order or follows execution completion")
 		}
+		if s.timeoutSeen && !s.timeoutClassificationSeen {
+			return errors.New("timed-out output is missing its timeout classification")
+		}
 		truncated, err := requiredBoolean(data, "truncated")
 		if err != nil {
 			return err
@@ -207,8 +211,14 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 			if !s.timeoutSeen {
 				return errors.New("timed-out execution has no timeout event")
 			}
+			if !s.timeoutClassificationSeen || !s.outputSeen {
+				return errors.New("timed-out execution has an incomplete timeout trace")
+			}
 			s.failure = true
 		case "EXECUTION_FAILED", "DISPATCH_REJECTED":
+			if s.timeoutSeen {
+				return errors.New("execution failure contradicts timeout evidence")
+			}
 			s.failure = true
 		default:
 			return fmt.Errorf("unsupported execution status %q", status)
@@ -290,6 +300,10 @@ func (s *commandProbeState) acceptClassification(code string) error {
 		if !s.timeoutSeen {
 			return errors.New("timeout classification has no timeout event")
 		}
+		if s.timeoutClassificationSeen || s.outputSeen || s.executionCompleted {
+			return errors.New("timeout classification is out of order or duplicated")
+		}
+		s.timeoutClassificationSeen = true
 	case "command_output_truncated":
 		if !s.outputTruncated || !s.executionCompleted || s.executionStatus != "COMPLETED" {
 			return errors.New("output truncation classification has no completed truncated execution")
