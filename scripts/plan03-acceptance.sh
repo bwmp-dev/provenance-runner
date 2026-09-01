@@ -314,7 +314,12 @@ validate_result() {
       grep -Fq 'Enabling ProvenanceMemoryBomb' "$decompressed"
       ;;
     fork-pid-bomb)
-      jq -es '([.[].sandboxPIDsCurrent // 0] | max) >= 40 and ([.[].sandboxPIDsCurrent // 0] | max) <= 48' "$samples" >/dev/null
+      jq -es '
+        ([.[].sandboxPIDsCurrent // 0] | max) >= 40 and
+        ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
+        ([.[] | select((.pidsCurrent | tonumber) == (.pidsMax | tonumber))] | length) > 0 and
+        ([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0
+      ' "$samples" >/dev/null
       ;;
     disk-fill)
       grep -Fq 'No space left on device' "$decompressed"
