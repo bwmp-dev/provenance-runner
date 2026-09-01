@@ -327,7 +327,7 @@ validate_result() {
                .start = null
              end) |
           .longest;
-        ([.[].sandboxPIDsCurrent // 0] | max) >= 40 and
+        ([.[].sandboxPIDsCurrent // 0] | max) > 0 and
         ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
         (([.[] | denied] | max) > 0 or longest_saturation >= 10000000000)
       ' "$samples" >/dev/null

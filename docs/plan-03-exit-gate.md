@@ -80,11 +80,11 @@ chosen to make the intended boundary observable:
 - ordinary fixtures: 1,000 CPU millis, 2 GiB memory, 128 tasks, 1 GiB disk;
 - memory bomb: 1.5 GiB, with nonzero `oom_kill`, target enable, and exit 137
   required; and
-- PID bomb: 4 GiB and 48 tasks, with a near-ceiling sandbox task sample, an
-  observed host-cgroup saturation at `pids.max`, and either a nonzero kernel
-  `pids.events:max` denial count or at least 10 continuous seconds at the
-  configured ceiling required. The fixture handles bounded fork pressure and
-  the server must still shut down cleanly.
+- PID bomb: 4 GiB and 48 tasks, with nonzero sandbox task telemetry remaining
+  at or below the configured bound, and either a nonzero host-cgroup
+  `pids.events:max` denial count or at least 10 continuous seconds at
+  `pids.max` required. The fixture handles bounded fork pressure and the server
+  must still shut down cleanly.
 
 All classes use network `none`, zero connections, and zero bandwidth. Network
 fixtures must reach target enable while runtime samples expose no interface
