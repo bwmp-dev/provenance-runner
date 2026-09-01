@@ -64,11 +64,9 @@ jobs:
             sudo -u nobody test -x "${helper}"
           done < <(find "${install_dir}/gvisor-bin" -type f -print0)
           "${install_dir}/runsc" --version
-          debug_dir="${install_root}/debug"
-          sudo mkdir --parents "${debug_dir}"
-          sudo chmod 0777 "${debug_dir}"
           wrapper="${install_dir}/runsc-provenance-smoke"
-          printf '#!/bin/sh\nexec "%s/runsc" --debug --debug-log="%s/" --gofer-network-namespace=new "$@"\n' "${install_dir}" "${debug_dir}" | sudo tee "${wrapper}" > /dev/null
+          # Per-run gofer namespaces avoid a persistent shared null-netns mount in the ephemeral test state root.
+          printf '#!/bin/sh\nexec "%s/runsc" --gofer-network-namespace=new "$@"\n' "${install_dir}" | sudo tee "${wrapper}" > /dev/null
           sudo chmod 0755 "${wrapper}"
           echo "PROVENANCE_RUNSC_PATH=${wrapper}" >> "${GITHUB_ENV}"
       - name: Prepare pinned Alpine root filesystem
@@ -112,19 +110,6 @@ jobs:
             -test.run '^TestRunscSmoke$' \
             -test.count=1 \
             -test.timeout=60s
-      - name: Report gVisor debug log
-        if: failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${PROVENANCE_INSTALL_ROOT:-}" || ! -d "${PROVENANCE_INSTALL_ROOT}/debug" ]]; then
-            echo "gVisor debug directory was not created"
-            exit 0
-          fi
-          while IFS= read -r -d '' log; do
-            echo "===== ${log} ====="
-            sudo tail --lines=200 "${log}"
-          done < <(sudo find "${PROVENANCE_INSTALL_ROOT}/debug" -maxdepth 1 -type f -print0)
       - name: Remove delegated cgroup subtree
         if: always()
         shell: bash
