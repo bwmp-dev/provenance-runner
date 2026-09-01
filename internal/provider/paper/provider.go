@@ -52,6 +52,7 @@ type Config struct {
 	MaximumArtifactBytes    int64
 	MaximumDependencyBytes  int64
 	MaximumPreparationBytes int64
+	AllowHostileFixtures    bool
 	inputPolicy             sourcePolicy
 	pinPolicy               sourcePolicy
 	sourceResolver          addressResolver
@@ -551,8 +552,11 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 		"-Dprovenance.probe.testPlan=/workspace/provenance-test-plan.json",
 		"-Dprovenance.probe.stabilizationMillis=" + strconv.FormatInt(e.config.TestPlan.StabilizationMilliseconds, 10),
 		"-Dprovenance.probe.requestShutdown=true",
-		"-jar", "/workspace/paper.jar", "--nogui",
 	}
+	if e.provider.config.AllowHostileFixtures {
+		javaArguments = append(javaArguments, "-Dprovenance.fixture.hostile.enabled=true")
+	}
+	javaArguments = append(javaArguments, "-jar", "/workspace/paper.jar", "--nogui")
 	arguments := []string{
 		"-cu",
 		`cp -R /inputs/server/. /workspace/ || exit 125; chmod -R u+rwX /workspace || exit 125; "$@"; status=$?; if [ -f /workspace/provenance-probe-events.ndjson ]; then while IFS= read -r event || [ -n "$event" ]; do printf '%s%s\n' 'PROVENANCE_PROBE_EVENT_V1:' "$event"; done < /workspace/provenance-probe-events.ndjson; fi; if [ "$status" -eq 125 ]; then exit 126; fi; exit "$status"`,
@@ -643,7 +647,12 @@ func (p *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		output.EvidenceUsage.StructuredEventBytes += int64(len(event.Payload))
 	}
 	if lifecycleErr != nil {
-		return output, execution.NewClassifiedError(execution.ClassificationWorkloadFailure, "paper_lifecycle_failed", lifecycleErr)
+		code := "paper_lifecycle_failed"
+		var classified *probeLifecycleFailure
+		if errors.As(lifecycleErr, &classified) {
+			code = classified.code
+		}
+		return output, execution.NewClassifiedError(execution.ClassificationWorkloadFailure, code, lifecycleErr)
 	}
 	return output, nil
 }

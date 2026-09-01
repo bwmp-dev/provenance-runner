@@ -2,6 +2,8 @@ package paper
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -61,7 +63,7 @@ func TestProbeLifecycleRejectsMissingMalformedDuplicateAndOutOfOrderEvents(t *te
 func TestProbeLifecycleRejectsTerminalAssertionsAndFailureEvents(t *testing.T) {
 	for name, mutate := range map[string]func(*execution.CollectedOutput){
 		"failed requirement": func(output *execution.CollectedOutput) {
-			replaceProbeEvent(t, output, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
+			replaceProbeEvent(t, output, "TARGET_REQUIREMENT", `{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
 		},
 		"classification": func(output *execution.CollectedOutput) {
 			failure := probeStructuredEvent(5, "CLASSIFICATION", `{"code":"on_enable_failure"}`)
@@ -83,6 +85,188 @@ func TestProbeLifecycleRejectsTerminalAssertionsAndFailureEvents(t *testing.T) {
 			mutate(&output)
 			if _, err := validateProbeLifecycle(output, testPlan{TargetPlugin: "SuccessFixture", RequiredDependencies: []string{"DependencyFixture"}}); err == nil {
 				t.Fatal("validateProbeLifecycle() error = nil")
+			}
+		})
+	}
+}
+
+func TestProbeLifecyclePreservesValidatedBenignFailureClassifications(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		code   string
+		mutate func(*execution.CollectedOutput)
+	}{
+		{
+			name: "on load failure",
+			code: "on_load_failure",
+			mutate: func(output *execution.CollectedOutput) {
+				failure := []execution.StructuredEvent{
+					probeStructuredEvent(5, "LIFECYCLE_EXCEPTION", `{"phase":"LOAD","plugin":"SuccessFixture"}`),
+					probeStructuredEvent(6, "CLASSIFICATION", `{"code":"on_load_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
+				}
+				output.StructuredEvents = append(output.StructuredEvents[:4], append(failure, output.StructuredEvents[4:]...)...)
+			},
+		},
+		{
+			name: "on enable failure",
+			code: "on_enable_failure",
+			mutate: func(output *execution.CollectedOutput) {
+				failure := []execution.StructuredEvent{
+					probeStructuredEvent(5, "LIFECYCLE_EXCEPTION", `{"phase":"ENABLE","plugin":"SuccessFixture"}`),
+					probeStructuredEvent(6, "CLASSIFICATION", `{"code":"on_enable_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
+				}
+				output.StructuredEvents = append(output.StructuredEvents[:4], append(failure, output.StructuredEvents[4:]...)...)
+				replaceProbeEvent(t, output, "TARGET_REQUIREMENT", `{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
+				replaceProbeEvent(t, output, "SERVER_READY", `{"requirementsSatisfied":false}`)
+			},
+		},
+		{
+			name: "missing dependency",
+			code: "missing_required_dependency",
+			mutate: func(output *execution.CollectedOutput) {
+				for index, event := range output.StructuredEvents {
+					envelope, _ := decodeProbeEnvelope(event.Payload)
+					if envelope.Type == "TARGET_REQUIREMENT" && strings.Contains(string(envelope.Data), "DependencyFixture") {
+						output.StructuredEvents[index] = probeStructuredEvent(event.Sequence, "TARGET_REQUIREMENT", `{"role":"REQUIRED_DEPENDENCY","name":"DependencyFixture","configured":true,"loaded":false,"enabled":false}`)
+						classification := probeStructuredEvent(7, "CLASSIFICATION", `{"code":"missing_required_dependency","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_PREPARATION","retryable":false,"plugin":"DependencyFixture","role":"REQUIRED_DEPENDENCY"}`)
+						output.StructuredEvents = append(output.StructuredEvents[:index+1], append([]execution.StructuredEvent{classification}, output.StructuredEvents[index+1:]...)...)
+						break
+					}
+				}
+				replaceProbeEvent(t, output, "SERVER_READY", `{"requirementsSatisfied":false}`)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output := happyProbeOutput()
+			test.mutate(&output)
+			_, err := validateProbeLifecycle(output, testPlan{TargetPlugin: "SuccessFixture", RequiredDependencies: []string{"DependencyFixture"}})
+			var classified *probeLifecycleFailure
+			if !errors.As(err, &classified) || classified.code != test.code {
+				t.Fatalf("validateProbeLifecycle() error = %#v, want code %q", err, test.code)
+			}
+		})
+	}
+}
+
+func TestProbeLifecycleDoesNotTrustMalformedForgedOrConflictingClassification(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*execution.CollectedOutput)
+	}{
+		{
+			name: "forged category",
+			mutate: func(output *execution.CollectedOutput) {
+				failure := []execution.StructuredEvent{
+					probeStructuredEvent(5, "LIFECYCLE_EXCEPTION", `{"phase":"LOAD","plugin":"SuccessFixture"}`),
+					probeStructuredEvent(6, "CLASSIFICATION", `{"code":"on_load_failure","category":"FAILURE_CATEGORY_INFRASTRUCTURE","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
+				}
+				output.StructuredEvents = append(output.StructuredEvents[:4], append(failure, output.StructuredEvents[4:]...)...)
+			},
+		},
+		{
+			name: "forged without evidence",
+			mutate: func(output *execution.CollectedOutput) {
+				classification := probeStructuredEvent(5, "CLASSIFICATION", `{"code":"on_load_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`)
+				output.StructuredEvents = append(output.StructuredEvents[:4], append([]execution.StructuredEvent{classification}, output.StructuredEvents[4:]...)...)
+			},
+		},
+		{
+			name: "conflicting classifications",
+			mutate: func(output *execution.CollectedOutput) {
+				failure := []execution.StructuredEvent{
+					probeStructuredEvent(5, "LIFECYCLE_EXCEPTION", `{"phase":"LOAD","plugin":"SuccessFixture"}`),
+					probeStructuredEvent(6, "CLASSIFICATION", `{"code":"on_load_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
+					probeStructuredEvent(7, "LIFECYCLE_EXCEPTION", `{"phase":"ENABLE","plugin":"SuccessFixture"}`),
+					probeStructuredEvent(8, "CLASSIFICATION", `{"code":"on_enable_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
+				}
+				output.StructuredEvents = append(output.StructuredEvents[:4], append(failure, output.StructuredEvents[4:]...)...)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output := happyProbeOutput()
+			test.mutate(&output)
+			_, err := validateProbeLifecycle(output, testPlan{TargetPlugin: "SuccessFixture", RequiredDependencies: []string{"DependencyFixture"}})
+			if err == nil {
+				t.Fatal("validateProbeLifecycle() error = nil")
+			}
+			var classified *probeLifecycleFailure
+			if errors.As(err, &classified) {
+				t.Fatalf("untrusted classification escaped as %q: %v", classified.code, err)
+			}
+		})
+	}
+}
+
+func TestProbeLifecycleRejectsImpossibleAlphaRequirementStates(t *testing.T) {
+	for _, data := range []string{
+		`{"role":"TARGET","name":"SuccessFixture","configured":false,"loaded":false,"enabled":false}`,
+		`{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":false,"enabled":true}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			output := happyProbeOutput()
+			replaceProbeEvent(t, &output, "TARGET_REQUIREMENT", data)
+			_, err := validateProbeLifecycle(output, testPlan{TargetPlugin: "SuccessFixture", RequiredDependencies: []string{"DependencyFixture"}})
+			if err == nil {
+				t.Fatal("validateProbeLifecycle() error = nil")
+			}
+			var classified *probeLifecycleFailure
+			if errors.As(err, &classified) {
+				t.Fatalf("impossible requirement state escaped as %q: %v", classified.code, err)
+			}
+		})
+	}
+}
+
+func TestProbeLifecycleRejectsRequirementCodesThatConflictWithAlphaStatus(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		requirementName string
+		code            string
+		classification  string
+	}{
+		{
+			name:            "loaded target as not found",
+			requirementName: "SuccessFixture",
+			code:            "plugin_not_found",
+			classification:  `{"code":"plugin_not_found","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_PREPARATION","retryable":false,"plugin":"SuccessFixture","role":"TARGET"}`,
+		},
+		{
+			name:            "loaded dependency as missing",
+			requirementName: "DependencyFixture",
+			code:            "missing_required_dependency",
+			classification:  `{"code":"missing_required_dependency","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_PREPARATION","retryable":false,"plugin":"DependencyFixture","role":"REQUIRED_DEPENDENCY"}`,
+		},
+		{
+			name:            "enabled dependency as failed",
+			requirementName: "DependencyFixture",
+			code:            "failed_required_dependency",
+			classification:  `{"code":"failed_required_dependency","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"DependencyFixture","role":"REQUIRED_DEPENDENCY"}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output := happyProbeOutput()
+			inserted := false
+			for index, event := range output.StructuredEvents {
+				envelope, _ := decodeProbeEnvelope(event.Payload)
+				if envelope.Type == "TARGET_REQUIREMENT" && strings.Contains(string(envelope.Data), test.requirementName) {
+					classification := probeStructuredEvent(event.Sequence+1, "CLASSIFICATION", test.classification)
+					output.StructuredEvents = append(output.StructuredEvents[:index+1], append([]execution.StructuredEvent{classification}, output.StructuredEvents[index+1:]...)...)
+					inserted = true
+					break
+				}
+			}
+			if !inserted {
+				t.Fatalf("requirement %q not found", test.requirementName)
+			}
+			_, err := validateProbeLifecycle(output, testPlan{TargetPlugin: "SuccessFixture", RequiredDependencies: []string{"DependencyFixture"}})
+			if err == nil || !strings.Contains(err.Error(), "classification "+test.code+" conflicts with requirement status") {
+				t.Fatalf("validateProbeLifecycle() error = %v", err)
+			}
+			var classified *probeLifecycleFailure
+			if errors.As(err, &classified) {
+				t.Fatalf("forged requirement classification escaped as %q: %v", classified.code, err)
 			}
 		})
 	}
@@ -112,7 +296,7 @@ func TestProbeLifecycleAcceptsPinnedProbeOutputTruncationSequence(t *testing.T) 
 	output.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_ASSERTION", `{"testId":"version-command","assertionId":"version-command:1","evaluated":false,"passed":false}`)
 	output.StructuredEvents = append(output.StructuredEvents[:12], append([]execution.StructuredEvent{
 		probeStructuredEvent(13, "COMMAND_ASSERTION", `{"testId":"version-command","assertionId":"version-command:2","evaluated":false,"passed":false}`),
-		probeStructuredEvent(14, "CLASSIFICATION", `{"code":"command_output_truncated","testId":"version-command"}`),
+		probeStructuredEvent(14, "CLASSIFICATION", `{"code":"command_output_truncated","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_EXECUTION","retryable":false,"testId":"version-command"}`),
 	}, output.StructuredEvents[12:]...)...)
 	output.StructuredEvents[14] = probeStructuredEvent(15, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
 	output.StructuredEvents[15] = probeStructuredEvent(16, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
@@ -198,7 +382,7 @@ func TestProbeLifecycleCorrelatesTestPlanTimeout(t *testing.T) {
 
 	commandTimeout := commandProbeOutput(true)
 	commandTimeout.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"version-command","timeoutSeconds":10}`)
-	commandTimeout.StructuredEvents[10] = probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","testId":"version-command"}`)
+	commandTimeout.StructuredEvents[10] = probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_EXECUTION","retryable":false,"testId":"version-command"}`)
 	commandTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
 	commandTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
 	commandTimeout.StructuredEvents[13] = probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
@@ -209,7 +393,7 @@ func TestProbeLifecycleCorrelatesTestPlanTimeout(t *testing.T) {
 
 	consistentTimeout := commandProbeOutput(true)
 	consistentTimeout.StructuredEvents[9] = probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"version-command","timeoutSeconds":10}`)
-	consistentTimeout.StructuredEvents[10] = probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","testId":"version-command"}`)
+	consistentTimeout.StructuredEvents[10] = probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_EXECUTION","retryable":false,"testId":"version-command"}`)
 	consistentTimeout.StructuredEvents[11] = probeStructuredEvent(12, "COMMAND_OUTPUT", `{"testId":"version-command","stream":"stdout","lines":["ok"],"capturedBytes":2,"observedBytes":2,"truncated":false}`)
 	consistentTimeout.StructuredEvents[12] = probeStructuredEvent(13, "COMMAND_EXECUTION_COMPLETED", `{"testId":"version-command","status":"TIMED_OUT"}`)
 	consistentTimeout.StructuredEvents[13] = probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
@@ -427,6 +611,16 @@ func TestCommandProbeStateRejectsSuccessAfterNegativeEvidence(t *testing.T) {
 			},
 		},
 		{
+			name:           "registration lookup failure",
+			classification: "command_registration_failure",
+			events: []struct {
+				kind string
+				data string
+			}{
+				{kind: "COMMAND_REGISTRATION", data: `{"registered":false,"status":"LOOKUP_FAILED"}`},
+			},
+		},
+		{
 			name:           "timeout",
 			classification: "command_timeout",
 			events: []struct {
@@ -497,6 +691,27 @@ func TestCommandProbeStateRejectsSuccessAfterNegativeEvidence(t *testing.T) {
 	}
 }
 
+func TestCommandProbeStateRejectsSwappedRegistrationClassifications(t *testing.T) {
+	for _, test := range []struct {
+		status string
+		code   string
+	}{
+		{status: "NOT_REGISTERED", code: "command_registration_failure"},
+		{status: "LOOKUP_FAILED", code: "command_not_registered"},
+	} {
+		t.Run(test.status+"_as_"+test.code, func(t *testing.T) {
+			state := newCommandProbeState(consoleCommandTest{ID: "version-command"})
+			data := json.RawMessage(fmt.Sprintf(`{"registered":false,"status":%q}`, test.status))
+			if err := state.accept("COMMAND_REGISTRATION", data); err != nil {
+				t.Fatalf("accept(COMMAND_REGISTRATION) error = %v", err)
+			}
+			if err := state.acceptClassification(test.code); err == nil || !strings.Contains(err.Error(), "contradicts registration status") {
+				t.Fatalf("acceptClassification(%s) error = %v", test.code, err)
+			}
+		})
+	}
+}
+
 func commandProbeOutput(passed bool) execution.CollectedOutput {
 	assertion := `{"testId":"version-command","assertionId":"version-command:1","evaluated":true,"passed":true}`
 	completion := `{"testId":"version-command","passed":true}`
@@ -506,7 +721,7 @@ func commandProbeOutput(passed bool) execution.CollectedOutput {
 		probeStructuredEvent(2, "PROBE_LOADED", `{}`),
 		probeStructuredEvent(3, "SERVER_LOADED", `{}`),
 		probeStructuredEvent(4, "STABILIZATION_STARTED", `{}`),
-		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
 		probeStructuredEvent(6, "STABILIZATION_COMPLETED", `{}`),
 		probeStructuredEvent(7, "SERVER_READY", `{"requirementsSatisfied":true}`),
 		probeStructuredEvent(8, "COMMAND_REGISTRATION", `{"testId":"version-command","registered":true,"status":"REGISTERED"}`),
@@ -521,7 +736,7 @@ func commandProbeOutput(passed bool) execution.CollectedOutput {
 	}
 	if !passed {
 		events[11] = probeStructuredEvent(12, "COMMAND_ASSERTION", `{"testId":"version-command","assertionId":"version-command:1","evaluated":true,"passed":false}`)
-		classification := probeStructuredEvent(13, "CLASSIFICATION", `{"code":"command_assertion_failure"}`)
+		classification := probeStructuredEvent(13, "CLASSIFICATION", `{"code":"command_assertion_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_EXECUTION","retryable":false,"testId":"version-command"}`)
 		events = append(events[:12], append([]execution.StructuredEvent{classification}, events[12:]...)...)
 		events[13] = probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"version-command","passed":false}`)
 		events[14] = probeStructuredEvent(15, "TEST_PLAN", `{"status":"COMPLETED","consoleTests":1,"passed":false,"timedOut":false}`)
@@ -539,13 +754,13 @@ func pinnedMultiCommandTimeoutOutput() execution.CollectedOutput {
 		probeStructuredEvent(2, "PROBE_LOADED", `{}`),
 		probeStructuredEvent(3, "SERVER_LOADED", `{}`),
 		probeStructuredEvent(4, "STABILIZATION_STARTED", `{}`),
-		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
 		probeStructuredEvent(6, "STABILIZATION_COMPLETED", `{}`),
 		probeStructuredEvent(7, "SERVER_READY", `{"requirementsSatisfied":true}`),
 		probeStructuredEvent(8, "COMMAND_REGISTRATION", `{"testId":"first-command","registered":true,"status":"REGISTERED"}`),
 		probeStructuredEvent(9, "COMMAND_EXECUTION_STARTED", `{"testId":"first-command","timeoutSeconds":10}`),
 		probeStructuredEvent(10, "COMMAND_TIMEOUT", `{"testId":"first-command","timeoutSeconds":10}`),
-		probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","testId":"first-command"}`),
+		probeStructuredEvent(11, "CLASSIFICATION", `{"code":"command_timeout","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_EXECUTION","retryable":false,"testId":"first-command"}`),
 		probeStructuredEvent(12, "COMMAND_OUTPUT", `{"testId":"first-command","stream":"stdout","lines":["timeout"],"capturedBytes":7,"observedBytes":7,"truncated":false}`),
 		probeStructuredEvent(13, "COMMAND_EXECUTION_COMPLETED", `{"testId":"first-command","status":"TIMED_OUT"}`),
 		probeStructuredEvent(14, "COMMAND_TEST_COMPLETED", `{"testId":"first-command","passed":false}`),

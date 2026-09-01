@@ -23,6 +23,11 @@ type environmentLookup func(string) string
 
 const maximumConfiguredStorageBytes = int64(64 << 30)
 const gvisorReconciliationTimeout = 15 * time.Second
+const localHostileFixturesEnvironment = "PROVENANCE_LOCAL_EXECUTE_ALLOW_HOSTILE_FIXTURES"
+
+type paperProviderOptions struct {
+	allowHostileFixtures bool
+}
 
 type providerRegistry struct {
 	*execution.Registry
@@ -37,10 +42,22 @@ func (r *providerRegistry) Close() error {
 }
 
 func registryForProvider(ctx context.Context, providerName string, lookup environmentLookup) (*providerRegistry, error) {
+	return registryForProviderWithOptions(ctx, providerName, lookup, paperProviderOptions{})
+}
+
+func registryForLocalExecution(ctx context.Context, providerName string, lookup environmentLookup) (*providerRegistry, error) {
+	allowHostileFixtures, err := localHostileFixturesOptIn(lookup)
+	if err != nil {
+		return nil, err
+	}
+	return registryForProviderWithOptions(ctx, providerName, lookup, paperProviderOptions{allowHostileFixtures: allowHostileFixtures})
+}
+
+func registryForProviderWithOptions(ctx context.Context, providerName string, lookup environmentLookup, options paperProviderOptions) (*providerRegistry, error) {
 	providers := []execution.EnvironmentProvider{processprovider.New()}
 	var instanceLocks *instancelock.Set
 	if providerName == paper.ProviderName {
-		provider, locks, err := paperProviderFromEnvironment(ctx, lookup)
+		provider, locks, err := paperProviderFromEnvironment(ctx, lookup, options)
 		if err != nil {
 			return nil, err
 		}
@@ -54,7 +71,7 @@ func registryForProvider(ctx context.Context, providerName string, lookup enviro
 	return &providerRegistry{Registry: registry, instanceLocks: instanceLocks}, nil
 }
 
-func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup) (*paper.Provider, *instancelock.Set, error) {
+func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup, options paperProviderOptions) (*paper.Provider, *instancelock.Set, error) {
 	catalog, err := operatorCatalog(lookup)
 	if err != nil {
 		return nil, nil, err
@@ -176,11 +193,23 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup)
 		MaximumArtifactBytes:    maximumArtifactBytes,
 		MaximumDependencyBytes:  maximumDependencyBytes,
 		MaximumPreparationBytes: maximumPreparationBytes,
+		AllowHostileFixtures:    options.allowHostileFixtures,
 	})
 	if err != nil {
 		return fail(err)
 	}
 	return provider, instanceLocks, nil
+}
+
+func localHostileFixturesOptIn(lookup environmentLookup) (bool, error) {
+	switch lookup(localHostileFixturesEnvironment) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be exactly true or false when set", localHostileFixturesEnvironment)
+	}
 }
 
 func operatorCatalog(lookup environmentLookup) (paper.Catalog, error) {
