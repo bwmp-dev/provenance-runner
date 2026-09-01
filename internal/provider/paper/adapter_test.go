@@ -64,6 +64,25 @@ func TestAdaptJobMaterializesRemoteConsolePlan(t *testing.T) {
 	}
 }
 
+func TestAdaptJobAcceptsMatchingHyphenatedTargetPluginName(t *testing.T) {
+	provider, server, payloads := validationTestProvider(t)
+	specification := validRemoteSpecification(t, server.URL, payloads)
+	specification.TargetPluginName = "Success-Fixture"
+	setNormalizedProjectName(t, specification, "Success-Fixture")
+
+	job, err := provider.AdaptJob(specification)
+	if err != nil {
+		t.Fatalf("AdaptJob() error = %v", err)
+	}
+	var config configuration
+	if err := json.Unmarshal(job.Environment, &config); err != nil {
+		t.Fatalf("decode adapted environment: %v", err)
+	}
+	if config.TestPlan.TargetPlugin != "Success-Fixture" {
+		t.Fatalf("test plan target plugin = %q, want %q", config.TestPlan.TargetPlugin, "Success-Fixture")
+	}
+}
+
 func TestAdaptJobRejectsMissingSizesAndConfiguredQuotaOverruns(t *testing.T) {
 	provider, server, payloads := validationTestProvider(t)
 
@@ -169,9 +188,21 @@ func TestAdaptJobRejectsDigestAndPolicyMismatches(t *testing.T) {
 			},
 			want: "target_plugin_name is missing or invalid",
 		},
+		"target plugin differs by case from project name": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.TargetPluginName = "successFixture"
+			},
+			want: "target_plugin_name must exactly match normalized_configuration_json project.name",
+		},
 		"target plugin starts with dot": {
 			mutate: func(specification *runnerv1.JobSpecification) {
 				specification.TargetPluginName = ".plugin"
+			},
+			want: "target_plugin_name is missing or invalid",
+		},
+		"target plugin contains space": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.TargetPluginName = "Success Fixture"
 			},
 			want: "target_plugin_name is missing or invalid",
 		},
@@ -258,6 +289,25 @@ func validRemoteSpecification(t *testing.T, baseURL string, payloads map[string]
 		Dependencies:                []*runnerv1.DependencyInput{{DependencyId: "dependencyfixture", PluginName: "DependencyFixture", Object: &runnerv1.ObjectDownload{Uri: baseURL + "/dependency", Digest: dependencyDigest, Filename: "dependency.jar", SizeBytes: int64(len(payloads["/dependency"]))}}},
 		NormalizedConfigurationJson: normalized,
 	}
+}
+
+func setNormalizedProjectName(t *testing.T, specification *runnerv1.JobSpecification, name string) {
+	t.Helper()
+	var normalized map[string]any
+	if err := json.Unmarshal(specification.NormalizedConfigurationJson, &normalized); err != nil {
+		t.Fatal(err)
+	}
+	project, ok := normalized["project"].(map[string]any)
+	if !ok {
+		t.Fatal("normalized configuration project is not an object")
+	}
+	project["name"] = name
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specification.NormalizedConfigurationJson = encoded
+	specification.Hashes.Configuration = protoDigest(encoded)
 }
 
 func protoDigest(payload []byte) *runnerv1.Digest {

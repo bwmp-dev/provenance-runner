@@ -70,7 +70,8 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if specification.GetLease() == nil || specification.GetLease().GetJobId() == "" {
 		return localjob.Job{}, errors.New("adapt Paper job: lease.job_id is required")
 	}
-	if !pluginname.ValidPaper(specification.GetTargetPluginName()) {
+	targetPluginName := specification.GetTargetPluginName()
+	if !pluginname.ValidPaper(targetPluginName) {
 		return localjob.Job{}, errors.New("adapt Paper job: target_plugin_name is missing or invalid")
 	}
 	if err := p.validateRemoteEnvironment(specification.GetEnvironment()); err != nil {
@@ -112,6 +113,9 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
+	if normalized.Project.Name != targetPluginName {
+		return localjob.Job{}, errors.New("adapt Paper job: target_plugin_name must exactly match normalized_configuration_json project.name")
+	}
 	if err := validateConfigurationDigest(specification.GetHashes(), specification.GetNormalizedConfigurationJson()); err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
@@ -146,7 +150,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	dependencies := make([]dependencyReference, 0, len(specification.GetDependencies()))
 	requiredDependencies := make([]string, 0, len(specification.GetDependencies()))
 	seenDependencies := make(map[string]struct{}, len(specification.GetDependencies()))
-	seenPluginNames := map[string]struct{}{strings.ToLower(specification.GetTargetPluginName()): {}}
+	seenPluginNames := map[string]struct{}{strings.ToLower(targetPluginName): {}}
 	for index, input := range specification.GetDependencies() {
 		if input == nil || input.GetDependencyId() == "" {
 			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependencies[%d].dependency_id is required", index)
@@ -200,7 +204,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 		Target:        target,
 		Dependencies:  dependencies,
 		TestPlan: testPlan{
-			TargetPlugin:              specification.GetTargetPluginName(),
+			TargetPlugin:              targetPluginName,
 			RequiredDependencies:      requiredDependencies,
 			StabilizationMilliseconds: normalized.Tests.Startup.StabilizationSeconds * 1_000,
 			Console:                   console,
