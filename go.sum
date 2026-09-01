@@ -1,5 +1,5 @@
-github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260831071522-4b17a19eba17 h1:GJz0nEP9mBOdLYXXY1r3svaBRWo/lxQlOlHjeh7/W/4=
-github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260831071522-4b17a19eba17/go.mod h1:ncBaRs1cR/FK81JWPWTHRyhU8nAlPlHi0+N54mdkJFc=
+github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260831234649-98d5f07f173a h1:cr81w/wd/X+cdXsA4ypsVEVIrksLS/4/6hp7K+R6f9g=
+github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260831234649-98d5f07f173a/go.mod h1:ncBaRs1cR/FK81JWPWTHRyhU8nAlPlHi0+N54mdkJFc=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=

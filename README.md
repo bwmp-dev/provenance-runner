@@ -8,7 +8,13 @@ The current alpha accepts one bounded local job document and emits one structure
 go run ./cmd/provenance-runner execute job.json
 ```
 
-The gateway client is not wired yet. The local job's `provider` selects one of two implementations:
+Hosted connect mode consumes a strict config and maintains a private atomic one-job journal beside it:
+
+```sh
+go run ./cmd/provenance-runner connect connect.json
+```
+
+It advertises the alpha.3 durable-acknowledgement feature, replays unacknowledged events and heartbeats across reconnects or restarts, and does not enter the sandbox until the gateway commits `JobStarted`. The local job's `provider` selects one of two implementations:
 
 - `development-process` executes directly on the host after the job explicitly sets `"acknowledgeUnsandboxed": true`. It exists only for runner-core development and is not a security boundary.
 - `paper` prepares a pinned Paper environment and delegates execution to gVisor. It is Linux-only and fails initialization unless the trusted host supplies all required operator configuration.
@@ -55,7 +61,7 @@ The `paper` environment uses the pinned environment ID `paper-1.21.8-60-linux-am
 
 The job cannot provide or replace the trusted probe, Paper, Java, prepared runtime, host paths, gVisor configuration, or download allowlist. Runtime network access is `none`.
 
-The Paper provider's `AdaptJob` boundary consumes the released runner `JobSpecification`. Every target and dependency `ObjectDownload` must declare a positive `size_bytes`, match its job hash, and fit the provider's configured per-artifact, dependency, and preparation quotas. Those exact sizes flow into the content-addressed cache, which rejects short and oversized responses before workspace creation. The adapter materializes `tests.console` into the trusted probe plan and accepts only the reviewed lifecycle and command event/classification inventory. Remote preparation, execution, and graceful-shutdown timeouts remain distinct: preparation starts before resolution/preparation, execution starts when the prepared workload begins, and graceful shutdown bounds cleanup. The gateway transport is not wired yet.
+The Paper provider's `AdaptJob` boundary consumes the released runner `JobSpecification`, including the inspected target and dependency plugin names. Every target and dependency `ObjectDownload` must declare a positive `size_bytes`, match its job hash, and fit the provider's configured per-artifact, dependency, and preparation quotas. Those exact sizes flow into the content-addressed cache, which rejects short and oversized responses before workspace creation. The adapter materializes `tests.console` into the trusted probe plan and accepts only the reviewed lifecycle and command event/classification inventory. Remote preparation, execution, and graceful-shutdown timeouts remain distinct: preparation starts after `LeaseAccepted` and `JobPreparing` commit, execution starts only after `JobStarted` commits, and graceful shutdown bounds cleanup.
 
 ## Current evidence limits
 

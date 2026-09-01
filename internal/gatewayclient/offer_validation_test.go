@@ -3,7 +3,6 @@ package gatewayclient
 import (
 	"crypto/sha256"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestValidateOfferAcceptsBoundedPaperOfferWithoutEnablingHandling(t *testing.T) {
+func TestValidateOfferAcceptsBoundedPaperOfferWithoutMutation(t *testing.T) {
 	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
 	client := newClient(validOfferConfig(), nil)
 	offer := validLeaseOffer(now)
@@ -24,10 +23,6 @@ func TestValidateOfferAcceptsBoundedPaperOfferWithoutEnablingHandling(t *testing
 	}
 	if !proto.Equal(offer, original) {
 		t.Fatal("validateOffer() mutated the offer")
-	}
-	message := gatewayMessage(now, &runnerv1.GatewayMessage_Offer{Offer: offer})
-	if _, err := client.handleGatewayMessage(message, now); err == nil || !strings.Contains(err.Error(), "lease offers are not supported") {
-		t.Fatalf("handleGatewayMessage() error = %v", err)
 	}
 }
 
@@ -63,6 +58,10 @@ func TestValidateOfferReturnsStableBoundedRejections(t *testing.T) {
 			value.Job.Environment.OperatingSystem = runnerv1.OperatingSystem_OPERATING_SYSTEM_WINDOWS
 		}, code: "unsupported_environment", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "missing catalog pin", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Environment.CatalogSnapshotId = "" }, code: "invalid_environment", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "missing target plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.TargetPluginName = "" }, code: "invalid_target_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "reserved target plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.TargetPluginName = "Paper" }, code: "invalid_target_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "missing dependency plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Dependencies[0].PluginName = "" }, code: "invalid_dependency_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "duplicate dependency plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Dependencies[0].PluginName = value.Job.TargetPluginName }, code: "duplicate_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "unsupported network", mutate: func(value *runnerv1.LeaseOffer) {
 			value.Job.EffectivePolicy.Network.Mode = runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST
 		}, code: "unsupported_network", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_POLICY},
@@ -139,6 +138,7 @@ func TestValidateOfferBoundsMessageAndDependenciesBeforeAllocation(t *testing.T)
 		boundary.Job.Hashes.Dependencies = append(boundary.Job.Hashes.Dependencies, &runnerv1.DependencyDigest{DependencyId: id, Filename: filename, Digest: digest})
 		boundary.Job.Dependencies = append(boundary.Job.Dependencies, &runnerv1.DependencyInput{
 			DependencyId: id,
+			PluginName:   fmt.Sprintf("Dependency%03d", index),
 			Object: &runnerv1.ObjectDownload{
 				Uri:       "https://objects.example/" + filename,
 				Digest:    digest,
@@ -188,6 +188,7 @@ func validLeaseOffer(now time.Time) *runnerv1.LeaseOffer {
 	return &runnerv1.LeaseOffer{
 		OfferExpiresAt: timestamppb.New(now.Add(time.Minute)),
 		Job: &runnerv1.JobSpecification{
+			TargetPluginName: "TargetPlugin",
 			Lease: &runnerv1.LeaseIdentity{
 				LeaseId:     "10000000-0000-0000-0000-000000000001",
 				JobId:       "20000000-0000-0000-0000-000000000001",
@@ -243,6 +244,7 @@ func validLeaseOffer(now time.Time) *runnerv1.LeaseOffer {
 			},
 			Dependencies: []*runnerv1.DependencyInput{{
 				DependencyId: "dependency-1",
+				PluginName:   "DependencyPlugin",
 				Object: &runnerv1.ObjectDownload{
 					Uri:       "https://objects.example/dependency.jar",
 					Digest:    dependencyDigest,

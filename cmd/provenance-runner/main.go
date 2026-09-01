@@ -79,7 +79,22 @@ func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "connect runner: %v\n", err)
 		return 1
 	}
-	client, err := gatewayclient.Dial(config)
+	registry, err := registryForProvider(ctx, "paper", os.Getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "connect runner: initialize Paper provider: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := registry.Close(); err != nil {
+			fmt.Fprintf(stderr, "release runner instance: %v\n", err)
+		}
+	}()
+	worker, err := newConnectedWorker(registry)
+	if err != nil {
+		fmt.Fprintf(stderr, "connect runner: %v\n", err)
+		return 1
+	}
+	client, err := gatewayclient.DialWithWorker(config, worker)
 	if err != nil {
 		fmt.Fprintf(stderr, "connect runner: %v\n", err)
 		return 1

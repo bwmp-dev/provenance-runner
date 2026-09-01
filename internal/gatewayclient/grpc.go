@@ -22,6 +22,10 @@ func (c *generatedConnector) connect(ctx context.Context) (gatewayStream, error)
 }
 
 func Dial(config Config) (*Client, error) {
+	return DialWithWorker(config, nil)
+}
+
+func DialWithWorker(config Config, worker RemoteWorker) (*Client, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
@@ -34,7 +38,7 @@ func Dial(config Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client, err := New(config, runnerv1.NewRunnerGatewayClient(connection))
+	client, err := NewWithWorker(config, runnerv1.NewRunnerGatewayClient(connection), worker)
 	if err != nil {
 		connection.Close()
 		return nil, err

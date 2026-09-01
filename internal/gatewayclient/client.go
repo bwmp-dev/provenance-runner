@@ -12,9 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -28,7 +30,6 @@ const (
 	maximumClockSkew          = 10 * time.Minute
 	maximumHandshakeDuration  = 30 * time.Second
 	maximumReasonBytes        = 1024
-	maximumGatewayMessages    = 64
 	initialReconnectDelay     = 250 * time.Millisecond
 	maximumReconnectDelay     = 30 * time.Second
 )
@@ -45,6 +46,10 @@ type streamConnector interface {
 	connect(context.Context) (gatewayStream, error)
 }
 
+type RemoteWorker interface {
+	Execute(context.Context, *runnerv1.JobSpecification, func(context.Context, execution.ExecutionStart) error) execution.Result
+}
+
 type permanentError struct {
 	err error
 }
@@ -59,18 +64,34 @@ func permanent(format string, arguments ...any) error {
 type Client struct {
 	config    Config
 	connector streamConnector
+	worker    RemoteWorker
+	journal   *journal
 	close     func() error
 
 	now              func() time.Time
 	wait             func(context.Context, time.Duration) error
 	handshakeTimeout time.Duration
 
-	draining          atomic.Bool
-	messageSequence   atomic.Uint64
-	heartbeatSequence atomic.Uint64
+	draining atomic.Bool
+
+	workerMu      sync.Mutex
+	workerRunning bool
+	workerCancel  context.CancelFunc
+	startResponse chan error
+	workerEvents  chan workerEvent
+	recovering    bool
+}
+
+type workerEvent struct {
+	start  chan error
+	result *execution.Result
 }
 
 func New(config Config, rpc runnerv1.RunnerGatewayClient) (*Client, error) {
+	return NewWithWorker(config, rpc, nil)
+}
+
+func NewWithWorker(config Config, rpc runnerv1.RunnerGatewayClient, worker RemoteWorker) (*Client, error) {
 	if rpc == nil {
 		return nil, errors.New("runner gateway client is required")
 	}
@@ -79,17 +100,34 @@ func New(config Config, rpc runnerv1.RunnerGatewayClient) (*Client, error) {
 		return nil, err
 	}
 	config.credential = bytes.Clone(config.credential)
-	return newClient(config, &generatedConnector{client: rpc}), nil
+	return newClientWithWorker(config, &generatedConnector{client: rpc}, worker)
 }
 
 func newClient(config Config, connector streamConnector) *Client {
-	return &Client{
+	client, err := newClientWithWorker(config, connector, nil)
+	if err != nil {
+		panic(err)
+	}
+	return client
+}
+
+func newClientWithWorker(config Config, connector streamConnector, worker RemoteWorker) (*Client, error) {
+	journal, err := openJournal(config.journalFile)
+	if err != nil {
+		return nil, err
+	}
+	client := &Client{
 		config:           config,
 		connector:        connector,
+		worker:           worker,
+		journal:          journal,
 		now:              time.Now,
 		wait:             waitContext,
 		handshakeTimeout: maximumHandshakeDuration,
+		workerEvents:     make(chan workerEvent, 2),
 	}
+	client.recovering = journal.snapshot().Active != nil
+	return client, nil
 }
 
 func (c *Client) Close() error {
@@ -109,6 +147,7 @@ func (c *Client) Run(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
+	defer c.stopWorker(context.Canceled)
 	delay := initialReconnectDelay
 	for {
 		established, err := c.runSession(ctx)
@@ -149,7 +188,29 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		}
 	}()
 
-	if err := stream.Send(c.authenticateMessage()); err != nil {
+	sendRequests := make(chan streamSend)
+	sendErrors := make(chan error, 1)
+	go runStreamWriter(sessionContext, stream, sendRequests, sendErrors)
+	send := func(message *runnerv1.RunnerMessage) error {
+		response := make(chan error, 1)
+		select {
+		case sendRequests <- streamSend{message: message, response: response}:
+		case <-sessionContext.Done():
+			return sessionContext.Err()
+		}
+		select {
+		case err := <-response:
+			return err
+		case <-sessionContext.Done():
+			return sessionContext.Err()
+		}
+	}
+
+	authenticate, err := c.authenticateMessage()
+	if err != nil {
+		return false, err
+	}
+	if err := send(authenticate); err != nil {
 		return false, err
 	}
 	type received struct {
@@ -198,21 +259,42 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		return false, err
 	}
 	established = true
-	if err := stream.Send(c.capabilitiesMessage()); err != nil {
-		return true, err
-	}
-	heartbeat, err := c.heartbeatMessage(now, nil)
+	capabilities, err := c.capabilitiesMessage()
 	if err != nil {
 		return true, err
 	}
-	if err := stream.Send(heartbeat); err != nil {
+	if err := send(capabilities); err != nil {
 		return true, err
 	}
-	seenGatewayMessages := map[string]struct{}{first.GetMessageId(): {}}
+	session := &clientSession{
+		client:        c,
+		authenticated: authenticated,
+		send:          send,
+		seen:          make(map[string][sha256.Size]byte),
+		rootContext:   ctx,
+	}
+	if err := session.rememberGatewayMessage(first); err != nil {
+		return true, err
+	}
+	if pending := c.journal.snapshot().PendingMessage; len(pending) != 0 {
+		message := new(runnerv1.RunnerMessage)
+		if err := proto.Unmarshal(pending, message); err != nil {
+			return true, permanent("decode pending runner message: %v", err)
+		}
+		if err := send(message); err != nil {
+			return true, err
+		}
+	}
+	if err := session.sendHeartbeat(now); err != nil {
+		return true, err
+	}
 
 	heartbeatInterval := authenticated.HeartbeatInterval.AsDuration()
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
+	maintenanceInterval := 100 * time.Millisecond
+	maintenance := time.NewTicker(maintenanceInterval)
+	defer maintenance.Stop()
 	expirationDelay := authenticated.CredentialExpiresAt.AsTime().Sub(now)
 	expiration := time.NewTimer(expirationDelay)
 	defer expiration.Stop()
@@ -224,35 +306,38 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		case <-expiration.C:
 			return true, permanent("connection credential expired")
 		case tick := <-ticker.C:
-			heartbeat, err := c.heartbeatMessage(tick.UTC(), nil)
-			if err != nil {
+			if err := session.sendHeartbeat(tick.UTC()); err != nil {
 				return true, err
 			}
-			if err := stream.Send(heartbeat); err != nil {
+			if err := session.advance(tick.UTC()); err != nil {
 				return true, err
 			}
+		case <-maintenance.C:
+			if err := session.advance(c.now().UTC()); err != nil {
+				return true, err
+			}
+		case worker := <-c.workerEvents:
+			if err := session.handleWorkerEvent(worker); err != nil {
+				return true, err
+			}
+		case err := <-sendErrors:
+			return true, err
 		case received := <-receivedMessages:
 			if received.err != nil {
 				return true, received.err
 			}
-			messageID := received.message.GetMessageId()
-			if _, duplicate := seenGatewayMessages[messageID]; duplicate {
-				return true, permanent("gateway messageId was reused")
-			}
-			if len(seenGatewayMessages) >= maximumGatewayMessages {
-				return true, permanent("gateway sent more than %d control messages in one connection", maximumGatewayMessages)
-			}
-			seenGatewayMessages[messageID] = struct{}{}
-			sendHeartbeat, err := c.handleGatewayMessage(received.message, c.now().UTC())
+			duplicate, err := session.gatewayMessageDuplicate(received.message)
 			if err != nil {
 				return true, err
 			}
-			if sendHeartbeat {
-				heartbeat, err := c.heartbeatMessage(c.now().UTC(), nil)
-				if err != nil {
-					return true, err
-				}
-				if err := stream.Send(heartbeat); err != nil {
+			if duplicate {
+				continue
+			}
+			if err := session.handleGatewayMessage(received.message, c.now().UTC()); err != nil {
+				return true, err
+			}
+			if session.heartbeatDeferred && len(c.journal.snapshot().PendingMessage) == 0 {
+				if err := session.sendHeartbeat(c.now().UTC()); err != nil {
 					return true, err
 				}
 			}
@@ -260,46 +345,83 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	}
 }
 
-func (c *Client) authenticateMessage() *runnerv1.RunnerMessage {
-	message := c.runnerMessage()
+type streamSend struct {
+	message  *runnerv1.RunnerMessage
+	response chan error
+}
+
+func runStreamWriter(ctx context.Context, stream gatewayStream, requests <-chan streamSend, failures chan<- error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case request := <-requests:
+			err := stream.Send(request.message)
+			request.response <- err
+			if err != nil {
+				select {
+				case failures <- err:
+				default:
+				}
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) authenticateMessage() (*runnerv1.RunnerMessage, error) {
+	message, err := c.runnerMessage()
+	if err != nil {
+		return nil, err
+	}
 	message.Payload = &runnerv1.RunnerMessage_Authenticate{Authenticate: &runnerv1.Authenticate{
 		RunnerId:             c.config.RunnerID,
 		InstanceId:           c.config.InstanceID,
 		ConnectionCredential: bytes.Clone(c.config.credential),
 		ProtocolVersion:      ProtocolVersion,
 	}}
-	return message
+	return message, nil
 }
 
-func (c *Client) capabilitiesMessage() *runnerv1.RunnerMessage {
-	message := c.runnerMessage()
+func (c *Client) capabilitiesMessage() (*runnerv1.RunnerMessage, error) {
+	message, err := c.runnerMessage()
+	if err != nil {
+		return nil, err
+	}
 	message.Payload = &runnerv1.RunnerMessage_Capabilities{Capabilities: c.capabilities()}
-	return message
+	return message, nil
 }
 
 func (c *Client) heartbeatMessage(observedAt time.Time, activeLeases []*runnerv1.HeartbeatLease) (*runnerv1.RunnerMessage, error) {
-	if len(activeLeases) != 0 {
-		return nil, permanent("active leases are not supported by this runner alpha")
+	sequence, err := c.journal.nextHeartbeatSequence()
+	if err != nil {
+		return nil, err
 	}
 	heartbeat := &runnerv1.Heartbeat{
-		Sequence:     c.heartbeatSequence.Add(1),
+		Sequence:     sequence,
 		Capacity:     c.capacity(),
 		ActiveLeases: activeLeases,
 		ObservedAt:   timestamppb.New(observedAt),
 	}
-	message := c.runnerMessage()
+	message, err := c.runnerMessage()
+	if err != nil {
+		return nil, err
+	}
 	message.Payload = &runnerv1.RunnerMessage_Heartbeat{Heartbeat: heartbeat}
 	return message, nil
 }
 
-func (c *Client) runnerMessage() *runnerv1.RunnerMessage {
+func (c *Client) runnerMessage() (*runnerv1.RunnerMessage, error) {
 	now := c.now().UTC()
-	sequence := c.messageSequence.Add(1)
+	sequence, err := c.journal.nextMessageSequence()
+	if err != nil {
+		return nil, err
+	}
 	digest := sha256.Sum256([]byte(c.config.InstanceID))
 	return &runnerv1.RunnerMessage{
 		MessageId: fmt.Sprintf("%x-%016x", digest[:12], sequence),
 		SentAt:    timestamppb.New(now),
-	}
+	}, nil
 }
 
 func (c *Client) capabilities() *runnerv1.Capabilities {
@@ -318,12 +440,13 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 			MaximumResourcesPerJob: &runnerv1.ResourceLimits{CpuMillis: resources.CPUMillis, MemoryBytes: resources.MemoryBytes, DiskBytes: resources.DiskBytes, ProcessCount: resources.ProcessCount},
 			MaximumConcurrentJobs:  1,
 		},
+		Features: []runnerv1.ProtocolFeature{runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS},
 	}
 }
 
 func (c *Client) capacity() *runnerv1.Capacity {
 	available := uint32(1)
-	if c.draining.Load() {
+	if c.draining.Load() || c.journal.snapshot().Active != nil || c.isWorkerRunning() {
 		available = 0
 	}
 	return &runnerv1.Capacity{
@@ -391,51 +514,6 @@ func (c *Client) validateScope(scope *runnerv1.OrganizationScope) error {
 		return errors.New("configured expected scope is invalid")
 	}
 	return nil
-}
-
-func (c *Client) handleGatewayMessage(message *runnerv1.GatewayMessage, now time.Time) (bool, error) {
-	if err := validateGatewayEnvelope(message, now); err != nil {
-		return false, err
-	}
-	switch {
-	case message.GetDrain() != nil:
-		drain := message.GetDrain()
-		if err := validateIdentifier("drain.drainId", drain.GetDrainId(), maximumIdentifierBytes); err != nil {
-			return false, permanent("%v", err)
-		}
-		if len(drain.GetReason()) > maximumReasonBytes {
-			return false, permanent("drain.reason must be at most %d bytes", maximumReasonBytes)
-		}
-		if err := validateTimestamp("drain.deadline", drain.GetDeadline()); err != nil {
-			return false, permanent("%v", err)
-		}
-		c.Drain()
-		return true, nil
-	case message.GetShutdown() != nil:
-		shutdown := message.GetShutdown()
-		if err := validateIdentifier("shutdown.shutdownId", shutdown.GetShutdownId(), maximumIdentifierBytes); err != nil {
-			return false, permanent("%v", err)
-		}
-		if len(shutdown.GetReason()) > maximumReasonBytes {
-			return false, permanent("shutdown.reason must be at most %d bytes", maximumReasonBytes)
-		}
-		if err := validateTimestamp("shutdown.deadline", shutdown.GetDeadline()); err != nil {
-			return false, permanent("%v", err)
-		}
-		return false, permanent("%w", ErrServerShutdown)
-	case message.GetOffer() != nil:
-		return false, permanent("lease offers are not supported by this runner alpha")
-	case message.GetCancel() != nil:
-		return false, permanent("job cancellation is not supported by this runner alpha")
-	case message.GetPolicyUpdate() != nil:
-		return false, permanent("policy updates are not supported by this runner alpha")
-	case message.GetCredentialRotation() != nil:
-		return false, permanent("credential rotation is not supported by this runner alpha")
-	case message.GetAuthenticated() != nil:
-		return false, permanent("authenticated may only be sent as the first gateway message")
-	default:
-		return false, permanent("gateway message payload is missing or unsupported")
-	}
 }
 
 func validateGatewayEnvelope(message *runnerv1.GatewayMessage, now time.Time) error {

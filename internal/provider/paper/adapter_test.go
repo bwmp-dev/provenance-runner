@@ -31,8 +31,11 @@ func TestAdaptJobMaterializesRemoteConsolePlan(t *testing.T) {
 	if err := json.Unmarshal(job.Environment, &config); err != nil {
 		t.Fatalf("decode adapted environment: %v", err)
 	}
-	if config.Target.SizeBytes != int64(len(payloads["/target"])) || len(config.Dependencies) != 1 {
+	if config.Target.SizeBytes != int64(len(payloads["/target"])) || len(config.Dependencies) != 1 || config.Dependencies[0].Plugin != "DependencyFixture" {
 		t.Fatalf("adapted downloads = %#v / %#v", config.Target, config.Dependencies)
+	}
+	if config.TestPlan.TargetPlugin != "SuccessFixture" || len(config.TestPlan.RequiredDependencies) != 1 || config.TestPlan.RequiredDependencies[0] != "DependencyFixture" {
+		t.Fatalf("adapted plugin identities = %#v", config.TestPlan)
 	}
 	if len(config.TestPlan.Console) != 1 || config.TestPlan.Console[0].Command != "provenance-success" || config.TestPlan.Console[0].Assertions[0].Operator != "contains" {
 		t.Fatalf("adapted console plan = %#v", config.TestPlan)
@@ -160,6 +163,18 @@ func TestAdaptJobRejectsDigestAndPolicyMismatches(t *testing.T) {
 			},
 			want: "effective_policy.graceful_shutdown_timeout is required",
 		},
+		"missing target plugin name": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.TargetPluginName = ""
+			},
+			want: "target_plugin_name is missing or invalid",
+		},
+		"missing dependency plugin name": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.Dependencies[0].PluginName = ""
+			},
+			want: "dependencies[0].plugin_name is missing or invalid",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			specification := validRemoteSpecification(t, server.URL, payloads)
@@ -195,8 +210,9 @@ func validRemoteSpecification(t *testing.T, baseURL string, payloads map[string]
 	targetDigest := protoDigest(payloads["/target"])
 	dependencyDigest := protoDigest(payloads["/dependency"])
 	return &runnerv1.JobSpecification{
-		Lease:   &runnerv1.LeaseIdentity{LeaseId: "lease", JobId: "remote-paper-job", ExecutionId: "execution"},
-		Attempt: &runnerv1.AttemptIdentity{AttemptId: "attempt", AttemptNumber: 1, ReleaseCandidateId: "candidate", MatrixEntryId: "paper"},
+		TargetPluginName: "SuccessFixture",
+		Lease:            &runnerv1.LeaseIdentity{LeaseId: "lease", JobId: "remote-paper-job", ExecutionId: "execution"},
+		Attempt:          &runnerv1.AttemptIdentity{AttemptId: "attempt", AttemptNumber: 1, ReleaseCandidateId: "candidate", MatrixEntryId: "paper"},
 		Hashes: &runnerv1.JobHashes{
 			Artifact:      targetDigest,
 			Configuration: protoDigest(normalized),
@@ -215,7 +231,7 @@ func validRemoteSpecification(t *testing.T, baseURL string, payloads map[string]
 			GracefulShutdownTimeout: durationpb.New(30 * time.Second),
 		},
 		Artifact:                    &runnerv1.ObjectDownload{Uri: baseURL + "/target", Digest: targetDigest, Filename: "success.jar", SizeBytes: int64(len(payloads["/target"]))},
-		Dependencies:                []*runnerv1.DependencyInput{{DependencyId: "dependencyfixture", Object: &runnerv1.ObjectDownload{Uri: baseURL + "/dependency", Digest: dependencyDigest, Filename: "dependency.jar", SizeBytes: int64(len(payloads["/dependency"]))}}},
+		Dependencies:                []*runnerv1.DependencyInput{{DependencyId: "dependencyfixture", PluginName: "DependencyFixture", Object: &runnerv1.ObjectDownload{Uri: baseURL + "/dependency", Digest: dependencyDigest, Filename: "dependency.jar", SizeBytes: int64(len(payloads["/dependency"]))}}},
 		NormalizedConfigurationJson: normalized,
 	}
 }
