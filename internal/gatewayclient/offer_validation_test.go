@@ -91,7 +91,19 @@ func TestValidateOfferReturnsStableBoundedRejections(t *testing.T) {
 			value.Job.Hashes.Dependencies[0].Filename = value.Job.Artifact.Filename
 		}, code: "duplicate_filename", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "download expires at lease", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Artifact.ExpiresAt = value.Job.Lease.ExpiresAt }, code: "download_expired", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
-		{name: "complete log upload", mutate: func(value *runnerv1.LeaseOffer) { value.Job.CompleteLogUpload = &runnerv1.ObjectUpload{} }, code: "complete_log_upload_unsupported", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "malformed complete log upload", mutate: func(value *runnerv1.LeaseOffer) { value.Job.CompleteLogUpload = &runnerv1.ObjectUpload{} }, code: "invalid_complete_log_upload", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "insecure complete log upload", mutate: func(value *runnerv1.LeaseOffer) {
+			value.Job.CompleteLogUpload = validCompleteLogUpload(now)
+			value.Job.CompleteLogUpload.Uri = "http://logs.example/log.gz?signature=secret"
+		}, code: "invalid_complete_log_upload", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "literal IP complete log upload", mutate: func(value *runnerv1.LeaseOffer) {
+			value.Job.CompleteLogUpload = validCompleteLogUpload(now)
+			value.Job.CompleteLogUpload.Uri = "https://127.0.0.1/log.gz?signature=secret"
+		}, code: "invalid_complete_log_upload", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "expired complete log upload", mutate: func(value *runnerv1.LeaseOffer) {
+			value.Job.CompleteLogUpload = validCompleteLogUpload(now)
+			value.Job.CompleteLogUpload.ExpiresAt = value.Job.Lease.ExpiresAt
+		}, code: "invalid_complete_log_upload", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 	}
 
 	for _, test := range tests {
@@ -113,6 +125,27 @@ func TestValidateOfferReturnsStableBoundedRejections(t *testing.T) {
 				t.Fatalf("rejection is unbounded: %#v", first)
 			}
 		})
+	}
+}
+
+func TestValidateOfferAcceptsBoundedCompleteLogUploadWithoutMutation(t *testing.T) {
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	offer := validLeaseOffer(now)
+	offer.Job.CompleteLogUpload = validCompleteLogUpload(now)
+	original := proto.Clone(offer)
+	if rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute); rejection != nil {
+		t.Fatalf("validateOffer() rejection = %#v", rejection)
+	}
+	if !proto.Equal(offer, original) {
+		t.Fatal("validateOffer() mutated the upload capability")
+	}
+}
+
+func validCompleteLogUpload(now time.Time) *runnerv1.ObjectUpload {
+	return &runnerv1.ObjectUpload{
+		Uri:         "https://logs.example/staging/execution/attempt/log.gz?signature=secret",
+		ContentType: completeLogUploadContentType,
+		ExpiresAt:   timestamppb.New(now.Add(9 * time.Minute)),
 	}
 }
 

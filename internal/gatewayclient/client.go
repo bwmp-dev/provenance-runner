@@ -77,9 +77,14 @@ type Client struct {
 	workerMu      sync.Mutex
 	workerRunning bool
 	workerCancel  context.CancelFunc
+	workerWG      sync.WaitGroup
 	startResponse chan error
 	workerEvents  chan workerEvent
 	recovering    bool
+
+	uploadMu     sync.Mutex
+	activeUpload *activeCompleteLogUpload
+	logUploader  completeLogUploader
 
 	deferredMu           sync.Mutex
 	deferredWorkerEvents []workerEvent
@@ -128,6 +133,7 @@ func newClientWithWorker(config Config, connector streamConnector, worker Remote
 		wait:             waitContext,
 		handshakeTimeout: maximumHandshakeDuration,
 		workerEvents:     make(chan workerEvent, 2),
+		logUploader:      newHTTPCompleteLogUploader(),
 	}
 	client.recovering = journal.snapshot().Active != nil
 	return client, nil
@@ -150,7 +156,11 @@ func (c *Client) Run(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
-	defer c.stopWorker(context.Canceled)
+	defer func() {
+		c.stopWorker(context.Canceled)
+		c.workerWG.Wait()
+		c.discardQueuedWorkerEvents(context.Canceled)
+	}()
 	delay := initialReconnectDelay
 	for {
 		established, err := c.runSession(ctx)

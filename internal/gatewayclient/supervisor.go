@@ -144,7 +144,13 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 	if rejection := s.client.validateOffer(offer, now, s.authenticated.GetLeaseDuration().AsDuration()); rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}
-	specification, err := proto.MarshalOptions{Deterministic: true}.Marshal(offer.GetJob())
+	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime())
+	if rejection != nil {
+		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
+	}
+	sanitizedJob := proto.Clone(offer.GetJob()).(*runnerv1.JobSpecification)
+	sanitizedJob.CompleteLogUpload = nil
+	specification, err := proto.MarshalOptions{Deterministic: true}.Marshal(sanitizedJob)
 	if err != nil {
 		return err
 	}
@@ -153,7 +159,7 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 		Attempt:    proto.Clone(offer.GetJob().GetAttempt()).(*runnerv1.AttemptIdentity),
 		AcceptedAt: timestamppb.New(now),
 	}
-	return s.queueDurable(&runnerv1.RunnerMessage_LeaseAccepted{LeaseAccepted: accepted}, func(state *journalState) error {
+	err = s.queueDurable(&runnerv1.RunnerMessage_LeaseAccepted{LeaseAccepted: accepted}, func(state *journalState) error {
 		if state.Active != nil || len(state.PendingMessage) != 0 {
 			return errors.New("runner became busy while accepting the lease")
 		}
@@ -166,6 +172,13 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 		}
 		return nil
 	})
+	acceptedState := s.client.journal.snapshot()
+	if acceptedState.Active != nil && activeMatchesIdentity(acceptedState.Active, offer.GetJob().GetLease(), offer.GetJob().GetAttempt()) {
+		s.client.setCompleteLogTarget(offer.GetJob(), target)
+	} else {
+		s.client.clearCompleteLogTarget()
+	}
+	return err
 }
 
 func (s *clientSession) rejectOffer(offer *runnerv1.LeaseOffer, reason runnerv1.LeaseRejectionReason, summary string) error {
@@ -297,6 +310,7 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 			return nil
 		})
 		if err == nil {
+			s.client.clearCompleteLogTarget()
 			s.client.recovering = false
 			s.rememberSettledMessage(pending, state.Active.Phase)
 			s.discardDeferred(errors.New("gateway reconciled the lease as terminal"))
@@ -370,6 +384,7 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 			return nil
 		})
 		if err == nil {
+			s.client.clearCompleteLogTarget()
 			s.rememberSettledMessage(pending, state.Active.Phase)
 			s.discardDeferred(errors.New("job reached a terminal state"))
 		}
@@ -516,6 +531,7 @@ func (s *clientSession) applyLateReconciliation(reconciliation *runnerv1.LeaseRe
 			return err
 		}
 		s.client.recovering = false
+		s.client.clearCompleteLogTarget()
 		s.rememberSettledEvent(pending, state.Active.Phase)
 		s.discardDeferred(errors.New("gateway reconciled the lease as terminal"))
 		return nil
@@ -908,6 +924,10 @@ func (s *clientSession) handleWorkerEvent(event workerEvent) error {
 		if event.start != nil {
 			event.start <- errors.New("lease is no longer active")
 		}
+		if event.result != nil {
+			closeCompleteLog(event.result.CompleteLog)
+			s.client.clearCompleteLogTarget()
+		}
 		return nil
 	}
 	if len(state.PendingMessage) != 0 {
@@ -933,19 +953,29 @@ func (s *clientSession) handleWorkerEvent(event workerEvent) error {
 	if event.result != nil {
 		state = s.client.journal.snapshot()
 		if state.Active == nil {
+			closeCompleteLog(event.result.CompleteLog)
+			s.client.clearCompleteLogTarget()
 			return nil
 		}
+		var err error
 		if state.Active.CancellationID != "" {
 			if len(state.Active.CancellationDigest) == 0 {
 				s.client.deferWorkerEvent(event)
 				return nil
 			}
-			return s.queueCancellation(s.client.now().UTC(), event.result)
+			err = s.queueCancellation(s.client.now().UTC(), event.result)
+		} else if !state.Active.ExpiresAt.After(s.client.now().UTC()) {
+			err = s.queueLeaseExpired(s.client.now().UTC())
+		} else {
+			err = s.queueResult(*event.result)
 		}
-		if !state.Active.ExpiresAt.After(s.client.now().UTC()) {
-			return s.queueLeaseExpired(s.client.now().UTC())
+		if len(s.client.journal.snapshot().PendingMessage) != 0 {
+			closeCompleteLog(event.result.CompleteLog)
+			s.client.clearCompleteLogTarget()
+		} else if err != nil {
+			s.client.deferWorkerEvent(event)
 		}
-		return s.queueResult(*event.result)
+		return err
 	}
 	return errors.New("worker event is empty")
 }
@@ -967,6 +997,9 @@ func (s *clientSession) discardDeferred(reason error) {
 	for _, event := range s.client.takeDeferredWorkerEvents() {
 		if event.start != nil {
 			event.start <- reason
+		}
+		if event.result != nil {
+			closeCompleteLog(event.result.CompleteLog)
 		}
 	}
 }
@@ -1013,12 +1046,37 @@ func (s *clientSession) queueResult(result execution.Result) error {
 	if err != nil {
 		return err
 	}
+	var completeLog *runnerv1.LogObject
+	if target := s.client.completeLogTarget(lease, attempt); target != nil {
+		ctx := s.rootContext
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if s.client.logUploader == nil {
+			err = errors.New("complete log uploader is unavailable")
+		} else {
+			completeLog, err = s.client.logUploader.Upload(ctx, target, result.CompleteLog)
+		}
+		if err != nil {
+			failed := &runnerv1.JobFailed{
+				Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(result.CompletedAt),
+				Failure: &runnerv1.FailureDetail{
+					Category:  runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE,
+					Stage:     runnerv1.FailureStage_FAILURE_STAGE_RESULT_UPLOAD,
+					Code:      "complete_log_upload_failed",
+					Summary:   "complete log evidence could not be uploaded",
+					Retryable: true,
+				},
+			}
+			return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+		}
+	}
 	if result.Passed() || result.Classification == execution.ClassificationWorkloadFailure {
 		outcome := runnerv1.ResultOutcome_RESULT_OUTCOME_FAILED
 		if result.Passed() {
 			outcome = runnerv1.ResultOutcome_RESULT_OUTCOME_PASSED
 		}
-		structured := &runnerv1.StructuredResult{Outcome: outcome, StartedAt: timestamppb.New(result.StartedAt), CompletedAt: timestamppb.New(result.CompletedAt)}
+		structured := &runnerv1.StructuredResult{Outcome: outcome, CompleteLog: completeLog, StartedAt: timestamppb.New(result.StartedAt), CompletedAt: timestamppb.New(result.CompletedAt)}
 		if result.Execution != nil && result.Execution.ExitCode != nil {
 			value := int32(*result.Execution.ExitCode)
 			structured.ProcessExitCode = &value
@@ -1027,8 +1085,16 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		return s.queueDurable(&runnerv1.RunnerMessage_Completed{Completed: completed}, nil)
 	}
 	failure := resultFailure(result)
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, FailedAt: timestamppb.New(result.CompletedAt)}
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, CompleteLog: completeLog, FailedAt: timestamppb.New(result.CompletedAt)}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+}
+
+func closeCompleteLog(completeLog *execution.CompleteLog) {
+	if completeLog == nil || completeLog.Archive == nil {
+		return
+	}
+	_ = completeLog.Archive.Close()
+	completeLog.Archive = nil
 }
 
 func (s *clientSession) queueCancellation(now time.Time, result *execution.Result) error {
@@ -1089,8 +1155,10 @@ func (c *Client) startWorker(ctx context.Context) error {
 	workerContext, cancel := context.WithCancel(ctx)
 	c.workerRunning = true
 	c.workerCancel = cancel
+	c.workerWG.Add(1)
 	c.workerMu.Unlock()
 	go func() {
+		defer c.workerWG.Done()
 		result := c.worker.Execute(workerContext, specification, func(startContext context.Context, _ execution.ExecutionStart) error {
 			response := make(chan error, 1)
 			select {
@@ -1108,9 +1176,26 @@ func (c *Client) startWorker(ctx context.Context) error {
 		select {
 		case c.workerEvents <- workerEvent{result: &result}:
 		case <-ctx.Done():
+			closeCompleteLog(result.CompleteLog)
 		}
 	}()
 	return nil
+}
+
+func (c *Client) discardQueuedWorkerEvents(reason error) {
+	for {
+		select {
+		case event := <-c.workerEvents:
+			if event.start != nil {
+				event.start <- reason
+			}
+			if event.result != nil {
+				closeCompleteLog(event.result.CompleteLog)
+			}
+		default:
+			return
+		}
+	}
 }
 
 func (c *Client) stopWorker(_ error) {
