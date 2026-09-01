@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	maximumArchiveEntries = 100_000
-	maximumExpandedBytes  = int64(1 << 30)
+	MaximumArchiveEntries = 100_000
+	MaximumExpandedBytes  = int64(1 << 30)
 )
 
 type pendingLink struct {
@@ -26,7 +26,7 @@ type pendingLink struct {
 }
 
 func (w *Workspace) ExtractTarGzip(ctx context.Context, relativePath string, entry *artifact.Entry) (string, error) {
-	return w.ExtractTarGzipBounded(ctx, relativePath, entry, maximumExpandedBytes)
+	return w.ExtractTarGzipBounded(ctx, relativePath, entry, MaximumExpandedBytes)
 }
 
 func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath string, entry *artifact.Entry, maximumExpanded int64) (string, error) {
@@ -42,8 +42,8 @@ func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath stri
 	if entry == nil {
 		return "", errors.New("extract archive: cache entry is nil")
 	}
-	if maximumExpanded <= 0 || maximumExpanded > maximumExpandedBytes {
-		return "", fmt.Errorf("extract archive: expanded size limit must be between 1 and %d", maximumExpandedBytes)
+	if maximumExpanded <= 0 || maximumExpanded > MaximumExpandedBytes {
+		return "", fmt.Errorf("extract archive: expanded size limit must be between 1 and %d", MaximumExpandedBytes)
 	}
 	cleanedPath, err := cleanRelativePath(relativePath)
 	if err != nil {
@@ -91,7 +91,7 @@ func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath stri
 			return "", fmt.Errorf("extract archive: read tar entry: %w", err)
 		}
 		entries++
-		if entries > maximumArchiveEntries {
+		if entries > MaximumArchiveEntries {
 			return "", errors.New("extract archive: entry limit exceeded")
 		}
 		path, err := archivePath(temporary, header.Name)

@@ -43,6 +43,12 @@ PROVENANCE_GVISOR_BUNDLE_ROOT
 
 `PROVENANCE_ARTIFACT_HOSTS` is a comma-separated exact DNS-host allowlist for job-provided target and dependency downloads. The probe and prepared runtime use their exact operator URI, SHA-256, and byte-size pins. The prepared-runtime archive contains offline Paperclip cache, library, and patched-runtime output; it must omit the paths where the runner overlays `paper.jar`, plugins, the EULA, minimal server properties, and the test plan.
 
+Build that archive from the pinned Paper JAR in a trusted networked preparation environment. The command verifies the alpha Paper byte-size and SHA-256, runs Paperclip in patch-only mode, includes only `cache`, `libraries`, and `versions`, normalizes all archive metadata, refuses to overwrite an existing output, and prints the three operator pin values as JSON:
+
+```sh
+go run ./cmd/provenance-paper-runtime -paper /path/to/paper-1.21.8-60.jar -output paper-prepared-runtime.tar.gz
+```
+
 The alpha Paper provider accepts only probe `0.1.0` built from Provenance commit `0741914e16dee1476d8bbd8d7d370eaf8a0eb0c2`: SHA-256 `cc981edc49a1fc27a920c3e39415428d3897eb878e748a6ad2b708972ef6e082`, 462392 bytes. The JAR is reproducible from that commit, but the current public Provenance release does not publish probe bytes, so the operator must host those exact bytes and supply their HTTPS URI.
 
 Optional limits are `PROVENANCE_MAX_ARTIFACT_BYTES`, `PROVENANCE_MAX_DEPENDENCY_BYTES`, `PROVENANCE_MAX_PREPARATION_BYTES`, and `PROVENANCE_MAX_CACHE_BYTES`. `PROVENANCE_GVISOR_PLATFORM` may be `systrap` (the default) or `kvm`. Implementation hard limits still apply.

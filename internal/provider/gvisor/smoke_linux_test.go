@@ -38,12 +38,13 @@ func TestRunscSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, err := New(Config{
-		RunscPath:  resolvedRunsc,
-		RootFS:     rootFS,
-		StateRoot:  filepath.Join(temporaryRoot, "state"),
-		BundleRoot: filepath.Join(temporaryRoot, "bundles"),
-		InputsRoot: inputsRoot,
-		Platform:   "systrap",
+		RunscPath:      resolvedRunsc,
+		RootFS:         rootFS,
+		RootFSIdentity: "smoke-rootfs",
+		StateRoot:      filepath.Join(temporaryRoot, "state"),
+		BundleRoot:     filepath.Join(temporaryRoot, "bundles"),
+		InputsRoot:     inputsRoot,
+		Platform:       "systrap",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
