@@ -1,0 +1,249 @@
+name: Plan 03 acceptance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/plan03-acceptance.yml"
+      - "cmd/**"
+      - "internal/**"
+      - "scripts/plan03-acceptance.sh"
+      - "testdata/plan03/**"
+      - "go.mod"
+      - "go.sum"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GVISOR_NIGHTLY: 2026-08-30
+  GVISOR_SHA512: e8eb6473e5a27316df551cbb40e5626e51df1b602bde2621f77d851c2c53b0387e282c7ebc0ee80ceb07a26e152e67b4af3e17550009e2c486e2f19666570449
+  ALPINE_RELEASE: 3.24.1
+  ALPINE_SHA512: de367c4fd4b5a2ab17f30fe62b135b98acd76c22014abdf51285588bde0edb7275265a84400418a5dab8cbdec36b3a41ca1312ca3af8e54438036455f26d72c1
+  UBUNTU_IMAGE: ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+  PAPER_SHA256: 8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e
+  JAVA_SHA256: 968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03
+  RUNTIME_SHA256: ba1434cfc3af6fe145660e82f5b07ce9cb46cbc76d23c68a767a3717e7e5ca57
+
+jobs:
+  paper-gvisor-exit-gate:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out runner candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Record exact candidate
+        shell: bash
+        run: echo "PLAN03_CANDIDATE_SHA=$(git rev-parse HEAD)" >> "${GITHUB_ENV}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check out pinned probe and fixture source
+        uses: actions/checkout@v4
+        with:
+          repository: bwmp-dev/provenance
+          ref: 98d5f07f173a9e3f1b365add24b81c934d7e3c61
+          path: _plan03-fixtures-source
+
+      - name: Set up fixture Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: _plan03-fixtures-source/.node-version
+
+      - name: Set up catalog Java runtime
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: _plan03-fixtures-source/**/*.gradle*
+
+      - name: Build and verify pinned probe and fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd _plan03-fixtures-source
+          node scripts/run-gradle.mjs \
+            :paper-probe:jar \
+            safeFixtures \
+            hostileFixtures \
+            verifySafeFixtureArtifacts \
+            verifyHostileFixtureArtifacts
+
+      - name: Install pinned gVisor and Alpine root filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="/opt/provenance-plan03-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gvisor_archive="${RUNNER_TEMP}/gvisor-x86_64.tar.bz2"
+          alpine_archive="${RUNNER_TEMP}/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${gvisor_archive}" \
+            "https://storage.googleapis.com/gvisor/releases/nightly/${GVISOR_NIGHTLY}/x86_64/gvisor.tar.bz2"
+          printf '%s  %s\n' "${GVISOR_SHA512}" "${gvisor_archive}" | sha512sum --check --strict -
+          sudo mkdir --parents "${install_root}/gvisor"
+          sudo tar --extract --bzip2 --file "${gvisor_archive}" --directory "${install_root}/gvisor"
+          sudo find "${install_root}/gvisor/gvisor-bin" -type f -exec chmod a+rx {} +
+          wrapper="${install_root}/gvisor/runsc-provenance"
+          printf '#!/bin/sh\nexec "%s/gvisor/runsc" --gofer-network-namespace=new "$@"\n' "${install_root}" | sudo tee "${wrapper}" >/dev/null
+          sudo chmod 0755 "${wrapper}"
+
+          curl --fail --location --silent --show-error \
+            --output "${alpine_archive}" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
+          printf '%s  %s\n' "${ALPINE_SHA512}" "${alpine_archive}" | sha512sum --check --strict -
+          sudo mkdir --parents "${install_root}/alpine-rootfs"
+          sudo tar --extract --gzip --file "${alpine_archive}" --directory "${install_root}/alpine-rootfs"
+          sudo chmod --recursive a+rX "${install_root}"
+
+          echo "PLAN03_INSTALL_ROOT=${install_root}" >> "${GITHUB_ENV}"
+          echo "PLAN03_RUNSC_BINARY=${install_root}/gvisor/runsc" >> "${GITHUB_ENV}"
+          echo "PROVENANCE_RUNSC_PATH=${wrapper}" >> "${GITHUB_ENV}"
+          echo "PROVENANCE_RUNSC_ROOTFS=${install_root}/alpine-rootfs" >> "${GITHUB_ENV}"
+
+      - name: Prepare pinned Ubuntu sandbox root filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "${UBUNTU_IMAGE}"
+          container=$(docker create "${UBUNTU_IMAGE}")
+          trap 'docker rm --force "${container}" >/dev/null 2>&1 || true' EXIT
+          docker export --output "${RUNNER_TEMP}/ubuntu-rootfs.tar" "${container}"
+          docker rm "${container}" >/dev/null
+          trap - EXIT
+          sudo mkdir --parents "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs"
+          sudo tar --extract --file "${RUNNER_TEMP}/ubuntu-rootfs.tar" --directory "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs"
+          sudo chmod --recursive a+rX "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs"
+          echo "PROVENANCE_ROOTFS=${PLAN03_INSTALL_ROOT}/ubuntu-rootfs" >> "${GITHUB_ENV}"
+          echo "PROVENANCE_ROOTFS_IDENTITY=${UBUNTU_IMAGE}" >> "${GITHUB_ENV}"
+
+      - name: Prepare checksum-pinned Paper assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/plan03-assets"
+          mkdir --parents "${assets}/fixtures"
+          curl --fail --location --silent --show-error \
+            --user-agent 'Provenance-Runner/0.1.0 (https://github.com/bwmp-dev/provenance-runner)' \
+            --output "${assets}/paper-1.21.8-60.jar" \
+            "https://fill-data.papermc.io/v1/objects/${PAPER_SHA256}/paper-1.21.8-60.jar"
+          curl --fail --location --silent --show-error \
+            --output "${assets}/OpenJDK21U-jre_x64_linux_hotspot_21.0.8_9.tar.gz" \
+            'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jre_x64_linux_hotspot_21.0.8_9.tar.gz'
+          printf '%s  %s\n' "${PAPER_SHA256}" "${assets}/paper-1.21.8-60.jar" | sha256sum --check --strict -
+          printf '%s  %s\n' "${JAVA_SHA256}" "${assets}/OpenJDK21U-jre_x64_linux_hotspot_21.0.8_9.tar.gz" | sha256sum --check --strict -
+          cp _plan03-fixtures-source/plugins/paper-probe/build/libs/paper-probe-0.1.0.jar "${assets}/"
+          find _plan03-fixtures-source/packages/test-fixtures -path '*/build/libs/*.jar' -type f -exec cp {} "${assets}/fixtures/" \;
+          go run ./cmd/provenance-paper-runtime \
+            -paper "${assets}/paper-1.21.8-60.jar" \
+            -output "${assets}/paper-prepared-runtime.tar.gz" \
+            > "${assets}/paper-runtime-build.log" 2>&1
+          printf '%s  %s\n' "${RUNTIME_SHA256}" "${assets}/paper-prepared-runtime.tar.gz" | sha256sum --check --strict -
+          echo "PLAN03_ASSET_ROOT=${assets}" >> "${GITHUB_ENV}"
+
+      - name: Build exact runner and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -o "${RUNNER_TEMP}/provenance-runner-plan03" ./cmd/provenance-runner
+          go test -c -o "${RUNNER_TEMP}/gvisor-smoke.test" ./internal/provider/gvisor
+          echo "PLAN03_RUNNER=${RUNNER_TEMP}/provenance-runner-plan03" >> "${GITHUB_ENV}"
+
+      - name: Prepare delegated cgroup subtree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cgroup_parent="/sys/fs/cgroup/provenance-plan03-acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo test ! -e "${cgroup_parent}"
+          sudo mkdir --parents "${cgroup_parent}/runner"
+          controllers=$(< /sys/fs/cgroup/cgroup.controllers)
+          if [[ -n "${controllers}" ]]; then
+            printf '+%s\n' "${controllers// / +}" | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
+          fi
+          controllers=$(< "${cgroup_parent}/cgroup.controllers")
+          if [[ -n "${controllers}" ]]; then
+            printf '+%s\n' "${controllers// / +}" | sudo tee "${cgroup_parent}/cgroup.subtree_control" >/dev/null
+          fi
+          echo "PLAN03_CGROUP_PARENT=${cgroup_parent}" >> "${GITHUB_ENV}"
+
+      - name: Run real cancellation and restart smoke
+        shell: bash
+        run: |
+          sudo --preserve-env=PROVENANCE_RUNSC_PATH,PROVENANCE_RUNSC_ROOTFS,PLAN03_CGROUP_PARENT \
+            bash -c 'printf "%s\n" "$$" > "$1/runner/cgroup.procs"; shift; exec "$@"' bash \
+            "${PLAN03_CGROUP_PARENT}" \
+            env \
+            PROVENANCE_RUNSC_SMOKE=1 \
+            PROVENANCE_CGROUP_PARENT="${PLAN03_CGROUP_PARENT}" \
+            "${RUNNER_TEMP}/gvisor-smoke.test" \
+            -test.v \
+            -test.run '^TestRunscSmoke$' \
+            -test.count=1 \
+            -test.timeout=90s
+
+      - name: Run Paper and hostile exit gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/plan03-exit-gate-${PLAN03_CANDIDATE_SHA}"
+          work="${RUNNER_TEMP}/plan03-work-${PLAN03_CANDIDATE_SHA}"
+          echo "PLAN03_EVIDENCE_ROOT=${evidence}" >> "${GITHUB_ENV}"
+          sudo --preserve-env=PLAN03_ASSET_ROOT,PLAN03_CGROUP_PARENT,PLAN03_INSTALL_ROOT,PLAN03_RUNNER,PLAN03_RUNSC_BINARY,PROVENANCE_ROOTFS,PROVENANCE_ROOTFS_IDENTITY,PROVENANCE_RUNSC_PATH \
+            env \
+            PLAN03_EVIDENCE_ROOT="${evidence}" \
+            PLAN03_WORK_ROOT="${work}" \
+            "${GITHUB_WORKSPACE}/scripts/plan03-acceptance.sh"
+
+      - name: Expose retained evidence to artifact upload
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${PLAN03_EVIDENCE_ROOT:-}" ]] && sudo test -d "${PLAN03_EVIDENCE_ROOT}"; then
+            sudo chmod --recursive a+rX "${PLAN03_EVIDENCE_ROOT}"
+          fi
+
+      - name: Upload exact-head exit-gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan03-exit-gate-${{ env.PLAN03_CANDIDATE_SHA }}
+          path: ${{ env.PLAN03_EVIDENCE_ROOT }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove delegated cgroup subtree
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PLAN03_CGROUP_PARENT:-}" ]]; then
+            exit 0
+          fi
+          if [[ ! "${PLAN03_CGROUP_PARENT}" =~ ^/sys/fs/cgroup/provenance-plan03-acceptance-[0-9]+-[0-9]+$ ]]; then
+            printf 'refusing unexpected cgroup path: %s\n' "${PLAN03_CGROUP_PARENT}" >&2
+            exit 1
+          fi
+          sudo find "${PLAN03_CGROUP_PARENT}" -mindepth 1 -depth -type d -exec rmdir {} +
+          sudo rmdir "${PLAN03_CGROUP_PARENT}"
+
+      - name: Remove installed acceptance assets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PLAN03_INSTALL_ROOT:-}" ]]; then
+            exit 0
+          fi
+          if [[ ! "${PLAN03_INSTALL_ROOT}" =~ ^/opt/provenance-plan03-[0-9]+-[0-9]+$ ]]; then
+            printf 'refusing unexpected install path: %s\n' "${PLAN03_INSTALL_ROOT}" >&2
+            exit 1
+          fi
+          sudo rm --recursive --force -- "${PLAN03_INSTALL_ROOT}"

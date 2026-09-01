@@ -77,6 +77,6 @@ The Paper provider's `AdaptJob` boundary consumes the released runner `JobSpecif
 
 ## Current evidence
 
-Unit and hosted CI exercise preparation, bounded evidence, quotas, download policy, cleanup, and gVisor bundle construction. A dedicated hosted CI job verifies checksum-pinned gVisor nightly and Alpine root filesystem archives, then executes the real `runsc` containment and cleanup smoke test without allowing missing prerequisites to skip. The [Plan 03 exit-gate evidence](docs/plan-03-exit-gate.md) retains a live Paper/JVM run of every benign and hostile fixture through the standalone CLI.
+Unit and hosted CI exercise preparation, bounded live evidence, complete-log retention, quotas, download policy, cleanup, and gVisor bundle construction. A dedicated hosted CI job verifies checksum-pinned gVisor, Alpine, Ubuntu, Paper, Java, probe, prepared-runtime, and fixture inputs; executes real `runsc` pass, cancellation, and restart paths; and runs every benign and hostile Paper fixture through the standalone CLI. It uploads a 90-day, SHA-256-manifested evidence bundle for the exact candidate. The [Plan 03 exit-gate evidence](docs/plan-03-exit-gate.md) documents its replay and acceptance assertions.
 
 Probe lifecycle output is bounded and fails closed on missing, malformed, duplicate, out-of-order, or failed assertions. It is not cryptographically attributable: the tested plugin shares the JVM and sandbox UID and could attempt to forge or modify the reserved event channel.
