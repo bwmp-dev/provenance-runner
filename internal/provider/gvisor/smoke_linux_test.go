@@ -87,16 +87,16 @@ func TestRunscSmoke(t *testing.T) {
 			t.Errorf("Cleanup() error = %v", err)
 		}
 	}()
-	outcome, err := prepared.Execute(ctx)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	outcome, executeErr := prepared.Execute(ctx)
+	output, collectErr := prepared.Collect(ctx)
+	if executeErr != nil {
+		t.Fatalf("Execute() error = %v; stdout=%q stderr=%q; Collect() error = %v", executeErr, output.Stdout, output.Stderr, collectErr)
+	}
+	if collectErr != nil {
+		t.Fatalf("Collect() error = %v", collectErr)
 	}
 	if outcome.Failure != nil {
-		t.Fatalf("Execute() failure = %#v", outcome.Failure)
-	}
-	output, err := prepared.Collect(ctx)
-	if err != nil {
-		t.Fatalf("Collect() error = %v", err)
+		t.Fatalf("Execute() failure = %#v; stdout=%q stderr=%q", outcome.Failure, output.Stdout, output.Stderr)
 	}
 	if !strings.Contains(output.Stdout, "gvisor-smoke-ok") {
 		t.Fatalf("sandbox output did not confirm containment checks; stdout=%q stderr=%q", output.Stdout, output.Stderr)
