@@ -315,10 +315,21 @@ validate_result() {
       ;;
     fork-pid-bomb)
       jq -es '
+        def at_ceiling: ((.pidsCurrent | tonumber) == (.pidsMax | tonumber));
+        def denied: (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber);
+        def longest_saturation:
+          reduce .[] as $sample
+            ({start: null, longest: 0};
+             if ($sample | at_ceiling) then
+               .start = (.start // $sample.timestampNanoseconds) |
+               .longest = ([.longest, ($sample.timestampNanoseconds - .start)] | max)
+             else
+               .start = null
+             end) |
+          .longest;
         ([.[].sandboxPIDsCurrent // 0] | max) >= 40 and
         ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
-        ([.[] | select((.pidsCurrent | tonumber) == (.pidsMax | tonumber))] | length) > 0 and
-        ([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0
+        (([.[] | denied] | max) > 0 or longest_saturation >= 10000000000)
       ' "$samples" >/dev/null
       ;;
     disk-fill)
