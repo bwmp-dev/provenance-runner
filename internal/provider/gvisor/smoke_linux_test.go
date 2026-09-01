@@ -59,7 +59,7 @@ func TestRunscSmoke(t *testing.T) {
 		Network:     "none",
 		MemoryBytes: 128 << 20,
 		CPUMillis:   500,
-		PIDs:        16,
+		PIDs:        64,
 		DiskBytes:   8 << 20,
 	}
 	content, err := json.Marshal(config)
