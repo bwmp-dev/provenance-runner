@@ -75,12 +75,42 @@ jobs:
           echo "PROVENANCE_RUNSC_ROOTFS=${rootfs}" >> "${GITHUB_ENV}"
       - name: Compile gVisor smoke test
         run: go test -c -o "${RUNNER_TEMP}/gvisor-smoke.test" ./internal/provider/gvisor
+      - name: Prepare delegated cgroup subtree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cgroup_parent="/sys/fs/cgroup/provenance-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo mkdir --parents "${cgroup_parent}/runner"
+          controllers=$(< /sys/fs/cgroup/cgroup.controllers)
+          if [[ -n "${controllers}" ]]; then
+            printf '+%s\n' "${controllers// / +}" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+          fi
+          controllers=$(< "${cgroup_parent}/cgroup.controllers")
+          if [[ -n "${controllers}" ]]; then
+            printf '+%s\n' "${controllers// / +}" | sudo tee "${cgroup_parent}/cgroup.subtree_control" > /dev/null
+          fi
+          echo "PROVENANCE_CGROUP_PARENT=${cgroup_parent}" >> "${GITHUB_ENV}"
       - name: Run real gVisor smoke test
         shell: bash
         run: |
-          sudo --preserve-env=PROVENANCE_RUNSC_SMOKE,PROVENANCE_RUNSC_PATH,PROVENANCE_RUNSC_ROOTFS \
+          sudo --preserve-env=PROVENANCE_RUNSC_SMOKE,PROVENANCE_RUNSC_PATH,PROVENANCE_RUNSC_ROOTFS,PROVENANCE_CGROUP_PARENT \
+            bash -c 'printf "%s\n" "$$" > "${PROVENANCE_CGROUP_PARENT}/runner/cgroup.procs"; exec "$@"' bash \
             "${RUNNER_TEMP}/gvisor-smoke.test" \
             -test.v \
             -test.run '^TestRunscSmoke$' \
             -test.count=1 \
             -test.timeout=60s
+      - name: Remove delegated cgroup subtree
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROVENANCE_CGROUP_PARENT:-}" ]]; then
+            exit 0
+          fi
+          if [[ ! "${PROVENANCE_CGROUP_PARENT}" =~ ^/sys/fs/cgroup/provenance-ci-[0-9]+-[0-9]+$ ]]; then
+            echo "refusing to remove unexpected cgroup path: ${PROVENANCE_CGROUP_PARENT}" >&2
+            exit 1
+          fi
+          sudo rmdir "${PROVENANCE_CGROUP_PARENT}/runner"
+          sudo rmdir "${PROVENANCE_CGROUP_PARENT}"
