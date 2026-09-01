@@ -28,12 +28,7 @@ func (w *connectedWorker) Execute(ctx context.Context, specification *runnerv1.J
 	if err != nil {
 		return execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err)
 	}
-	result := executor.Execute(ctx, job)
-	// Remote complete-log upload is rejected in this phase. Retain metadata for
-	// diagnostics but release the local spool before returning it to the
-	// supervisor.
-	releaseCompleteLog(result.CompleteLog)
-	return result
+	return executor.Execute(ctx, job)
 }
 
 func newConnectedWorker(registry *providerRegistry) (*connectedWorker, error) {

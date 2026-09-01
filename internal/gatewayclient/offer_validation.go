@@ -98,8 +98,8 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if rejection := validateOfferDownloads(job, offerExpiresAt, leaseExpiresAt); rejection != nil {
 		return rejection
 	}
-	if job.GetCompleteLogUpload() != nil {
-		return rejectUnsupported("complete_log_upload_unsupported", "complete log upload is not supported by this runner phase")
+	if _, rejection := validateCompleteLogUpload(job.GetCompleteLogUpload(), now, offerExpiresAt, leaseExpiresAt); rejection != nil {
+		return rejection
 	}
 	return nil
 }
