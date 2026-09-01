@@ -42,8 +42,13 @@ func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout
 		writeUsage(stderr)
 		return 2
 	}
+	return runExecuteContext(ctx, arguments[1], stdin, stdout, stderr, os.Getenv, registryForLocalExecution)
+}
 
-	jobData, err := readJob(arguments[1], stdin)
+type localRegistryFactory func(context.Context, string, environmentLookup) (*providerRegistry, error)
+
+func runExecuteContext(ctx context.Context, jobPath string, stdin io.Reader, stdout, stderr io.Writer, lookup environmentLookup, registryFactory localRegistryFactory) int {
+	jobData, err := readJob(jobPath, stdin)
 	if err != nil {
 		return writeResult(stdout, execution.FailedResult("", execution.PhaseValidation, execution.ClassificationInvalidJob, "job_read_failed", err))
 	}
@@ -52,8 +57,11 @@ func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout
 		return writeResult(stdout, execution.FailedResult("", execution.PhaseValidation, execution.ClassificationInvalidJob, "invalid_job", err))
 	}
 
-	registry, err := registryForProvider(context.Background(), job.Provider, os.Getenv)
+	registry, err := registryFactory(ctx, job.Provider, lookup)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationCancelled, "job_cancelled", ctx.Err()))
+		}
 		return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err))
 	}
 	defer func() {
@@ -66,7 +74,7 @@ func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout
 		return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err))
 	}
 
-	return writeResult(stdout, executor.Execute(context.Background(), job))
+	return writeResult(stdout, executor.Execute(ctx, job))
 }
 
 func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {

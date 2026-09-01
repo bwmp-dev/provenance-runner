@@ -52,20 +52,25 @@ var allowedProbeEventTypes = map[string]struct{}{
 	"CLEAN_SHUTDOWN_REQUESTED":    {},
 }
 
-var allowedClassificationCodes = map[string]struct{}{
-	"plugin_not_found":             {},
-	"invalid_metadata":             {},
-	"missing_required_dependency":  {},
-	"failed_required_dependency":   {},
-	"on_load_failure":              {},
-	"on_enable_failure":            {},
-	"invalid_test_plan":            {},
-	"command_not_registered":       {},
-	"command_registration_failure": {},
-	"command_execution_failure":    {},
-	"command_timeout":              {},
-	"command_output_truncated":     {},
-	"command_assertion_failure":    {},
+type classificationSchema struct {
+	category string
+	stage    string
+}
+
+var allowedClassificationCodes = map[string]classificationSchema{
+	"plugin_not_found":             {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_PREPARATION"},
+	"invalid_metadata":             {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_PREPARATION"},
+	"missing_required_dependency":  {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_PREPARATION"},
+	"failed_required_dependency":   {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_STARTUP"},
+	"on_load_failure":              {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_STARTUP"},
+	"on_enable_failure":            {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_STARTUP"},
+	"invalid_test_plan":            {category: "FAILURE_CATEGORY_POLICY", stage: "FAILURE_STAGE_PREPARATION"},
+	"command_not_registered":       {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_EXECUTION"},
+	"command_registration_failure": {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_EXECUTION"},
+	"command_execution_failure":    {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_EXECUTION"},
+	"command_timeout":              {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_EXECUTION"},
+	"command_output_truncated":     {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_EXECUTION"},
+	"command_assertion_failure":    {category: "FAILURE_CATEGORY_PLUGIN", stage: "FAILURE_STAGE_EXECUTION"},
 }
 
 var commandClassificationCodes = map[string]struct{}{
@@ -82,6 +87,7 @@ type commandProbeState struct {
 	seenAssertions            map[string]struct{}
 	registrationSeen          bool
 	registered                bool
+	registrationStatus        string
 	started                   bool
 	outputSeen                bool
 	outputTruncated           bool
@@ -128,6 +134,7 @@ func (s *commandProbeState) accept(eventType string, data json.RawMessage) error
 		}
 		s.registrationSeen = true
 		s.registered = registered
+		s.registrationStatus = status
 		if !registered {
 			s.failure = true
 		}
@@ -288,9 +295,13 @@ func (s *commandProbeState) acceptClassification(code string) error {
 		return errors.New("classification is out of order")
 	}
 	switch code {
-	case "command_not_registered", "command_registration_failure":
-		if s.registered {
-			return errors.New("registration classification contradicts registered command")
+	case "command_not_registered":
+		if s.registered || s.registrationStatus != "NOT_REGISTERED" {
+			return errors.New("command_not_registered classification contradicts registration status")
+		}
+	case "command_registration_failure":
+		if s.registered || s.registrationStatus != "LOOKUP_FAILED" {
+			return errors.New("command_registration_failure classification contradicts registration status")
 		}
 	case "command_execution_failure":
 		if !s.executionCompleted || (s.executionStatus != "EXECUTION_FAILED" && s.executionStatus != "DISPATCH_REJECTED") {
@@ -325,6 +336,19 @@ func isCommandClassification(code string) bool {
 	return ok
 }
 
+type probeLifecycleFailure struct {
+	code string
+	err  error
+}
+
+func (e *probeLifecycleFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e *probeLifecycleFailure) Unwrap() error {
+	return e.err
+}
+
 func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]execution.StructuredEvent, error) {
 	if output.StructuredEventError != "" {
 		return nil, fmt.Errorf("probe event channel is malformed: %s", output.StructuredEventError)
@@ -343,9 +367,12 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 	seenRequired := make(map[string]bool, len(requiredProbeOrder))
 	nextRequired := 0
 	requirements := make(map[string]bool, 1+len(plan.RequiredDependencies))
+	requirementRoles := make(map[string]string, 1+len(plan.RequiredDependencies))
 	requirements[strings.ToLower(plan.TargetPlugin)] = false
+	requirementRoles[strings.ToLower(plan.TargetPlugin)] = "TARGET"
 	for _, dependency := range plan.RequiredDependencies {
 		requirements[strings.ToLower(dependency)] = false
+		requirementRoles[strings.ToLower(dependency)] = "REQUIRED_DEPENDENCY"
 	}
 	commandTests := make(map[string]*commandProbeState, len(plan.Console))
 	commandOrder := make([]string, len(plan.Console))
@@ -358,11 +385,13 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 
 	events := make([]execution.StructuredEvent, 0, len(output.StructuredEvents))
 	var lifecycleFailure error
+	var authoritativeClassification string
 	planLoaded := false
 	planCompleted := false
 	serverReadySatisfied := false
 	nextCommandIndex := 0
 	timedOutCommandIndex := -1
+	var previousEnvelope probeEnvelope
 	commandStateForEvent := func(testID string) (*commandProbeState, int, error) {
 		state, expected := commandTests[testID]
 		if !expected {
@@ -454,6 +483,9 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 					lifecycleFailure = errors.New("probe reported a failed console test plan")
 				}
 			case "INVALID":
+				if _, err := requiredString(envelope.Data, "issue"); err != nil {
+					return events, err
+				}
 				if lifecycleFailure == nil {
 					lifecycleFailure = errors.New("probe rejected the materialized test plan")
 				}
@@ -482,19 +514,22 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 				nextCommandIndex++
 			}
 		case "TARGET_REQUIREMENT":
-			name, satisfied, err := decodeRequirement(envelope.Data)
+			requirement, err := decodeRequirement(envelope.Data)
 			if err != nil {
 				return events, err
 			}
-			key := strings.ToLower(name)
+			key := strings.ToLower(requirement.name)
 			if _, expected := requirements[key]; expected {
-				if requirements[key] {
-					return events, fmt.Errorf("duplicate requirement result for %q", name)
+				if requirement.role != requirementRoles[key] {
+					return events, fmt.Errorf("requirement %q has role %q, want %q", requirement.name, requirement.role, requirementRoles[key])
 				}
-				requirements[key] = satisfied
+				if requirements[key] {
+					return events, fmt.Errorf("duplicate requirement result for %q", requirement.name)
+				}
+				requirements[key] = requirement.satisfied()
 			}
-			if !satisfied && lifecycleFailure == nil {
-				lifecycleFailure = fmt.Errorf("plugin requirement %q was not loaded and enabled", name)
+			if !requirement.satisfied() && lifecycleFailure == nil {
+				lifecycleFailure = fmt.Errorf("plugin requirement %q was not loaded and enabled", requirement.name)
 			}
 		case "CLASSIFICATION":
 			code, err := classificationCode(envelope.Data)
@@ -516,13 +551,26 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 				if state.timeoutSeen {
 					timedOutCommandIndex = commandIndex
 				}
+			} else if err := validateClassificationEvidence(code, envelope.Data, previousEnvelope); err != nil {
+				return events, err
 			}
+			if authoritativeClassification != "" {
+				return events, fmt.Errorf("probe emitted conflicting classifications %s and %s", authoritativeClassification, code)
+			}
+			authoritativeClassification = code
 			if lifecycleFailure == nil {
 				lifecycleFailure = fmt.Errorf("probe classified the workload as %s", code)
 			}
 		case "LIFECYCLE_EXCEPTION":
+			if _, _, err := decodeLifecycleException(envelope.Data); err != nil {
+				return events, err
+			}
 			if lifecycleFailure == nil {
 				lifecycleFailure = errors.New("probe observed a plugin lifecycle exception")
+			}
+		case "METADATA_INSPECTION":
+			if _, _, err := decodeMetadataInspection(envelope.Data); err != nil {
+				return events, err
 			}
 		case "SERVER_READY":
 			if ok, err := requiredBoolean(envelope.Data, "requirementsSatisfied"); err != nil {
@@ -540,6 +588,7 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 				lifecycleFailure = errors.New("server stopped without the probe-requested clean shutdown")
 			}
 		}
+		previousEnvelope = envelope
 	}
 	if nextRequired != len(requiredProbeOrder) {
 		return events, fmt.Errorf("missing required probe event %s", requiredProbeOrder[nextRequired])
@@ -575,6 +624,9 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 			lifecycleFailure = fmt.Errorf("missing successful requirement result for %q", name)
 		}
 	}
+	if lifecycleFailure != nil && authoritativeClassification != "" {
+		return events, &probeLifecycleFailure{code: authoritativeClassification, err: lifecycleFailure}
+	}
 	return events, lifecycleFailure
 }
 
@@ -602,30 +654,147 @@ func decodeProbeEnvelope(payload json.RawMessage) (probeEnvelope, error) {
 	return envelope, nil
 }
 
-func decodeRequirement(data json.RawMessage) (string, bool, error) {
+type probeRequirement struct {
+	role       string
+	name       string
+	configured bool
+	loaded     bool
+	enabled    bool
+}
+
+func (r probeRequirement) satisfied() bool {
+	return r.configured && r.loaded && r.enabled
+}
+
+func decodeRequirement(data json.RawMessage) (probeRequirement, error) {
 	var requirement struct {
+		Role       string `json:"role"`
 		Name       string `json:"name"`
 		Configured *bool  `json:"configured"`
 		Loaded     *bool  `json:"loaded"`
 		Enabled    *bool  `json:"enabled"`
 	}
 	if err := json.Unmarshal(data, &requirement); err != nil || requirement.Name == "" || requirement.Configured == nil || requirement.Loaded == nil || requirement.Enabled == nil {
-		return "", false, errors.New("TARGET_REQUIREMENT is missing authoritative status fields")
+		return probeRequirement{}, errors.New("TARGET_REQUIREMENT is missing authoritative status fields")
 	}
-	return requirement.Name, *requirement.Configured && *requirement.Loaded && *requirement.Enabled, nil
+	if requirement.Role != "TARGET" && requirement.Role != "REQUIRED_DEPENDENCY" {
+		return probeRequirement{}, errors.New("TARGET_REQUIREMENT contains an unsupported role")
+	}
+	if !*requirement.Configured {
+		return probeRequirement{}, errors.New("TARGET_REQUIREMENT reports an unconfigured alpha requirement")
+	}
+	if !*requirement.Loaded && *requirement.Enabled {
+		return probeRequirement{}, errors.New("TARGET_REQUIREMENT reports an enabled requirement that was not loaded")
+	}
+	return probeRequirement{role: requirement.Role, name: requirement.Name, configured: *requirement.Configured, loaded: *requirement.Loaded, enabled: *requirement.Enabled}, nil
 }
 
 func classificationCode(data json.RawMessage) (string, error) {
-	var classification struct {
-		Code string `json:"code"`
-	}
-	if err := json.Unmarshal(data, &classification); err != nil {
+	code, err := requiredString(data, "code")
+	if err != nil {
 		return "", errors.New("CLASSIFICATION contains an invalid code")
 	}
-	if _, allowed := allowedClassificationCodes[classification.Code]; !allowed {
+	schema, allowed := allowedClassificationCodes[code]
+	if !allowed {
 		return "", errors.New("CLASSIFICATION contains an unsupported code")
 	}
-	return classification.Code, nil
+	category, err := requiredString(data, "category")
+	if err != nil || category != schema.category {
+		return "", errors.New("CLASSIFICATION contains an invalid category")
+	}
+	stage, err := requiredString(data, "stage")
+	if err != nil || stage != schema.stage {
+		return "", errors.New("CLASSIFICATION contains an invalid stage")
+	}
+	retryable, err := requiredBoolean(data, "retryable")
+	if err != nil || retryable {
+		return "", errors.New("CLASSIFICATION contains an invalid retryable value")
+	}
+	return code, nil
+}
+
+func validateClassificationEvidence(code string, data json.RawMessage, previous probeEnvelope) error {
+	switch code {
+	case "on_load_failure", "on_enable_failure":
+		if previous.Type != "LIFECYCLE_EXCEPTION" {
+			return fmt.Errorf("classification %s has no preceding lifecycle exception", code)
+		}
+		phase, plugin, err := decodeLifecycleException(previous.Data)
+		if err != nil {
+			return err
+		}
+		wantPhase := "LOAD"
+		if code == "on_enable_failure" {
+			wantPhase = "ENABLE"
+		}
+		classifiedPlugin, err := requiredString(data, "plugin")
+		if err != nil || phase != wantPhase || classifiedPlugin != plugin {
+			return fmt.Errorf("classification %s conflicts with lifecycle exception evidence", code)
+		}
+	case "plugin_not_found", "missing_required_dependency", "failed_required_dependency":
+		if previous.Type != "TARGET_REQUIREMENT" {
+			return fmt.Errorf("classification %s has no preceding requirement evidence", code)
+		}
+		requirement, err := decodeRequirement(previous.Data)
+		if err != nil {
+			return err
+		}
+		plugin, pluginErr := requiredString(data, "plugin")
+		role, roleErr := requiredString(data, "role")
+		if pluginErr != nil || roleErr != nil || plugin != requirement.name || role != requirement.role {
+			return fmt.Errorf("classification %s conflicts with requirement identity", code)
+		}
+		valid := code == "plugin_not_found" && requirement.role == "TARGET" && requirement.configured && !requirement.loaded && !requirement.enabled ||
+			code == "missing_required_dependency" && requirement.role == "REQUIRED_DEPENDENCY" && requirement.configured && !requirement.loaded && !requirement.enabled ||
+			code == "failed_required_dependency" && requirement.role == "REQUIRED_DEPENDENCY" && requirement.configured && requirement.loaded && !requirement.enabled
+		if !valid {
+			return fmt.Errorf("classification %s conflicts with requirement status", code)
+		}
+	case "invalid_metadata":
+		if previous.Type != "METADATA_INSPECTION" {
+			return errors.New("classification invalid_metadata has no preceding metadata inspection")
+		}
+		artifact, status, err := decodeMetadataInspection(previous.Data)
+		classifiedArtifact, artifactErr := requiredString(data, "artifact")
+		if err != nil || artifactErr != nil || status == "VALID" || classifiedArtifact != artifact {
+			return errors.New("classification invalid_metadata conflicts with metadata inspection evidence")
+		}
+	case "invalid_test_plan":
+		if previous.Type != "TEST_PLAN" {
+			return errors.New("classification invalid_test_plan has no preceding test plan evidence")
+		}
+		status, statusErr := requiredString(previous.Data, "status")
+		issue, issueErr := requiredString(previous.Data, "issue")
+		classifiedIssue, classificationErr := requiredString(data, "issue")
+		if statusErr != nil || issueErr != nil || classificationErr != nil || status != "INVALID" || issue != classifiedIssue {
+			return errors.New("classification invalid_test_plan conflicts with test plan evidence")
+		}
+	}
+	return nil
+}
+
+func decodeLifecycleException(data json.RawMessage) (string, string, error) {
+	phase, err := requiredString(data, "phase")
+	if err != nil || (phase != "LOAD" && phase != "ENABLE") {
+		return "", "", errors.New("LIFECYCLE_EXCEPTION contains an invalid phase")
+	}
+	plugin, err := requiredString(data, "plugin")
+	if err != nil {
+		return "", "", errors.New("LIFECYCLE_EXCEPTION contains an invalid plugin")
+	}
+	return phase, plugin, nil
+}
+
+func decodeMetadataInspection(data json.RawMessage) (string, string, error) {
+	artifact, err := requiredString(data, "artifact")
+	if err != nil {
+		return "", "", errors.New("METADATA_INSPECTION contains an invalid artifact")
+	}
+	status, err := requiredString(data, "status")
+	if err != nil || (status != "VALID" && status != "MISSING" && status != "INVALID") {
+		return "", "", errors.New("METADATA_INSPECTION contains an invalid status")
+	}
+	return artifact, status, nil
 }
 
 func requiredString(data json.RawMessage, field string) (string, error) {

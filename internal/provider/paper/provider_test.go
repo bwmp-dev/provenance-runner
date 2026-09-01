@@ -73,6 +73,9 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 		t.Errorf("workload does not preserve reserved wrapper exit 125: %#v", workload.Arguments)
 	}
 	joinedArguments := strings.Join(workload.Arguments, "\x00")
+	if strings.Contains(joinedArguments, "provenance.fixture.hostile.enabled") {
+		t.Fatalf("default workload enabled hostile fixtures: %#v", workload.Arguments)
+	}
 	for _, expected := range []string{
 		"/runtime/bin/java",
 		"-Xms256M",
@@ -134,6 +137,62 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 		if count != 1 {
 			t.Errorf("request count for %s = %d", path, count)
 		}
+	}
+}
+
+func TestPrepareEnablesHostileFixturesOnlyFromTrustedProviderConfig(t *testing.T) {
+	runtimeArchive := testRuntimeArchive(t, "test-jre")
+	payloads := map[string][]byte{
+		"/paper":  []byte("pinned Paper server"),
+		"/java":   runtimeArchive,
+		"/target": []byte("hostile fixture jar"),
+		"/probe":  []byte("safe Paper probe jar"),
+	}
+	server, _ := artifactServer(t, payloads)
+	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{}}
+	provider := testProvider(t, server, sandbox, payloads, "test-jre")
+	provider.config.AllowHostileFixtures = true
+	config := validConfiguration(server.URL, payloads)
+	config.Dependencies = nil
+	config.TestPlan.RequiredDependencies = nil
+
+	environment := resolveTestEnvironment(t, provider, "hostile-fixture-job", config)
+	prepared, err := environment.Prepare(context.Background())
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := prepared.Cleanup(context.Background()); err != nil {
+			t.Errorf("Cleanup() error = %v", err)
+		}
+	})
+	arguments := sandbox.lastWorkload().Arguments
+	const property = "-Dprovenance.fixture.hostile.enabled=true"
+	count := 0
+	for _, argument := range arguments {
+		if argument == property {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("hostile fixture property count = %d, arguments = %#v", count, arguments)
+	}
+}
+
+func TestRemoteEnvironmentCannotEnableHostileFixtures(t *testing.T) {
+	provider, server, payloads := validationTestProvider(t)
+	config := validConfiguration(server.URL, payloads)
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded[:len(encoded)-1], []byte(`,"allowHostileFixtures":true}`)...)
+	if _, err := provider.Resolve(context.Background(), execution.Request{
+		JobID:       "remote-hostile-fixture-attempt",
+		Environment: encoded,
+		Limits:      execution.Limits{MaxOutputBytes: 1 << 20},
+	}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("Resolve(remote hostile opt-in) error = %v", err)
 	}
 }
 
@@ -285,7 +344,7 @@ func TestExecutorClassifiesFailedProbeAssertionWhenJVMExitsZero(t *testing.T) {
 	}
 	server, _ := artifactServer(t, payloads)
 	output := happyProbeOutput()
-	replaceProbeEvent(t, &output, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
+	replaceProbeEvent(t, &output, "TARGET_REQUIREMENT", `{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
 	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{output: &output}}
 	provider := testProvider(t, server, sandbox, payloads, "test-jre")
 	config := validConfiguration(server.URL, payloads)
@@ -308,6 +367,43 @@ func TestExecutorClassifiesFailedProbeAssertionWhenJVMExitsZero(t *testing.T) {
 		MaxOutputBytes: 1 << 20,
 	})
 	if result.Execution == nil || result.Execution.ExitCode == nil || *result.Execution.ExitCode != 0 || result.Classification != execution.ClassificationWorkloadFailure || result.Failure == nil || result.Failure.Code != "paper_lifecycle_failed" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestExecutorPreservesValidatedProbeFailureCode(t *testing.T) {
+	payloads := map[string][]byte{
+		"/paper": []byte("Paper"), "/java": testRuntimeArchive(t, "test-jre"), "/target": []byte("target"), "/probe": []byte("probe"),
+	}
+	server, _ := artifactServer(t, payloads)
+	output := happyProbeOutput()
+	failure := []execution.StructuredEvent{
+		probeStructuredEvent(5, "LIFECYCLE_EXCEPTION", `{"phase":"LOAD","plugin":"SuccessFixture"}`),
+		probeStructuredEvent(6, "CLASSIFICATION", `{"code":"on_load_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
+	}
+	output.StructuredEvents = append(output.StructuredEvents[:4], append(failure, output.StructuredEvents[4:]...)...)
+	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{output: &output}}
+	provider := testProvider(t, server, sandbox, payloads, "test-jre")
+	config := validConfiguration(server.URL, payloads)
+	config.Dependencies = nil
+	config.TestPlan.RequiredDependencies = nil
+	environmentJSON, _ := json.Marshal(config)
+	registry, err := execution.NewRegistry(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := execution.NewExecutor(registry, execution.ExecutorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(context.Background(), localjob.Job{
+		SchemaVersion:  localjob.SchemaVersion,
+		ID:             "paper-probe-classification",
+		Provider:       ProviderName,
+		Environment:    environmentJSON,
+		MaxOutputBytes: 1 << 20,
+	})
+	if result.Classification != execution.ClassificationWorkloadFailure || result.Failure == nil || result.Failure.Code != "on_load_failure" {
 		t.Fatalf("result = %#v", result)
 	}
 }
@@ -780,8 +876,8 @@ func happyProbeOutput() execution.CollectedOutput {
 		probeStructuredEvent(2, "PROBE_LOADED", `{}`),
 		probeStructuredEvent(3, "SERVER_LOADED", `{}`),
 		probeStructuredEvent(4, "STABILIZATION_STARTED", `{}`),
-		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
-		probeStructuredEvent(6, "TARGET_REQUIREMENT", `{"name":"DependencyFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(5, "TARGET_REQUIREMENT", `{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":true,"enabled":true}`),
+		probeStructuredEvent(6, "TARGET_REQUIREMENT", `{"role":"REQUIRED_DEPENDENCY","name":"DependencyFixture","configured":true,"loaded":true,"enabled":true}`),
 		probeStructuredEvent(7, "STABILIZATION_COMPLETED", `{}`),
 		probeStructuredEvent(8, "SERVER_READY", `{"requirementsSatisfied":true}`),
 		probeStructuredEvent(9, "CLEAN_SHUTDOWN_REQUESTED", `{}`),

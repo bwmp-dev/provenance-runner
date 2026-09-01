@@ -41,6 +41,49 @@ func TestOperatorCatalogRejectsAWellFormedButUnpinnedProbe(t *testing.T) {
 	}
 }
 
+func TestLocalHostileFixtureOptInIsStrict(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+		valid bool
+	}{
+		{value: "", valid: true},
+		{value: "false", valid: true},
+		{value: "true", want: true, valid: true},
+		{value: "TRUE"},
+		{value: "1"},
+		{value: " true"},
+		{value: "yes"},
+	} {
+		t.Run(fmt.Sprintf("value_%q", test.value), func(t *testing.T) {
+			got, err := localHostileFixturesOptIn(func(name string) string {
+				if name == localHostileFixturesEnvironment {
+					return test.value
+				}
+				return ""
+			})
+			if (err == nil) != test.valid || got != test.want {
+				t.Fatalf("localHostileFixturesOptIn() = %v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestConnectedRegistryDoesNotReadLocalHostileFixtureOptIn(t *testing.T) {
+	registry, err := registryForProvider(context.Background(), "development-process", func(name string) string {
+		if name == localHostileFixturesEnvironment {
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("registryForProvider() error = %v", err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestPaperRegistrySelectsOperatorConfiguredProvider(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("gVisor provider construction requires Linux")
@@ -217,8 +260,8 @@ func paperEnvironment(t *testing.T) map[string]string {
 	}
 	values := map[string]string{
 		"PROVENANCE_PAPER_PROBE_URI":                           "https://artifacts.example.com/paper-probe.jar",
-		"PROVENANCE_PAPER_PROBE_SHA256":                        "cc981edc49a1fc27a920c3e39415428d3897eb878e748a6ad2b708972ef6e082",
-		"PROVENANCE_PAPER_PROBE_SIZE_BYTES":                    "462392",
+		"PROVENANCE_PAPER_PROBE_SHA256":                        "abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43",
+		"PROVENANCE_PAPER_PROBE_SIZE_BYTES":                    "478837",
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_URI":                "https://artifacts.example.com/prepared-runtime.tar.gz",
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256":             strings.Repeat("b", 64),
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_SIZE_BYTES":         "2048",
