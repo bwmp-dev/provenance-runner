@@ -31,38 +31,41 @@ func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(arguments) != 2 {
-		writeUsage(stderr)
-		return 2
-	}
-	if arguments[0] == "connect" {
+	if len(arguments) == 2 && arguments[0] == "connect" {
 		return runConnect(ctx, arguments[1], stderr)
 	}
-	if arguments[0] != "execute" {
-		writeUsage(stderr)
-		return 2
+	if len(arguments) == 2 && arguments[0] == "execute" {
+		return runExecuteContext(ctx, arguments[1], stdin, stdout, stderr, os.Getenv, registryForLocalExecution)
 	}
-	return runExecuteContext(ctx, arguments[1], stdin, stdout, stderr, os.Getenv, registryForLocalExecution)
+	if len(arguments) == 4 && arguments[0] == "execute" && arguments[2] == "--complete-log" && arguments[3] != "" {
+		return runExecuteWithCompleteLogContext(ctx, arguments[1], arguments[3], stdin, stdout, stderr, os.Getenv, registryForLocalExecution)
+	}
+	writeUsage(stderr)
+	return 2
 }
 
 type localRegistryFactory func(context.Context, string, environmentLookup) (*providerRegistry, error)
 
 func runExecuteContext(ctx context.Context, jobPath string, stdin io.Reader, stdout, stderr io.Writer, lookup environmentLookup, registryFactory localRegistryFactory) int {
+	return runExecuteWithCompleteLogContext(ctx, jobPath, "", stdin, stdout, stderr, lookup, registryFactory)
+}
+
+func runExecuteWithCompleteLogContext(ctx context.Context, jobPath, completeLogPath string, stdin io.Reader, stdout, stderr io.Writer, lookup environmentLookup, registryFactory localRegistryFactory) int {
 	jobData, err := readJob(jobPath, stdin)
 	if err != nil {
-		return writeResult(stdout, execution.FailedResult("", execution.PhaseValidation, execution.ClassificationInvalidJob, "job_read_failed", err))
+		return writeResultAndCompleteLog(stdout, stderr, execution.FailedResult("", execution.PhaseValidation, execution.ClassificationInvalidJob, "job_read_failed", err), completeLogPath)
 	}
 	job, err := localjob.Decode(jobData)
 	if err != nil {
-		return writeResult(stdout, execution.FailedResult("", execution.PhaseValidation, execution.ClassificationInvalidJob, "invalid_job", err))
+		return writeResultAndCompleteLog(stdout, stderr, execution.FailedResult("", execution.PhaseValidation, execution.ClassificationInvalidJob, "invalid_job", err), completeLogPath)
 	}
 
 	registry, err := registryFactory(ctx, job.Provider, lookup)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
-			return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationCancelled, "job_cancelled", ctx.Err()))
+			return writeResultAndCompleteLog(stdout, stderr, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationCancelled, "job_cancelled", ctx.Err()), completeLogPath)
 		}
-		return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err))
+		return writeResultAndCompleteLog(stdout, stderr, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err), completeLogPath)
 	}
 	defer func() {
 		if err := registry.Close(); err != nil {
@@ -71,10 +74,10 @@ func runExecuteContext(ctx context.Context, jobPath string, stdin io.Reader, std
 	}()
 	executor, err := execution.NewExecutor(registry.Registry, execution.ExecutorOptions{})
 	if err != nil {
-		return writeResult(stdout, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err))
+		return writeResultAndCompleteLog(stdout, stderr, execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err), completeLogPath)
 	}
 
-	return writeResult(stdout, executor.Execute(ctx, job))
+	return writeResultAndCompleteLog(stdout, stderr, executor.Execute(ctx, job), completeLogPath)
 }
 
 func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {
@@ -121,6 +124,7 @@ func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {
 
 func writeUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "usage: provenance-runner execute <job.json|->")
+	fmt.Fprintln(writer, "       provenance-runner execute <job.json|-> --complete-log <new-path>")
 	fmt.Fprintln(writer, "       provenance-runner connect <connect.json>")
 }
 

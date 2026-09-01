@@ -8,6 +8,12 @@ The current alpha accepts one bounded local job document and emits one structure
 go run ./cmd/provenance-runner execute job.json
 ```
 
+On Linux filesystems that support `O_TMPFILE`, local execution can export the exact sanitized gzip evidence payload to a new owner-only file. Non-Linux platforms and filesystems without secure unnamed temporary files are rejected. The destination must not already exist, and parent directories are not created:
+
+```sh
+go run ./cmd/provenance-runner execute job.json --complete-log result.log.gz
+```
+
 Hosted connect mode consumes a strict config and maintains a private atomic one-job journal beside it:
 
 ```sh
