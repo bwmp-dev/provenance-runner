@@ -373,6 +373,39 @@ func TestCollectorAcceptsConcurrentRawStreams(t *testing.T) {
 	}
 }
 
+func TestCollectorLiveSinkReceivesOnlyNormalizedRedactedBoundedLines(t *testing.T) {
+	collector := newTestCollector(t, Config{MaxLineBytes: 12, MaxTotalBytes: 1 << 20, Secrets: []string{"cross-boundary-secret"}})
+	var entries []LiveEntry
+	collector.SetLiveSink(func(entry LiveEntry) { entries = append(entries, entry) })
+	writer := rawWriter(t, collector, StreamStdout)
+	for _, chunk := range [][]byte{
+		[]byte("\x1b[31mcross-"), []byte("boundary-secret\x1b[0m\n"),
+		{'b', 'a', 'd', 0xff, '\n'}, []byte("partial"),
+	} {
+		if _, err := writer.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = snapshot(t, collector)
+	if len(entries) != 3 {
+		t.Fatalf("live entries = %#v", entries)
+	}
+	if got := string(entries[0].Data); !strings.Contains(got, RedactionMarker) || strings.Contains(got, "secret") || !entries[0].Redacted || entries[0].Partial {
+		t.Fatalf("redacted entry = %#v", entries[0])
+	}
+	if !utf8.Valid(entries[1].Data) || !bytes.Contains(entries[1].Data, []byte("\uFFFD")) || entries[1].Redacted || entries[1].Partial {
+		t.Fatalf("normalized invalid UTF-8 entry = %#v", entries[1])
+	}
+	if string(entries[2].Data) != "partial" || !entries[2].Partial {
+		t.Fatalf("partial entry = %#v", entries[2])
+	}
+	for _, entry := range entries {
+		if bytes.Contains(entry.Data, []byte("\x1b")) {
+			t.Fatalf("ANSI leaked in %#v", entry)
+		}
+	}
+}
+
 func TestCollectorRejectsUnsafeConfiguration(t *testing.T) {
 	tests := []Config{
 		{MaxTotalBytes: MaximumTotalBytes + 1},

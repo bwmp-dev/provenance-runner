@@ -33,6 +33,7 @@ type clientSession struct {
 	acknowledgedHeartbeats map[string]*runnerv1.RunnerMessage
 	acknowledgedHBOrder    []string
 	heartbeatDeferred      bool
+	generation             uint64
 }
 
 type settledRunnerEvent struct {
@@ -916,8 +917,17 @@ func (s *clientSession) queueRenewal(now time.Time) error {
 }
 
 func (s *clientSession) handleWorkerEvent(event workerEvent) error {
+	if event.evidence != nil {
+		return s.sendWorkerEvidence(event.evidence)
+	}
 	if event.result != nil {
 		s.client.markWorkerStopped()
+		if event.finalEvidence != nil {
+			_ = s.sendWorkerEvidence(event.finalEvidence)
+		}
+		if event.finalUsage != nil {
+			_ = s.sendWorkerEvidence(event.finalUsage)
+		}
 	}
 	state := s.client.journal.snapshot()
 	if state.Active == nil {
@@ -1047,6 +1057,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		return err
 	}
 	var completeLog *runnerv1.LogObject
+	usage := resultResourceUsage(result)
 	if target := s.client.completeLogTarget(lease, attempt); target != nil {
 		ctx := s.rootContext
 		if ctx == nil {
@@ -1060,6 +1071,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		if err != nil {
 			failed := &runnerv1.JobFailed{
 				Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(result.CompletedAt),
+				Usage: usage,
 				Failure: &runnerv1.FailureDetail{
 					Category:  runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE,
 					Stage:     runnerv1.FailureStage_FAILURE_STAGE_RESULT_UPLOAD,
@@ -1076,7 +1088,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		if result.Passed() {
 			outcome = runnerv1.ResultOutcome_RESULT_OUTCOME_PASSED
 		}
-		structured := &runnerv1.StructuredResult{Outcome: outcome, CompleteLog: completeLog, StartedAt: timestamppb.New(result.StartedAt), CompletedAt: timestamppb.New(result.CompletedAt)}
+		structured := &runnerv1.StructuredResult{Outcome: outcome, Usage: usage, CompleteLog: completeLog, StartedAt: timestamppb.New(result.StartedAt), CompletedAt: timestamppb.New(result.CompletedAt)}
 		if result.Execution != nil && result.Execution.ExitCode != nil {
 			value := int32(*result.Execution.ExitCode)
 			structured.ProcessExitCode = &value
@@ -1085,8 +1097,15 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		return s.queueDurable(&runnerv1.RunnerMessage_Completed{Completed: completed}, nil)
 	}
 	failure := resultFailure(result)
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, CompleteLog: completeLog, FailedAt: timestamppb.New(result.CompletedAt)}
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, Usage: usage, CompleteLog: completeLog, FailedAt: timestamppb.New(result.CompletedAt)}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+}
+
+func resultResourceUsage(result execution.Result) *runnerv1.ResourceUsage {
+	if result.Usage.MeasuredResources == nil {
+		return nil
+	}
+	return resourceUsageMessage(*result.Usage.MeasuredResources)
 }
 
 func closeCompleteLog(completeLog *execution.CompleteLog) {
@@ -1153,6 +1172,8 @@ func (c *Client) startWorker(ctx context.Context) error {
 		return err
 	}
 	workerContext, cancel := context.WithCancel(ctx)
+	observer := newLiveExecutionObserver(c, specification)
+	workerContext = execution.WithObserver(workerContext, observer)
 	c.workerRunning = true
 	c.workerCancel = cancel
 	c.workerWG.Add(1)
@@ -1173,8 +1194,12 @@ func (c *Client) startWorker(ctx context.Context) error {
 				return startContext.Err()
 			}
 		})
+		var finalUsage *workerEvidenceEvent
+		if result.Usage.MeasuredResources != nil {
+			finalUsage = observer.finalUsageEvent(*result.Usage.MeasuredResources)
+		}
 		select {
-		case c.workerEvents <- workerEvent{result: &result}:
+		case c.workerEvents <- workerEvent{result: &result, finalEvidence: observer.finalDroppedEvent(), finalUsage: finalUsage}:
 		case <-ctx.Done():
 			closeCompleteLog(result.CompleteLog)
 		}

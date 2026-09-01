@@ -462,11 +462,23 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 
 type preparedEnvironment struct {
 	mu          sync.Mutex
+	usageMu     sync.Mutex
 	provider    *Provider
 	containerID string
 	bundle      string
 	evidence    *evidence.Collector
 	cleaned     bool
+	observer    execution.ExecutionObserver
+	usage       execution.ResourceUsage
+}
+
+func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
+	e.usageMu.Lock()
+	e.observer = observer
+	e.usageMu.Unlock()
+	e.evidence.SetLiveSink(func(entry evidence.LiveEntry) {
+		observer.ObserveLog(execution.LiveLogEntry{Stream: string(entry.Stream), Data: entry.Data, Partial: entry.Partial, Redacted: entry.Redacted})
+	})
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
@@ -481,12 +493,18 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	if err := e.markRunAttempted(); err != nil {
 		return execution.ExecutionOutcome{}, fmt.Errorf("mark gVisor run attempted: %w", err)
 	}
+	stopSampling := make(chan struct{})
+	samplingDone := make(chan struct{})
+	go e.sampleUsageUntil(stopSampling, samplingDone)
 	result := e.provider.runner.Run(ctx, command{
 		Path:   e.provider.config.RunscPath,
 		Args:   e.provider.runArguments("run", "--bundle="+e.bundle, e.containerID),
 		Stdout: stdout,
 		Stderr: stderr,
 	})
+	close(stopSampling)
+	<-samplingDone
+	e.sampleUsage()
 	if ctx.Err() != nil {
 		killContext, cancelKill := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancelKill()
@@ -516,6 +534,9 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		return execution.CollectedOutput{}, err
 	}
 	bundle, err := e.evidence.Snapshot(ctx)
+	e.usageMu.Lock()
+	usage := e.usage
+	e.usageMu.Unlock()
 	events := make([]execution.StructuredEvent, len(bundle.Events))
 	for index, event := range bundle.Events {
 		events[index] = execution.StructuredEvent{Sequence: event.Sequence, Kind: event.Kind, Payload: append([]byte(nil), event.Payload...)}
@@ -552,6 +573,7 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			EventsTruncated:      bundle.Usage.EventsTruncated,
 		},
 		StructuredEventError: bundle.StructuredEventError,
+		ResourceUsage:        &usage,
 	}, err
 }
 

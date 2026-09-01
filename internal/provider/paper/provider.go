@@ -622,6 +622,12 @@ type preparedEnvironment struct {
 	plan              testPlan
 }
 
+func (p *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
+	if delegate, ok := p.delegate.(execution.ObserverAttacher); ok {
+		delegate.AttachObserver(observer)
+	}
+}
+
 func (p *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
 	if p.delegate == nil {
 		return execution.ExecutionOutcome{}, errors.New("execute Paper environment: sandbox was not prepared")

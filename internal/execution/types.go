@@ -109,6 +109,38 @@ type PreparedEnvironment interface {
 	Cleanup(context.Context) error
 }
 
+// ExecutionObserver receives already-sanitized live evidence and measurements
+// taken by the provider. Implementations must return immediately: workload
+// output and sandbox execution are never backpressured by a remote consumer.
+type ExecutionObserver interface {
+	ObserveLog(LiveLogEntry)
+	ObserveUsage(ResourceUsage)
+}
+
+// ObserverAttacher is optional. Providers implement it when they can expose
+// their sanitized evidence stream and measured resource counters.
+type ObserverAttacher interface {
+	AttachObserver(ExecutionObserver)
+}
+
+type LiveLogEntry struct {
+	Stream   string
+	Data     []byte
+	Partial  bool
+	Redacted bool
+}
+
+// ResourceUsage contains cumulative measurements only. A zero field means the
+// provider cannot measure that dimension; callers must not derive a substitute.
+type ResourceUsage struct {
+	CPUTime              time.Duration
+	PeakMemoryBytes      uint64
+	DiskReadBytes        uint64
+	DiskWriteBytes       uint64
+	NetworkReceiveBytes  uint64
+	NetworkTransmitBytes uint64
+}
+
 type ExecutionOutcome struct {
 	ExitCode *int
 	Failure  *Failure
@@ -124,6 +156,7 @@ type CollectedOutput struct {
 	CompleteLog          *CompleteLog
 	EvidenceUsage        EvidenceUsage
 	StructuredEventError string
+	ResourceUsage        *ResourceUsage
 }
 
 type StructuredEvent struct {
@@ -248,6 +281,7 @@ type UsageResult struct {
 	CompleteLogState          string         `json:"completeLogState,omitempty"`
 	CompleteLogTruncated      bool           `json:"completeLogTruncated,omitempty"`
 	StructuredEventsTruncated bool           `json:"structuredEventsTruncated,omitempty"`
+	MeasuredResources         *ResourceUsage `json:"measuredResources,omitempty"`
 }
 
 func (r Result) Passed() bool {

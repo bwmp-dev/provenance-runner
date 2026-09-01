@@ -1,0 +1,37 @@
+package gvisor
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/bwmp-dev/provenance-runner/internal/execution"
+)
+
+func TestReadCgroupUsageUsesMeasuredCumulativeCounters(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"cpu.stat":    "usage_usec 123456\nuser_usec 100000\nsystem_usec 23456\n",
+		"memory.peak": "987654\n",
+		"io.stat":     "8:0 rbytes=10 wbytes=20 rios=1 wios=2\n8:1 rbytes=30 wbytes=40\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	usage, ok := readCgroupUsageRoot(root)
+	if !ok || usage.CPUTime != 123456*time.Microsecond || usage.PeakMemoryBytes != 987654 || usage.DiskReadBytes != 40 || usage.DiskWriteBytes != 60 || usage.NetworkReceiveBytes != 0 || usage.NetworkTransmitBytes != 0 {
+		t.Fatalf("usage = %#v available=%v", usage, ok)
+	}
+}
+
+func TestMergeMeasuredUsageNeverMovesCumulativeCountersBackward(t *testing.T) {
+	current := execution.ResourceUsage{CPUTime: 2 * time.Second, PeakMemoryBytes: 20, DiskReadBytes: 30, DiskWriteBytes: 40}
+	if mergeMeasuredUsage(&current, execution.ResourceUsage{CPUTime: time.Second, PeakMemoryBytes: 10, DiskReadBytes: 50}) != true {
+		t.Fatal("increasing disk counter was not detected")
+	}
+	if current.CPUTime != 2*time.Second || current.PeakMemoryBytes != 20 || current.DiskReadBytes != 50 || current.DiskWriteBytes != 40 {
+		t.Fatalf("merged usage = %#v", current)
+	}
+}

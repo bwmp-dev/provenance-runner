@@ -157,6 +157,13 @@ type Bundle struct {
 	StructuredEventError string
 }
 
+type LiveEntry struct {
+	Stream   Stream
+	Data     []byte
+	Partial  bool
+	Redacted bool
+}
+
 func validateEvent(input EventInput, maximumBytes int64) error {
 	if input.Kind == "" {
 		return errors.New("record structured event: kind is empty")
