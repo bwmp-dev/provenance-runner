@@ -16,20 +16,20 @@ import (
 )
 
 func TestRunscSmoke(t *testing.T) {
+	if os.Getenv("PROVENANCE_RUNSC_SMOKE") != "1" {
+		t.Skip("set PROVENANCE_RUNSC_SMOKE=1 to opt in to the real sandbox smoke test")
+	}
 	runscPath := os.Getenv("PROVENANCE_RUNSC_PATH")
 	if runscPath == "" {
 		runscPath = "runsc"
 	}
 	resolvedRunsc, err := exec.LookPath(runscPath)
 	if err != nil {
-		t.Skipf("runsc is absent (%v); install gVisor and set PROVENANCE_RUNSC_PATH to enable the real sandbox smoke test", err)
-	}
-	if os.Getenv("PROVENANCE_RUNSC_SMOKE") != "1" {
-		t.Skip("runsc is available; set PROVENANCE_RUNSC_SMOKE=1 to opt in to the real sandbox smoke test")
+		t.Fatalf("PROVENANCE_RUNSC_SMOKE=1 requires runsc (%v)", err)
 	}
 	rootFS := os.Getenv("PROVENANCE_RUNSC_ROOTFS")
 	if rootFS == "" {
-		t.Skip("set PROVENANCE_RUNSC_ROOTFS to a disposable Linux root filesystem containing /bin/sh")
+		t.Fatal("PROVENANCE_RUNSC_SMOKE=1 requires PROVENANCE_RUNSC_ROOTFS containing /bin/sh")
 	}
 
 	temporaryRoot := t.TempDir()
@@ -59,7 +59,7 @@ func TestRunscSmoke(t *testing.T) {
 		Network:     "none",
 		MemoryBytes: 128 << 20,
 		CPUMillis:   500,
-		PIDs:        16,
+		PIDs:        64,
 		DiskBytes:   8 << 20,
 	}
 	content, err := json.Marshal(config)
@@ -87,16 +87,16 @@ func TestRunscSmoke(t *testing.T) {
 			t.Errorf("Cleanup() error = %v", err)
 		}
 	}()
-	outcome, err := prepared.Execute(ctx)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	outcome, executeErr := prepared.Execute(ctx)
+	output, collectErr := prepared.Collect(ctx)
+	if executeErr != nil {
+		t.Fatalf("Execute() error = %v; stdout=%q stderr=%q; Collect() error = %v", executeErr, output.Stdout, output.Stderr, collectErr)
+	}
+	if collectErr != nil {
+		t.Fatalf("Collect() error = %v", collectErr)
 	}
 	if outcome.Failure != nil {
-		t.Fatalf("Execute() failure = %#v", outcome.Failure)
-	}
-	output, err := prepared.Collect(ctx)
-	if err != nil {
-		t.Fatalf("Collect() error = %v", err)
+		t.Fatalf("Execute() failure = %#v; stdout=%q stderr=%q", outcome.Failure, output.Stdout, output.Stderr)
 	}
 	if !strings.Contains(output.Stdout, "gvisor-smoke-ok") {
 		t.Fatalf("sandbox output did not confirm containment checks; stdout=%q stderr=%q", output.Stdout, output.Stderr)

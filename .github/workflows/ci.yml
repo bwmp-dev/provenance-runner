@@ -24,9 +24,116 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
-      - name: Report gVisor smoke availability
-        run: go test -v -run '^TestRunscSmoke$' ./internal/provider/gvisor
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - name: Build
         run: go build ./cmd/provenance-runner
+
+  gvisor-smoke:
+    runs-on: ubuntu-latest
+    env:
+      GVISOR_NIGHTLY: 2026-08-30
+      GVISOR_SHA512: e8eb6473e5a27316df551cbb40e5626e51df1b602bde2621f77d851c2c53b0387e282c7ebc0ee80ceb07a26e152e67b4af3e17550009e2c486e2f19666570449
+      ALPINE_RELEASE: 3.24.1
+      ALPINE_SHA512: de367c4fd4b5a2ab17f30fe62b135b98acd76c22014abdf51285588bde0edb7275265a84400418a5dab8cbdec36b3a41ca1312ca3af8e54438036455f26d72c1
+      PROVENANCE_RUNSC_SMOKE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install pinned gVisor build
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gvisor-x86_64.tar.bz2"
+          install_root="/opt/provenance-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install_dir="${install_root}/gvisor"
+          echo "PROVENANCE_INSTALL_ROOT=${install_root}" >> "${GITHUB_ENV}"
+          curl --fail --location --silent --show-error \
+            --output "${archive}" \
+            "https://storage.googleapis.com/gvisor/releases/nightly/${GVISOR_NIGHTLY}/x86_64/gvisor.tar.bz2"
+          printf '%s  %s\n' "${GVISOR_SHA512}" "${archive}" | sha512sum --check --strict -
+          sudo mkdir --parents "${install_dir}"
+          sudo tar --extract --bzip2 --file "${archive}" --directory "${install_dir}"
+          sudo chmod --recursive a+rX "${install_root}"
+          sudo find "${install_dir}/gvisor-bin" -type f -exec chmod a+rx {} +
+          sudo -u nobody test -x "${install_dir}/runsc"
+          while IFS= read -r -d '' helper; do
+            sudo -u nobody test -x "${helper}"
+          done < <(find "${install_dir}/gvisor-bin" -type f -print0)
+          "${install_dir}/runsc" --version
+          wrapper="${install_dir}/runsc-provenance-smoke"
+          # Per-run gofer namespaces avoid a persistent shared null-netns mount in the ephemeral test state root.
+          printf '#!/bin/sh\nexec "%s/runsc" --gofer-network-namespace=new "$@"\n' "${install_dir}" | sudo tee "${wrapper}" > /dev/null
+          sudo chmod 0755 "${wrapper}"
+          echo "PROVENANCE_RUNSC_PATH=${wrapper}" >> "${GITHUB_ENV}"
+      - name: Prepare pinned Alpine root filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
+          rootfs="${PROVENANCE_INSTALL_ROOT}/alpine-rootfs"
+          curl --fail --location --silent --show-error \
+            --output "${archive}" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
+          printf '%s  %s\n' "${ALPINE_SHA512}" "${archive}" | sha512sum --check --strict -
+          sudo mkdir --parents "${rootfs}"
+          sudo tar --extract --gzip --file "${archive}" --directory "${rootfs}"
+          sudo -u nobody test -x "${rootfs}/bin/sh"
+          echo "PROVENANCE_RUNSC_ROOTFS=${rootfs}" >> "${GITHUB_ENV}"
+      - name: Compile gVisor smoke test
+        run: go test -c -o "${RUNNER_TEMP}/gvisor-smoke.test" ./internal/provider/gvisor
+      - name: Prepare delegated cgroup subtree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cgroup_parent="/sys/fs/cgroup/provenance-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo mkdir --parents "${cgroup_parent}/runner"
+          controllers=$(< /sys/fs/cgroup/cgroup.controllers)
+          if [[ -n "${controllers}" ]]; then
+            printf '+%s\n' "${controllers// / +}" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+          fi
+          controllers=$(< "${cgroup_parent}/cgroup.controllers")
+          if [[ -n "${controllers}" ]]; then
+            printf '+%s\n' "${controllers// / +}" | sudo tee "${cgroup_parent}/cgroup.subtree_control" > /dev/null
+          fi
+          echo "PROVENANCE_CGROUP_PARENT=${cgroup_parent}" >> "${GITHUB_ENV}"
+      - name: Run real gVisor smoke test
+        shell: bash
+        run: |
+          sudo --preserve-env=PROVENANCE_RUNSC_SMOKE,PROVENANCE_RUNSC_PATH,PROVENANCE_RUNSC_ROOTFS,PROVENANCE_CGROUP_PARENT \
+            bash -c 'printf "%s\n" "$$" > "${PROVENANCE_CGROUP_PARENT}/runner/cgroup.procs"; exec "$@"' bash \
+            "${RUNNER_TEMP}/gvisor-smoke.test" \
+            -test.v \
+            -test.run '^TestRunscSmoke$' \
+            -test.count=1 \
+            -test.timeout=60s
+      - name: Remove delegated cgroup subtree
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROVENANCE_CGROUP_PARENT:-}" ]]; then
+            exit 0
+          fi
+          if [[ ! "${PROVENANCE_CGROUP_PARENT}" =~ ^/sys/fs/cgroup/provenance-ci-[0-9]+-[0-9]+$ ]]; then
+            echo "refusing to remove unexpected cgroup path: ${PROVENANCE_CGROUP_PARENT}" >&2
+            exit 1
+          fi
+          sudo find "${PROVENANCE_CGROUP_PARENT}" -mindepth 1 -depth -type d -exec rmdir {} +
+          sudo rmdir "${PROVENANCE_CGROUP_PARENT}"
+      - name: Remove installed smoke assets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROVENANCE_INSTALL_ROOT:-}" ]]; then
+            exit 0
+          fi
+          if [[ ! "${PROVENANCE_INSTALL_ROOT}" =~ ^/opt/provenance-ci-[0-9]+-[0-9]+$ ]]; then
+            echo "refusing to remove unexpected install path: ${PROVENANCE_INSTALL_ROOT}" >&2
+            exit 1
+          fi
+          sudo rm --recursive --force -- "${PROVENANCE_INSTALL_ROOT}"
