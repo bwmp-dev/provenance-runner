@@ -68,10 +68,7 @@ func readCgroupUsage(containerID string) (execution.ResourceUsage, bool) {
 	if !ok {
 		return execution.ResourceUsage{}, false
 	}
-	for _, root := range []string{
-		filepath.Clean(filepath.Join("/sys/fs/cgroup", relative, "provenance", containerID)),
-		filepath.Clean(filepath.Join("/sys/fs/cgroup", "provenance", containerID)),
-	} {
+	for _, root := range cgroupUsageRoots(relative, containerID) {
 		if !strings.HasPrefix(root, "/sys/fs/cgroup/") {
 			continue
 		}
@@ -80,6 +77,14 @@ func readCgroupUsage(containerID string) (execution.ResourceUsage, bool) {
 		}
 	}
 	return execution.ResourceUsage{}, false
+}
+
+func cgroupUsageRoots(relative, containerID string) []string {
+	return []string{
+		filepath.Clean(filepath.Join("/sys/fs/cgroup", relative, "provenance", containerID)),
+		filepath.Clean(filepath.Join("/sys/fs/cgroup", filepath.Dir(relative), "provenance", containerID)),
+		filepath.Clean(filepath.Join("/sys/fs/cgroup", "provenance", containerID)),
+	}
 }
 
 func readCgroupUsageRoot(root string) (execution.ResourceUsage, bool) {

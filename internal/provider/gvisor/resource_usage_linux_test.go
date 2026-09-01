@@ -9,6 +9,14 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 )
 
+func TestCgroupUsageRootsIncludeDelegatedSibling(t *testing.T) {
+	roots := cgroupUsageRoots("/provenance-ci-1/runner", "container")
+	want := "/sys/fs/cgroup/provenance-ci-1/provenance/container"
+	if len(roots) != 3 || roots[1] != want {
+		t.Fatalf("roots = %#v, want delegated sibling %q", roots, want)
+	}
+}
+
 func TestReadCgroupUsageUsesMeasuredCumulativeCounters(t *testing.T) {
 	root := t.TempDir()
 	for name, content := range map[string]string{

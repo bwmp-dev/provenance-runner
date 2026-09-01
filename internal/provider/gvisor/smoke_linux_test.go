@@ -73,6 +73,7 @@ func TestRunscSmoke(t *testing.T) {
 			DiskBytes:   8 << 20,
 		}
 		prepared := prepareSmokeEnvironment(t, provider, "smoke", config)
+		defer cleanupSmokeEnvironment(t, prepared)
 		containerID := prepared.containerID
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
