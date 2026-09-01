@@ -306,6 +306,9 @@ validate_result() {
     jq -e --argjson timeout "$timeout" '.usage.wallTimeMilliseconds >= $timeout' "$result" >/dev/null
   fi
   case "$fixture" in
+    enable-hang)
+      grep -Fq 'Enabling ProvenanceEnableHang' "$decompressed"
+      ;;
     memory-bomb)
       grep -Eq 'oom_kill [1-9][0-9]*' "$samples"
       grep -Fq 'Enabling ProvenanceMemoryBomb' "$decompressed"
