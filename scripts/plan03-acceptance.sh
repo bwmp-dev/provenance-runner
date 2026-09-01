@@ -283,7 +283,7 @@ validate_result() {
     '(
       if $fixture=="fork-pid-bomb" then
         ((.classification=="passed" and .phase=="completed" and (.failure // null)==null and .execution.exitCode==0) or
-         (.classification=="workload_failure" and .phase=="execution" and .failure.code=="gvisor_process_exit_nonzero" and .execution.exitCode>0))
+         (.classification=="workload_failure" and .phase=="execution" and .failure.code=="gvisor_process_exit_nonzero" and .execution.exitCode==2))
       else
         (.classification==$classification and .phase==$phase and ((.failure.code // "-")==$code) and (.execution.exitCode==$exitCode))
       end
@@ -339,6 +339,17 @@ validate_result() {
         ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
         (([.[] | denied] | max) > 0 or longest_saturation >= 10000000000)
       ' "$samples" >/dev/null
+      if jq -e '.classification=="workload_failure"' "$result" >/dev/null; then
+        # A JVM exit caused by PID denial is acceptable only after the actual
+        # target plugin started, Paper became ready, and shutdown began. Bind
+        # this outcome to an observed kernel denial rather than generic load.
+        grep -Fq '[ProvenanceForkPidBomb] Enabling ProvenanceForkPidBomb' "$decompressed"
+        grep -Fq 'Done (' "$decompressed"
+        grep -Fq 'Stopping server' "$decompressed"
+        jq -es '([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0' "$samples" >/dev/null
+      else
+        jq -e '.structuredEvents[] | select(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.enabled==true)' "$result" >/dev/null
+      fi
       ;;
     disk-fill)
       grep -Fq 'No space left on device' "$decompressed"
@@ -568,8 +579,10 @@ while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classificat
 
   expected_status=1
   [[ "$classification" == passed ]] && expected_status=0
-  if [[ "$fixture" == fork-pid-bomb && ( "$status" -eq 0 || "$status" -eq 1 ) ]]; then
-    : # PID denial may either preserve a clean JVM shutdown or terminate the workload.
+  if [[ "$fixture" == fork-pid-bomb && "$status" -eq 0 ]]; then
+    jq -e '.classification=="passed"' "$result" >/dev/null
+  elif [[ "$fixture" == fork-pid-bomb && "$status" -eq 1 ]]; then
+    jq -e '.classification=="workload_failure"' "$result" >/dev/null
   elif [[ "$status" -ne "$expected_status" ]]; then
     printf '%s exit status=%s, want %s\n' "$fixture" "$status" "$expected_status" >&2
     exit 1
