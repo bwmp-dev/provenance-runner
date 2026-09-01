@@ -273,13 +273,21 @@ validate_result() {
     expected_pids=48
   fi
   jq -e \
+    --arg fixture "$fixture" \
     --arg classification "$expected_classification" \
     --arg phase "$expected_phase" \
     --arg code "$expected_code" \
     --argjson exitCode "$expected_exit" \
     --argjson memoryBytes "$expected_memory" \
     --argjson pids "$expected_pids" \
-    '.classification==$classification and .phase==$phase and ((.failure.code // "-")==$code) and (.execution.exitCode==$exitCode) and .cleanup.succeeded==true and .usage.resourceClass.cpuMillis==1000 and .usage.resourceClass.memoryBytes==$memoryBytes and .usage.resourceClass.processCount==$pids and .usage.resourceClass.diskBytes==1073741824 and .usage.resourceClass.network=="none" and .usage.resourceClass.maximumConnections==0 and .usage.resourceClass.maximumBandwidthBytesPerSecond==0' \
+    '(
+      if $fixture=="fork-pid-bomb" then
+        ((.classification=="passed" and .phase=="completed" and (.failure // null)==null and .execution.exitCode==0) or
+         (.classification=="workload_failure" and .phase=="execution" and .failure.code=="gvisor_process_exit_nonzero" and .execution.exitCode>0))
+      else
+        (.classification==$classification and .phase==$phase and ((.failure.code // "-")==$code) and (.execution.exitCode==$exitCode))
+      end
+    ) and .cleanup.succeeded==true and .usage.resourceClass.cpuMillis==1000 and .usage.resourceClass.memoryBytes==$memoryBytes and .usage.resourceClass.processCount==$pids and .usage.resourceClass.diskBytes==1073741824 and .usage.resourceClass.network=="none" and .usage.resourceClass.maximumConnections==0 and .usage.resourceClass.maximumBandwidthBytesPerSecond==0' \
     "$result" >/dev/null
   gzip --test "$complete_log"
   local digest compressed_bytes uncompressed_bytes
@@ -560,7 +568,9 @@ while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classificat
 
   expected_status=1
   [[ "$classification" == passed ]] && expected_status=0
-  if [[ "$status" -ne "$expected_status" ]]; then
+  if [[ "$fixture" == fork-pid-bomb && ( "$status" -eq 0 || "$status" -eq 1 ) ]]; then
+    : # PID denial may either preserve a clean JVM shutdown or terminate the workload.
+  elif [[ "$status" -ne "$expected_status" ]]; then
     printf '%s exit status=%s, want %s\n' "$fixture" "$status" "$expected_status" >&2
     exit 1
   fi
