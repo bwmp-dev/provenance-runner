@@ -16,20 +16,20 @@ import (
 )
 
 func TestRunscSmoke(t *testing.T) {
+	if os.Getenv("PROVENANCE_RUNSC_SMOKE") != "1" {
+		t.Skip("set PROVENANCE_RUNSC_SMOKE=1 to opt in to the real sandbox smoke test")
+	}
 	runscPath := os.Getenv("PROVENANCE_RUNSC_PATH")
 	if runscPath == "" {
 		runscPath = "runsc"
 	}
 	resolvedRunsc, err := exec.LookPath(runscPath)
 	if err != nil {
-		t.Skipf("runsc is absent (%v); install gVisor and set PROVENANCE_RUNSC_PATH to enable the real sandbox smoke test", err)
-	}
-	if os.Getenv("PROVENANCE_RUNSC_SMOKE") != "1" {
-		t.Skip("runsc is available; set PROVENANCE_RUNSC_SMOKE=1 to opt in to the real sandbox smoke test")
+		t.Fatalf("PROVENANCE_RUNSC_SMOKE=1 requires runsc (%v)", err)
 	}
 	rootFS := os.Getenv("PROVENANCE_RUNSC_ROOTFS")
 	if rootFS == "" {
-		t.Skip("set PROVENANCE_RUNSC_ROOTFS to a disposable Linux root filesystem containing /bin/sh")
+		t.Fatal("PROVENANCE_RUNSC_SMOKE=1 requires PROVENANCE_RUNSC_ROOTFS containing /bin/sh")
 	}
 
 	temporaryRoot := t.TempDir()

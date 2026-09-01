@@ -71,6 +71,6 @@ The Paper provider's `AdaptJob` boundary consumes the released runner `JobSpecif
 
 ## Current evidence limits
 
-Unit and hosted CI exercise preparation, bounded evidence, quotas, download policy, cleanup, and gVisor bundle construction. The hosted gVisor smoke test skips when `runsc` is absent. There is not yet live Paper/JVM, hostile-fixture, or real runsc execution evidence for this slice.
+Unit and hosted CI exercise preparation, bounded evidence, quotas, download policy, cleanup, and gVisor bundle construction. A dedicated hosted CI job verifies checksum-pinned gVisor and Alpine root filesystem archives, then executes the real `runsc` containment and cleanup smoke test without allowing missing prerequisites to skip. There is not yet live Paper/JVM or hostile-fixture execution evidence for this slice.
 
 Probe lifecycle output is bounded and fails closed on missing, malformed, duplicate, out-of-order, or failed assertions. It is not cryptographically attributable: the tested plugin shares the JVM and sandbox UID and could attempt to forge or modify the reserved event channel.

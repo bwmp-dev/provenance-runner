@@ -24,9 +24,63 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
-      - name: Report gVisor smoke availability
-        run: go test -v -run '^TestRunscSmoke$' ./internal/provider/gvisor
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - name: Build
         run: go build ./cmd/provenance-runner
+
+  gvisor-smoke:
+    runs-on: ubuntu-latest
+    env:
+      GVISOR_RELEASE: release-20260817.0
+      GVISOR_SHA512: bd8271a7742f90e53373b2a8613f37f3ae2c765ff5e2e611a75a47167a323cab7519b149c50273307743491713525a14ad1b3e398651c93b16f3e248dfeff3dd
+      ALPINE_RELEASE: 3.24.1
+      ALPINE_SHA512: de367c4fd4b5a2ab17f30fe62b135b98acd76c22014abdf51285588bde0edb7275265a84400418a5dab8cbdec36b3a41ca1312ca3af8e54438036455f26d72c1
+      PROVENANCE_RUNSC_SMOKE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install pinned gVisor release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gvisor-x86_64.tar.bz2"
+          install_dir="${RUNNER_TEMP}/gvisor"
+          curl --fail --location --silent --show-error \
+            --output "${archive}" \
+            "https://github.com/google/gvisor/releases/download/${GVISOR_RELEASE}/gvisor-x86_64.tar.bz2"
+          printf '%s  %s\n' "${GVISOR_SHA512}" "${archive}" | sha512sum --check --strict -
+          mkdir --parents "${install_dir}"
+          tar --extract --bzip2 --file "${archive}" --directory "${install_dir}"
+          chmod --recursive a+rX "${install_dir}"
+          test -x "${install_dir}/runsc"
+          "${install_dir}/runsc" --version
+          echo "PROVENANCE_RUNSC_PATH=${install_dir}/runsc" >> "${GITHUB_ENV}"
+      - name: Prepare pinned Alpine root filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
+          rootfs="${RUNNER_TEMP}/alpine-rootfs"
+          curl --fail --location --silent --show-error \
+            --output "${archive}" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
+          printf '%s  %s\n' "${ALPINE_SHA512}" "${archive}" | sha512sum --check --strict -
+          mkdir --parents "${rootfs}"
+          sudo tar --extract --gzip --file "${archive}" --directory "${rootfs}"
+          sudo test -x "${rootfs}/bin/sh"
+          echo "PROVENANCE_RUNSC_ROOTFS=${rootfs}" >> "${GITHUB_ENV}"
+      - name: Compile gVisor smoke test
+        run: go test -c -o "${RUNNER_TEMP}/gvisor-smoke.test" ./internal/provider/gvisor
+      - name: Run real gVisor smoke test
+        shell: bash
+        run: |
+          sudo --preserve-env=PROVENANCE_RUNSC_SMOKE,PROVENANCE_RUNSC_PATH,PROVENANCE_RUNSC_ROOTFS \
+            "${RUNNER_TEMP}/gvisor-smoke.test" \
+            -test.v \
+            -test.run '^TestRunscSmoke$' \
+            -test.count=1 \
+            -test.timeout=60s
