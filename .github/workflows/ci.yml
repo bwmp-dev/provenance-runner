@@ -32,8 +32,8 @@ jobs:
   gvisor-smoke:
     runs-on: ubuntu-latest
     env:
-      GVISOR_RELEASE: release-20260817.0
-      GVISOR_SHA512: bd8271a7742f90e53373b2a8613f37f3ae2c765ff5e2e611a75a47167a323cab7519b149c50273307743491713525a14ad1b3e398651c93b16f3e248dfeff3dd
+      GVISOR_NIGHTLY: 2026-08-30
+      GVISOR_SHA512: e8eb6473e5a27316df551cbb40e5626e51df1b602bde2621f77d851c2c53b0387e282c7ebc0ee80ceb07a26e152e67b4af3e17550009e2c486e2f19666570449
       ALPINE_RELEASE: 3.24.1
       ALPINE_SHA512: de367c4fd4b5a2ab17f30fe62b135b98acd76c22014abdf51285588bde0edb7275265a84400418a5dab8cbdec36b3a41ca1312ca3af8e54438036455f26d72c1
       PROVENANCE_RUNSC_SMOKE: "1"
@@ -43,7 +43,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Install pinned gVisor release
+      - name: Install pinned gVisor build
         shell: bash
         run: |
           set -euo pipefail
@@ -51,7 +51,7 @@ jobs:
           install_dir="${RUNNER_TEMP}/gvisor"
           curl --fail --location --silent --show-error \
             --output "${archive}" \
-            "https://github.com/google/gvisor/releases/download/${GVISOR_RELEASE}/gvisor-x86_64.tar.bz2"
+            "https://storage.googleapis.com/gvisor/releases/nightly/${GVISOR_NIGHTLY}/x86_64/gvisor.tar.bz2"
           printf '%s  %s\n' "${GVISOR_SHA512}" "${archive}" | sha512sum --check --strict -
           mkdir --parents "${install_dir}"
           tar --extract --bzip2 --file "${archive}" --directory "${install_dir}"
