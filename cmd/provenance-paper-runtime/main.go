@@ -24,6 +24,12 @@ func main() {
 }
 
 func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
+	return runWithPaperclip(ctx, arguments, stdout, stderr, paper.AlphaCatalog().Paper.Artifact, preparePaperclip)
+}
+
+type paperclipPreparer func(context.Context, string, string, string, io.Writer) error
+
+func runWithPaperclip(ctx context.Context, arguments []string, stdout, stderr io.Writer, pin paper.ArtifactPin, prepare paperclipPreparer) error {
 	flags := flag.NewFlagSet("provenance-paper-runtime", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var paperPath string
@@ -50,27 +56,19 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) erro
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect output path: %w", err)
 	}
-	if err := verifyAlphaPaper(paperPath); err != nil {
-		return err
-	}
-	resolvedJava, err := exec.LookPath(javaPath)
-	if err != nil {
-		return fmt.Errorf("resolve Java executable: %w", err)
-	}
 	stage, err := os.MkdirTemp("", "provenance-paper-runtime-")
 	if err != nil {
 		return fmt.Errorf("create preparation directory: %w", err)
 	}
 	defer os.RemoveAll(stage)
-	absolutePaper, err := filepath.Abs(paperPath)
-	if err != nil {
-		return fmt.Errorf("resolve Paper JAR: %w", err)
+	stagedPaper := filepath.Join(stage, "paper.jar")
+	if err := stageVerifiedPaper(ctx, paperPath, stagedPaper, pin); err != nil {
+		return err
 	}
-	command := exec.CommandContext(ctx, resolvedJava, "-Dpaperclip.patchonly=true", "-jar", absolutePaper)
-	command.Dir = stage
-	command.Stdout = stderr
-	command.Stderr = stderr
-	if err := command.Run(); err != nil {
+	if prepare == nil {
+		return errors.New("prepare offline Paper runtime: command runner is nil")
+	}
+	if err := prepare(ctx, javaPath, stagedPaper, stage, stderr); err != nil {
 		return fmt.Errorf("prepare offline Paper runtime: %w", err)
 	}
 
@@ -102,26 +100,73 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) erro
 	return nil
 }
 
-func verifyAlphaPaper(path string) error {
-	file, err := os.Open(path)
+func stageVerifiedPaper(ctx context.Context, sourcePath, destinationPath string, pin paper.ArtifactPin) error {
+	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open Paper JAR: %w", err)
 	}
-	defer file.Close()
-	info, err := file.Stat()
+	defer source.Close()
+	info, err := source.Stat()
 	if err != nil {
 		return fmt.Errorf("inspect Paper JAR: %w", err)
 	}
-	catalog := paper.AlphaCatalog()
-	if !info.Mode().IsRegular() || info.Size() != catalog.Paper.Artifact.SizeBytes {
-		return fmt.Errorf("Paper JAR must be the %d-byte alpha artifact", catalog.Paper.Artifact.SizeBytes)
+	if !info.Mode().IsRegular() || info.Size() != pin.SizeBytes {
+		return fmt.Errorf("Paper JAR must be the %d-byte alpha artifact", pin.SizeBytes)
 	}
+	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create staged Paper JAR: %w", err)
+	}
+	keepDestination := false
+	defer func() {
+		if !keepDestination {
+			_ = os.Remove(destinationPath)
+		}
+	}()
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		return fmt.Errorf("hash Paper JAR: %w", err)
+	written, copyErr := io.Copy(io.MultiWriter(destination, hasher), &contextReader{ctx: ctx, reader: source})
+	if copyErr != nil {
+		return errors.Join(fmt.Errorf("stage Paper JAR: %w", copyErr), destination.Close())
 	}
-	if digest := hex.EncodeToString(hasher.Sum(nil)); digest != catalog.Paper.Artifact.SHA256 {
-		return fmt.Errorf("Paper JAR SHA-256 is %s, want %s", digest, catalog.Paper.Artifact.SHA256)
+	if written != pin.SizeBytes {
+		return errors.Join(fmt.Errorf("Paper JAR changed size while staging: received %d bytes, want %d", written, pin.SizeBytes), destination.Close())
 	}
+	if digest := hex.EncodeToString(hasher.Sum(nil)); digest != pin.SHA256 {
+		return errors.Join(fmt.Errorf("Paper JAR SHA-256 is %s, want %s", digest, pin.SHA256), destination.Close())
+	}
+	if err := destination.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("sync staged Paper JAR: %w", err), destination.Close())
+	}
+	if err := destination.Close(); err != nil {
+		return fmt.Errorf("close staged Paper JAR: %w", err)
+	}
+	if err := os.Chmod(destinationPath, 0o400); err != nil {
+		return fmt.Errorf("make staged Paper JAR read-only: %w", err)
+	}
+	keepDestination = true
 	return nil
+}
+
+func preparePaperclip(ctx context.Context, javaPath, paperPath, stage string, stderr io.Writer) error {
+	resolvedJava, err := exec.LookPath(javaPath)
+	if err != nil {
+		return fmt.Errorf("resolve Java executable: %w", err)
+	}
+	command := exec.CommandContext(ctx, resolvedJava, "-Dpaperclip.patchonly=true", "-jar", paperPath)
+	command.Dir = stage
+	command.Stdout = stderr
+	command.Stderr = stderr
+	return command.Run()
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(content []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(content)
 }
