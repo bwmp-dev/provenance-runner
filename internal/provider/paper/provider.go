@@ -375,6 +375,18 @@ func (e *environment) Identity() string {
 	return fmt.Sprintf("paper/%s/build-%d/paper-sha256:%s/%s/%s/java-sha256:%s/probe/%s/source-commit:%s/probe-sha256:%s/runtime-sha256:%s/delegate:%s", e.provider.catalog.Paper.GameVersion, e.provider.catalog.Paper.Build, e.provider.catalog.paperDigest, e.provider.catalog.Java.Distribution, e.provider.catalog.Java.Version, e.provider.catalog.javaDigest, e.provider.catalog.ProbeVersion, e.provider.catalog.ProbeSourceCommit, e.provider.catalog.probeDigest, e.provider.catalog.runtimeDigest, e.provider.config.Sandbox.Identity())
 }
 
+func (e *environment) ResourceClass() execution.ResourceClass {
+	return execution.ResourceClass{
+		CPUMillis:                      e.config.CPUMillis,
+		MemoryBytes:                    e.config.MemoryBytes,
+		ProcessCount:                   e.config.PIDs,
+		DiskBytes:                      e.config.DiskBytes,
+		Network:                        "none",
+		MaximumConnections:             0,
+		MaximumBandwidthBytesPerSecond: 0,
+	}
+}
+
 type acquiredArtifacts struct {
 	paper           *artifact.Entry
 	java            *artifact.Entry

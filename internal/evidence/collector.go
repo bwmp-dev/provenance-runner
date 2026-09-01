@@ -2,10 +2,7 @@ package evidence
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,20 +16,17 @@ type Collector struct {
 	snapshotMu           sync.Mutex
 	config               Config
 	processors           map[Stream]*rawProcessor
-	stdout               bytes.Buffer
-	stderr               bytes.Buffer
-	tail                 []rawTail
-	tailBytes            int64
+	live                 boundedOutput
+	complete             *archiveSpool
 	events               []StructuredEvent
 	eventBytes           int64
 	rawObserved          int64
-	captured             int64
 	truncatedLines       int64
-	totalTruncated       bool
 	eventsTruncated      bool
 	structuredEventError string
 	closed               bool
 	snapshot             *Bundle
+	snapshotErr          error
 }
 
 type rawTail struct {
@@ -40,8 +34,22 @@ type rawTail struct {
 	bytes  int64
 }
 
+type boundedOutput struct {
+	stdout    bytes.Buffer
+	stderr    bytes.Buffer
+	tail      []rawTail
+	tailBytes int64
+	captured  int64
+	maximum   int64
+	truncated bool
+}
+
 func NewCollector(config Config) (*Collector, error) {
 	validated, err := config.withDefaults()
+	if err != nil {
+		return nil, fmt.Errorf("create evidence collector: %w", err)
+	}
+	complete, err := newArchiveSpool(validated.MaxCompleteLogBytes)
 	if err != nil {
 		return nil, fmt.Errorf("create evidence collector: %w", err)
 	}
@@ -49,6 +57,8 @@ func NewCollector(config Config) (*Collector, error) {
 		config:     validated,
 		processors: make(map[Stream]*rawProcessor, 2),
 		events:     make([]StructuredEvent, 0, validated.MaxEvents),
+		live:       boundedOutput{maximum: validated.MaxTotalBytes},
+		complete:   complete,
 	}
 	collector.processors[StreamStdout] = newRawProcessor(collector, StreamStdout, validated)
 	collector.processors[StreamStderr] = newRawProcessor(collector, StreamStderr, validated)
@@ -100,7 +110,7 @@ func (c *Collector) Snapshot(ctx context.Context) (Bundle, error) {
 	c.snapshotMu.Lock()
 	defer c.snapshotMu.Unlock()
 	if c.snapshot != nil {
-		return cloneBundle(*c.snapshot), nil
+		return cloneBundle(*c.snapshot), c.snapshotErr
 	}
 
 	c.mu.Lock()
@@ -110,55 +120,61 @@ func (c *Collector) Snapshot(ctx context.Context) (Bundle, error) {
 	c.processors[StreamStderr].finish()
 
 	c.mu.Lock()
-	stdout := c.stdout.String()
-	stderr := c.stderr.String()
-	complete := completeLogContent(c.stdout.Bytes(), c.stderr.Bytes())
+	stdout := c.live.stdout.String()
+	stderr := c.live.stderr.String()
 	events := append([]StructuredEvent(nil), c.events...)
 	for index := range events {
 		events[index].Payload = append([]byte(nil), events[index].Payload...)
 	}
 	usage := Usage{
 		RawBytesObserved:     c.rawObserved,
-		CapturedBytes:        c.captured,
+		CapturedBytes:        c.live.captured,
 		StructuredEventCount: int64(len(events)),
 		StructuredEventBytes: c.eventBytes,
 		TruncatedLineCount:   c.truncatedLines,
-		OutputTruncated:      c.totalTruncated || c.truncatedLines > 0,
+		OutputTruncated:      c.live.truncated || c.truncatedLines > 0,
 		EventsTruncated:      c.eventsTruncated,
 	}
 	c.mu.Unlock()
 
-	compressed, err := compressCompleteLog(ctx, complete)
-	if err != nil {
-		return Bundle{}, err
-	}
-	digest := sha256.Sum256(compressed)
-	usage.CompleteLogBytes = int64(len(complete))
-	usage.CompressedLogBytes = int64(len(compressed))
+	completeLog, archiveErr := c.complete.finalize(ctx)
+	usage.CompleteLogBytes = completeLog.UncompressedBytes
+	usage.CompressedLogBytes = completeLog.CompressedBytes
+	usage.CompleteLogState = completeLog.State
+	usage.CompleteLogTruncated = completeLog.Truncated
 	bundle := Bundle{
-		Stdout: stdout,
-		Stderr: stderr,
-		Events: events,
-		CompleteLog: CompleteLog{
-			ContentType:       "text/plain; charset=utf-8",
-			ContentEncoding:   "gzip",
-			SHA256:            hex.EncodeToString(digest[:]),
-			UncompressedBytes: int64(len(complete)),
-			CompressedBytes:   int64(len(compressed)),
-			Data:              compressed,
-		},
+		Stdout:               stdout,
+		Stderr:               stderr,
+		Events:               events,
+		CompleteLog:          completeLog,
 		Usage:                usage,
 		StructuredEventError: c.structuredEventError,
 	}
 	c.snapshot = &bundle
-	return cloneBundle(bundle), nil
+	c.snapshotErr = archiveErr
+	return cloneBundle(bundle), archiveErr
+}
+
+// Close releases any source spools left behind when collection could not run.
+// A successfully finalized compressed archive is owned by the returned bundle
+// and is intentionally not closed here.
+func (c *Collector) Close() error {
+	c.snapshotMu.Lock()
+	defer c.snapshotMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	if c.snapshot == nil && c.complete != nil {
+		c.complete.discardSources()
+	}
+	return nil
 }
 
 func (c *Collector) observeRawBytes(count int64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.rawObserved += count
-	return c.totalTruncated
+	return c.live.truncated
 }
 
 func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated bool) {
@@ -186,20 +202,10 @@ func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated bool) 
 	if lineTruncated {
 		c.truncatedLines++
 	}
-	if c.totalTruncated {
-		return
-	}
-	remaining := c.config.MaxTotalBytes - c.captured
-	if int64(len(line)) > remaining {
-		line = c.truncateTotal(line)
-		c.totalTruncated = true
-	}
-	if len(line) == 0 {
-		return
-	}
-	c.captured += int64(len(line))
-	c.appendStream(stream, line)
-	c.trackTail(stream, int64(len(line)))
+	// The disk-spooled complete archive and bounded live projection deliberately
+	// receive the same normalized, ANSI-free, redacted line.
+	c.complete.append(stream, line)
+	c.live.append(stream, line)
 }
 
 func rawContentLength(line []byte) int64 {
@@ -230,16 +236,33 @@ func (c *Collector) setStructuredEventError(message string) {
 	}
 }
 
-func (c *Collector) truncateTotal(content []byte) []byte {
+func (o *boundedOutput) append(stream Stream, content []byte) {
+	if o.truncated {
+		return
+	}
+	remaining := o.maximum - o.captured
+	if int64(len(content)) > remaining {
+		content = o.truncateTotal(content)
+		o.truncated = true
+	}
+	if len(content) == 0 {
+		return
+	}
+	o.captured += int64(len(content))
+	o.appendStream(stream, content)
+	o.trackTail(stream, int64(len(content)))
+}
+
+func (o *boundedOutput) truncateTotal(content []byte) []byte {
 	marker := []byte(TotalTruncationMarker)
-	if int64(len(marker)) > c.config.MaxTotalBytes {
-		marker = marker[:c.config.MaxTotalBytes]
+	if int64(len(marker)) > o.maximum {
+		marker = marker[:o.maximum]
 	}
-	target := c.config.MaxTotalBytes - int64(len(marker))
-	if c.captured > target {
-		c.removeTail(c.captured - target)
+	target := o.maximum - int64(len(marker))
+	if o.captured > target {
+		o.removeTail(o.captured - target)
 	}
-	remaining := target - c.captured
+	remaining := target - o.captured
 	prefix := content[:min(int(remaining), len(content))]
 	for len(prefix) > 0 && !utf8.Valid(prefix) {
 		prefix = prefix[:len(prefix)-1]
@@ -250,67 +273,67 @@ func (c *Collector) truncateTotal(content []byte) []byte {
 	return result
 }
 
-func (c *Collector) appendStream(stream Stream, content []byte) {
+func (o *boundedOutput) appendStream(stream Stream, content []byte) {
 	switch stream {
 	case StreamStdout:
-		_, _ = c.stdout.Write(content)
+		_, _ = o.stdout.Write(content)
 	case StreamStderr:
-		_, _ = c.stderr.Write(content)
+		_, _ = o.stderr.Write(content)
 	}
 }
 
-func (c *Collector) trackTail(stream Stream, count int64) {
+func (o *boundedOutput) trackTail(stream Stream, count int64) {
 	if count == 0 {
 		return
 	}
-	c.tail = append(c.tail, rawTail{stream: stream, bytes: count})
-	c.tailBytes += count
+	o.tail = append(o.tail, rawTail{stream: stream, bytes: count})
+	o.tailBytes += count
 	maximum := int64(len(TotalTruncationMarker))
-	for c.tailBytes > maximum && len(c.tail) > 0 {
-		excess := c.tailBytes - maximum
-		if c.tail[0].bytes <= excess {
-			c.tailBytes -= c.tail[0].bytes
-			c.tail = c.tail[1:]
+	for o.tailBytes > maximum && len(o.tail) > 0 {
+		excess := o.tailBytes - maximum
+		if o.tail[0].bytes <= excess {
+			o.tailBytes -= o.tail[0].bytes
+			o.tail = o.tail[1:]
 			continue
 		}
-		c.tail[0].bytes -= excess
-		c.tailBytes -= excess
+		o.tail[0].bytes -= excess
+		o.tailBytes -= excess
 	}
 }
 
-func (c *Collector) removeTail(count int64) {
-	for count > 0 && len(c.tail) > 0 {
-		last := c.tail[len(c.tail)-1]
+func (o *boundedOutput) removeTail(count int64) {
+	for count > 0 && len(o.tail) > 0 {
+		last := o.tail[len(o.tail)-1]
 		remove := min(count, last.bytes)
-		removed := c.truncateStream(last.stream, remove)
-		c.captured -= removed
+		removed := o.truncateStream(last.stream, remove)
+		o.captured -= removed
 		count -= removed
-		c.consumeTailMetadata(removed)
+		o.consumeTailMetadata(removed)
 		if removed == 0 {
 			return
 		}
 	}
 }
 
-func (c *Collector) consumeTailMetadata(count int64) {
-	for count > 0 && len(c.tail) > 0 {
-		lastIndex := len(c.tail) - 1
-		remove := min(count, c.tail[lastIndex].bytes)
-		c.tail[lastIndex].bytes -= remove
-		c.tailBytes -= remove
+func (o *boundedOutput) consumeTailMetadata(count int64) {
+	for count > 0 && len(o.tail) > 0 {
+		lastIndex := len(o.tail) - 1
+		remove := min(count, o.tail[lastIndex].bytes)
+		o.tail[lastIndex].bytes -= remove
+		o.tailBytes -= remove
 		count -= remove
-		if c.tail[lastIndex].bytes == 0 {
-			c.tail = c.tail[:lastIndex]
+		if o.tail[lastIndex].bytes == 0 {
+			o.tail = o.tail[:lastIndex]
 		}
 	}
 }
 
-func (c *Collector) truncateStream(stream Stream, count int64) int64 {
+func (o *boundedOutput) truncateStream(stream Stream, count int64) int64 {
 	var buffer *bytes.Buffer
 	if stream == StreamStdout {
-		buffer = &c.stdout
+		buffer = &o.stdout
 	} else {
-		buffer = &c.stderr
+		buffer = &o.stderr
 	}
 	originalLength := buffer.Len()
 	newLength := max(0, originalLength-int(count))
@@ -320,36 +343,6 @@ func (c *Collector) truncateStream(stream Stream, count int64) int64 {
 	}
 	buffer.Truncate(len(content))
 	return int64(originalLength - len(content))
-}
-
-func completeLogContent(stdout, stderr []byte) []byte {
-	var complete bytes.Buffer
-	appendStream := func(name string, content []byte) {
-		if len(content) == 0 {
-			return
-		}
-		_, _ = fmt.Fprintf(&complete, "[%s]\n", name)
-		_, _ = complete.Write(content)
-		if content[len(content)-1] != '\n' {
-			_ = complete.WriteByte('\n')
-		}
-	}
-	appendStream(string(StreamStdout), stdout)
-	appendStream(string(StreamStderr), stderr)
-	return complete.Bytes()
-}
-
-func compressCompleteLog(ctx context.Context, content []byte) ([]byte, error) {
-	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&contextWriter{ctx: ctx, writer: &compressed})
-	if _, err := writer.Write(content); err != nil {
-		writer.Close()
-		return nil, fmt.Errorf("compress complete log: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("compress complete log: %w", err)
-	}
-	return compressed.Bytes(), nil
 }
 
 type contextWriter struct {
@@ -369,6 +362,5 @@ func cloneBundle(bundle Bundle) Bundle {
 	for index := range bundle.Events {
 		bundle.Events[index].Payload = append([]byte(nil), bundle.Events[index].Payload...)
 	}
-	bundle.CompleteLog.Data = append([]byte(nil), bundle.CompleteLog.Data...)
 	return bundle
 }

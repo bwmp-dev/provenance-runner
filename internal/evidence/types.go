@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"unicode/utf8"
 )
@@ -11,12 +12,17 @@ import (
 const (
 	DefaultMaxLineBytes  int64 = 16 << 10
 	DefaultMaxTotalBytes int64 = 1 << 20
-	DefaultMaxEvents           = 1_024
-	DefaultMaxEventBytes int64 = 64 << 10
-	MaximumLineBytes     int64 = 1 << 20
-	MaximumTotalBytes    int64 = 64 << 20
-	MaximumEvents              = 1_024
-	MaximumEventBytes    int64 = 64 << 10
+	// Complete logs are spooled independently from the bounded live stdout and
+	// stderr projection. The operational boundary limits host disk exposure; it
+	// never turns the retained prefix into a purportedly complete archive.
+	DefaultMaxCompleteLogBytes int64 = 256 << 20
+	DefaultMaxEvents                 = 1_024
+	DefaultMaxEventBytes       int64 = 64 << 10
+	MaximumLineBytes           int64 = 1 << 20
+	MaximumTotalBytes          int64 = 64 << 20
+	MaximumCompleteLogBytes    int64 = 256 << 20
+	MaximumEvents                    = 1_024
+	MaximumEventBytes          int64 = 64 << 10
 )
 
 const (
@@ -35,6 +41,7 @@ const (
 type Config struct {
 	MaxLineBytes         int64
 	MaxTotalBytes        int64
+	MaxCompleteLogBytes  int64
 	MaxEvents            int
 	MaxEventBytes        int64
 	Secrets              []string
@@ -48,7 +55,7 @@ func ValidateConfig(config Config) error {
 }
 
 func (c Config) withDefaults() (Config, error) {
-	if c.MaxLineBytes < 0 || c.MaxTotalBytes < 0 || c.MaxEvents < 0 || c.MaxEventBytes < 0 {
+	if c.MaxLineBytes < 0 || c.MaxTotalBytes < 0 || c.MaxCompleteLogBytes < 0 || c.MaxEvents < 0 || c.MaxEventBytes < 0 {
 		return Config{}, errors.New("evidence limits cannot be negative")
 	}
 	if c.MaxLineBytes == 0 {
@@ -57,13 +64,16 @@ func (c Config) withDefaults() (Config, error) {
 	if c.MaxTotalBytes == 0 {
 		c.MaxTotalBytes = DefaultMaxTotalBytes
 	}
+	if c.MaxCompleteLogBytes == 0 {
+		c.MaxCompleteLogBytes = DefaultMaxCompleteLogBytes
+	}
 	if c.MaxEvents == 0 {
 		c.MaxEvents = DefaultMaxEvents
 	}
 	if c.MaxEventBytes == 0 {
 		c.MaxEventBytes = DefaultMaxEventBytes
 	}
-	if c.MaxLineBytes > MaximumLineBytes || c.MaxTotalBytes > MaximumTotalBytes || c.MaxEvents > MaximumEvents || c.MaxEventBytes > MaximumEventBytes {
+	if c.MaxLineBytes > MaximumLineBytes || c.MaxTotalBytes > MaximumTotalBytes || c.MaxCompleteLogBytes > MaximumCompleteLogBytes || c.MaxEvents > MaximumEvents || c.MaxEventBytes > MaximumEventBytes {
 		return Config{}, errors.New("evidence configuration exceeds supported limits")
 	}
 	if c.StructuredLinePrefix == "" && c.MaxLineBytes > c.MaxTotalBytes {
@@ -113,12 +123,15 @@ type StructuredEvent struct {
 }
 
 type CompleteLog struct {
+	State             string
+	Truncated         bool
+	Error             string
 	ContentType       string
 	ContentEncoding   string
 	SHA256            string
 	UncompressedBytes int64
 	CompressedBytes   int64
-	Data              []byte
+	Archive           *os.File
 }
 
 type Usage struct {
@@ -130,6 +143,8 @@ type Usage struct {
 	CompressedLogBytes   int64
 	TruncatedLineCount   int64
 	OutputTruncated      bool
+	CompleteLogState     string
+	CompleteLogTruncated bool
 	EventsTruncated      bool
 }
 

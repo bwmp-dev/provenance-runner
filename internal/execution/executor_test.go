@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,10 @@ import (
 )
 
 func TestExecutorSuccessfulLifecycle(t *testing.T) {
+	archive, err := os.CreateTemp(t.TempDir(), "complete-log-*.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var phases []string
 	var phasesMu sync.Mutex
 	record := func(phase string) {
@@ -37,12 +42,13 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 					Payload:  json.RawMessage(`{"ready":true}`),
 				}},
 				CompleteLog: &CompleteLog{
+					State:             "complete",
 					ContentType:       "text/plain; charset=utf-8",
 					ContentEncoding:   "gzip",
 					SHA256:            "digest",
 					UncompressedBytes: 6,
 					CompressedBytes:   10,
-					Data:              []byte("compressed"),
+					Archive:           archive,
 				},
 				EvidenceUsage: EvidenceUsage{
 					RawBytesObserved:     6,
@@ -89,7 +95,7 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 	if len(result.StructuredEvents) != 1 || result.StructuredEvents[0].Kind != "probe.ready" {
 		t.Fatalf("structured events = %#v", result.StructuredEvents)
 	}
-	if result.CompleteLog == nil || string(result.CompleteLog.Data) != "compressed" {
+	if result.CompleteLog == nil || result.CompleteLog.Archive != archive {
 		t.Fatalf("complete log = %#v", result.CompleteLog)
 	}
 	if result.Usage.StructuredEventCount != 1 || result.Usage.StructuredEventBytes != 14 || result.Usage.CompressedLogBytes != 10 {
@@ -106,6 +112,37 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 		if phases[index] != wantPhases[index] {
 			t.Fatalf("phases = %v, want %v", phases, wantPhases)
 		}
+	}
+}
+
+func TestExecutorReportsAllocatedResourceClass(t *testing.T) {
+	want := ResourceClass{
+		CPUMillis:                      1500,
+		MemoryBytes:                    2 << 30,
+		ProcessCount:                   64,
+		DiskBytes:                      4 << 30,
+		Network:                        "none",
+		MaximumConnections:             0,
+		MaximumBandwidthBytesPerSecond: 0,
+	}
+	provider := &fakeProvider{
+		name: "fake",
+		resolve: func(context.Context, Request) (Environment, error) {
+			return &resourceReportingEnvironment{
+				fakeEnvironment: &fakeEnvironment{
+					identity: "fake/constrained",
+					prepare: func(context.Context) (PreparedEnvironment, error) {
+						return &fakePrepared{}, nil
+					},
+				},
+				resourceClass: want,
+			}, nil
+		},
+	}
+
+	result := newTestExecutor(t, provider).Execute(context.Background(), validJob())
+	if !result.Passed() || result.Usage.ResourceClass == nil || *result.Usage.ResourceClass != want {
+		t.Fatalf("result = %#v", result)
 	}
 }
 
@@ -463,6 +500,15 @@ func (p *fakeProvider) Resolve(ctx context.Context, request Request) (Environmen
 type fakeEnvironment struct {
 	identity string
 	prepare  func(context.Context) (PreparedEnvironment, error)
+}
+
+type resourceReportingEnvironment struct {
+	*fakeEnvironment
+	resourceClass ResourceClass
+}
+
+func (e *resourceReportingEnvironment) ResourceClass() ResourceClass {
+	return e.resourceClass
 }
 
 func (e *fakeEnvironment) Identity() string {

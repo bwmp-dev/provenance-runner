@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -22,6 +23,8 @@ func TestValidateCompleteLogAcceptsExactBoundedGzip(t *testing.T) {
 func TestValidateCompleteLogRejectsMalformedTruncatedAndMismatchedGzip(t *testing.T) {
 	valid := completeLogFromContent(t, []byte("validated complete log"))
 	secondMember := completeLogFromContent(t, []byte("second member"))
+	validData := completeLogArchiveBytes(t, valid)
+	secondData := completeLogArchiveBytes(t, secondMember)
 	tests := []struct {
 		name    string
 		data    []byte
@@ -29,10 +32,10 @@ func TestValidateCompleteLogRejectsMalformedTruncatedAndMismatchedGzip(t *testin
 		message string
 	}{
 		{name: "malformed", data: []byte("not gzip"), length: 8, message: "decode gzip data"},
-		{name: "truncated", data: valid.Data[:len(valid.Data)-4], length: valid.UncompressedBytes, message: "decode gzip data"},
-		{name: "uncompressed length", data: valid.Data, length: valid.UncompressedBytes + 1, message: "uncompressed byte count"},
-		{name: "trailing bytes", data: append(append([]byte(nil), valid.Data...), 0), length: valid.UncompressedBytes, message: "trailing bytes or additional members"},
-		{name: "additional member", data: append(append([]byte(nil), valid.Data...), secondMember.Data...), length: valid.UncompressedBytes, message: "trailing bytes or additional members"},
+		{name: "truncated", data: validData[:len(validData)-4], length: valid.UncompressedBytes, message: "decode gzip data"},
+		{name: "uncompressed length", data: validData, length: valid.UncompressedBytes + 1, message: "uncompressed byte count"},
+		{name: "trailing bytes", data: append(append([]byte(nil), validData...), 0), length: valid.UncompressedBytes, message: "trailing bytes or additional members"},
+		{name: "additional member", data: append(append([]byte(nil), validData...), secondData...), length: valid.UncompressedBytes, message: "trailing bytes or additional members"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -76,13 +79,24 @@ func completeLogFromContent(t *testing.T, content []byte) *execution.CompleteLog
 
 func completeLogFromCompressed(data []byte, uncompressedBytes int64) *execution.CompleteLog {
 	digest := sha256.Sum256(data)
+	archive, err := os.CreateTemp("", "provenance-complete-log-validation-*.gz")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Remove(archive.Name()); err != nil {
+		panic(err)
+	}
+	if _, err := archive.Write(data); err != nil {
+		panic(err)
+	}
 	return &execution.CompleteLog{
+		State:             "complete",
 		ContentType:       completeLogContentType,
 		ContentEncoding:   completeLogContentEncoding,
 		SHA256:            hex.EncodeToString(digest[:]),
 		UncompressedBytes: uncompressedBytes,
 		CompressedBytes:   int64(len(data)),
-		Data:              append([]byte(nil), data...),
+		Archive:           archive,
 	}
 }
 

@@ -412,6 +412,19 @@ func (e *environment) Identity() string {
 	return e.provider.Identity()
 }
 
+func (e *environment) ResourceClass() execution.ResourceClass {
+	return execution.ResourceClass{
+		CPUMillis:          e.config.CPUMillis,
+		MemoryBytes:        e.config.MemoryBytes,
+		ProcessCount:       e.config.PIDs,
+		DiskBytes:          e.config.DiskBytes,
+		Network:            "none",
+		MaximumConnections: 0,
+		// With no network stack, the effective bandwidth ceiling is zero.
+		MaximumBandwidthBytesPerSecond: 0,
+	}
+}
+
 func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironment, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -422,11 +435,11 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	}
 	containerID, err := randomContainerID()
 	if err != nil {
-		return nil, fmt.Errorf("create gVisor container ID: %w", err)
+		return nil, errors.Join(fmt.Errorf("create gVisor container ID: %w", err), collector.Close())
 	}
 	bundle, err := os.MkdirTemp(e.provider.config.BundleRoot, "provenance-bundle-")
 	if err != nil {
-		return nil, fmt.Errorf("create gVisor bundle: %w", err)
+		return nil, errors.Join(fmt.Errorf("create gVisor bundle: %w", err), collector.Close())
 	}
 	prepared := &preparedEnvironment{
 		provider:    e.provider,
@@ -435,14 +448,14 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		evidence:    collector,
 	}
 	if err := prepared.writeMetadata(); err != nil {
-		return nil, errors.Join(err, os.RemoveAll(bundle))
+		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
 	spec := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID, e.mounts)
 	if err := writeJSONFile(filepath.Join(bundle, "config.json"), spec); err != nil {
-		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), os.RemoveAll(bundle))
+		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, errors.Join(err, os.RemoveAll(bundle))
+		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
 	return prepared, nil
 }
@@ -503,9 +516,6 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		return execution.CollectedOutput{}, err
 	}
 	bundle, err := e.evidence.Snapshot(ctx)
-	if err != nil {
-		return execution.CollectedOutput{}, err
-	}
 	events := make([]execution.StructuredEvent, len(bundle.Events))
 	for index, event := range bundle.Events {
 		events[index] = execution.StructuredEvent{Sequence: event.Sequence, Kind: event.Kind, Payload: append([]byte(nil), event.Payload...)}
@@ -518,12 +528,15 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		OutputTruncated:  bundle.Usage.OutputTruncated,
 		StructuredEvents: events,
 		CompleteLog: &execution.CompleteLog{
+			State:             bundle.CompleteLog.State,
+			Truncated:         bundle.CompleteLog.Truncated,
+			Error:             bundle.CompleteLog.Error,
 			ContentType:       bundle.CompleteLog.ContentType,
 			ContentEncoding:   bundle.CompleteLog.ContentEncoding,
 			SHA256:            bundle.CompleteLog.SHA256,
 			UncompressedBytes: bundle.CompleteLog.UncompressedBytes,
 			CompressedBytes:   bundle.CompleteLog.CompressedBytes,
-			Data:              append([]byte(nil), bundle.CompleteLog.Data...),
+			Archive:           bundle.CompleteLog.Archive,
 		},
 		EvidenceUsage: execution.EvidenceUsage{
 			RawBytesObserved:     bundle.Usage.RawBytesObserved,
@@ -534,10 +547,12 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			CompressedLogBytes:   bundle.Usage.CompressedLogBytes,
 			TruncatedLineCount:   bundle.Usage.TruncatedLineCount,
 			OutputTruncated:      bundle.Usage.OutputTruncated,
+			CompleteLogState:     bundle.Usage.CompleteLogState,
+			CompleteLogTruncated: bundle.Usage.CompleteLogTruncated,
 			EventsTruncated:      bundle.Usage.EventsTruncated,
 		},
 		StructuredEventError: bundle.StructuredEventError,
-	}, nil
+	}, err
 }
 
 func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
@@ -561,6 +576,9 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 		if result.Err != nil {
 			return fmt.Errorf("delete gVisor container: %w", result.Err)
 		}
+	}
+	if err := e.evidence.Close(); err != nil {
+		return fmt.Errorf("close gVisor evidence collector: %w", err)
 	}
 	if err := removeOwnedBundle(e.provider.config.BundleRoot, e.bundle); err != nil {
 		return err

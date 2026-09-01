@@ -22,6 +22,19 @@ import (
 func TestPrepareWritesContainedOCIConfiguration(t *testing.T) {
 	provider, runner, roots := testProvider(t)
 	environment := resolveEnvironment(t, provider, validConfiguration(), 4096)
+	reporter, ok := environment.(execution.ResourceClassReporter)
+	if !ok {
+		t.Fatal("resolved environment does not report its resource class")
+	}
+	if got := reporter.ResourceClass(); got != (execution.ResourceClass{
+		CPUMillis:    1500,
+		MemoryBytes:  256 << 20,
+		ProcessCount: 64,
+		DiskBytes:    32 << 20,
+		Network:      "none",
+	}) {
+		t.Fatalf("ResourceClass() = %#v", got)
+	}
 	preparedValue, err := environment.Prepare(context.Background())
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)

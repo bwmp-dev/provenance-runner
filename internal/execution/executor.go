@@ -101,6 +101,10 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 		return finishResult(result)
 	}
 	result.Environment = &EnvironmentResult{Provider: provider.Name(), Identity: environment.Identity()}
+	if reporter, ok := environment.(ResourceClassReporter); ok {
+		resourceClass := reporter.ResourceClass()
+		result.Usage.ResourceClass = &resourceClass
+	}
 
 	result.Phase = PhasePreparation
 	prepared, prepareErr := environment.Prepare(preparationContext)
@@ -183,7 +187,6 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 	}
 	if output.CompleteLog != nil {
 		completeLog := *output.CompleteLog
-		completeLog.Data = append([]byte(nil), output.CompleteLog.Data...)
 		result.CompleteLog = &completeLog
 	}
 	result.Usage.RawOutputBytes = output.EvidenceUsage.RawBytesObserved
@@ -194,6 +197,8 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 	result.Usage.CompressedLogBytes = output.EvidenceUsage.CompressedLogBytes
 	result.Usage.TruncatedLineCount = output.EvidenceUsage.TruncatedLineCount
 	result.Usage.OutputTruncated = output.EvidenceUsage.OutputTruncated
+	result.Usage.CompleteLogState = output.EvidenceUsage.CompleteLogState
+	result.Usage.CompleteLogTruncated = output.EvidenceUsage.CompleteLogTruncated
 	result.Usage.StructuredEventsTruncated = output.EvidenceUsage.EventsTruncated
 	if err != nil {
 		result.Logs.Error = err.Error()
