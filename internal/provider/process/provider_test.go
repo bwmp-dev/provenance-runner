@@ -64,7 +64,7 @@ func TestProviderExecutesAndBoundsOutput(t *testing.T) {
 	if result.Cleanup == nil || !result.Cleanup.Succeeded {
 		t.Fatalf("cleanup = %#v", result.Cleanup)
 	}
-	if result.CompleteLog == nil || len(result.CompleteLog.Data) == 0 {
+	if result.CompleteLog == nil || result.CompleteLog.Archive == nil || result.CompleteLog.CompressedBytes == 0 {
 		t.Fatalf("complete log = %#v", result.CompleteLog)
 	}
 }
@@ -132,7 +132,7 @@ func TestProviderHonorsJobTimeout(t *testing.T) {
 	if result.Cleanup == nil || !result.Cleanup.Succeeded {
 		t.Fatalf("cleanup = %#v", result.Cleanup)
 	}
-	if result.CompleteLog == nil || len(result.CompleteLog.Data) == 0 {
+	if result.CompleteLog == nil || result.CompleteLog.Archive == nil || result.CompleteLog.CompressedBytes == 0 {
 		t.Fatalf("complete log after timeout = %#v", result.CompleteLog)
 	}
 }
@@ -213,10 +213,11 @@ func TestProviderProducesSanitizedCompressedEvidence(t *testing.T) {
 	if result.Logs == nil || result.Logs.Stdout != want {
 		t.Fatalf("logs = %#v, want stdout %q", result.Logs, want)
 	}
-	if result.CompleteLog == nil || len(result.CompleteLog.Data) == 0 || result.CompleteLog.ContentEncoding != "gzip" {
+	if result.CompleteLog == nil || result.CompleteLog.Archive == nil || result.CompleteLog.CompressedBytes == 0 || result.CompleteLog.ContentEncoding != "gzip" {
 		t.Fatalf("complete log = %#v", result.CompleteLog)
 	}
-	reader, err := gzip.NewReader(bytes.NewReader(result.CompleteLog.Data))
+	archive := processArchiveBytes(t, result.CompleteLog)
+	reader, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		t.Fatalf("gzip.NewReader() error = %v", err)
 	}
@@ -230,16 +231,26 @@ func TestProviderProducesSanitizedCompressedEvidence(t *testing.T) {
 	if strings.Contains(string(complete), "secret-value") || strings.ContainsRune(string(complete), '\x1b') {
 		t.Fatalf("complete log was not sanitized: %q", complete)
 	}
-	if result.Usage.RawOutputBytes == 0 || result.Usage.CapturedOutputBytes == 0 || result.Usage.CompressedLogBytes != int64(len(result.CompleteLog.Data)) {
+	if result.Usage.RawOutputBytes == 0 || result.Usage.CapturedOutputBytes == 0 || result.Usage.CompressedLogBytes != int64(len(archive)) {
 		t.Fatalf("usage = %#v", result.Usage)
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	if bytes.Contains(encoded, result.CompleteLog.Data) {
+	if bytes.Contains(encoded, archive) {
 		t.Fatal("structured result contains compressed log payload")
 	}
+}
+
+func processArchiveBytes(t *testing.T, completeLog *execution.CompleteLog) []byte {
+	t.Helper()
+	content := make([]byte, completeLog.CompressedBytes)
+	if _, err := completeLog.Archive.ReadAt(content, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = completeLog.Archive.Close() })
+	return content
 }
 
 func TestProcessHelper(t *testing.T) {

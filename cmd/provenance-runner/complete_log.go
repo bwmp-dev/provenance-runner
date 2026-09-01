@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,18 +9,19 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
-	"github.com/bwmp-dev/provenance-runner/internal/localjob"
 )
 
 const (
 	completeLogContentType     = "text/plain; charset=utf-8"
 	completeLogContentEncoding = "gzip"
-	maximumCompleteLogBytes    = localjob.MaximumOutputBytes + int64(len("[stdout]\n")+len("[stderr]\n")+2)
+	maximumCompleteLogBytes    = evidence.MaximumCompleteLogBytes
 	maximumCompressedLogBytes  = maximumCompleteLogBytes + (1 << 20)
 )
 
 func writeResultAndCompleteLog(stdout, stderr io.Writer, result execution.Result, completeLogPath string) int {
+	defer releaseCompleteLog(result.CompleteLog)
 	exitCode := writeResult(stdout, result)
 	if completeLogPath == "" {
 		return exitCode
@@ -36,11 +37,20 @@ func exportCompleteLog(path string, completeLog *execution.CompleteLog) error {
 	if err := validateCompleteLog(completeLog); err != nil {
 		return err
 	}
-	return exportCompleteLogFile(path, completeLog.Data)
+	return exportCompleteLogFile(path, io.NewSectionReader(completeLog.Archive, 0, completeLog.CompressedBytes))
 }
 
 func validateCompleteLog(completeLog *execution.CompleteLog) error {
-	if completeLog == nil || len(completeLog.Data) == 0 {
+	if completeLog == nil {
+		return errors.New("complete log data is unavailable")
+	}
+	if completeLog.State != evidence.CompleteLogStateComplete || completeLog.Truncated {
+		if completeLog.Error != "" {
+			return fmt.Errorf("complete log archive state is %q: %s", completeLog.State, completeLog.Error)
+		}
+		return fmt.Errorf("complete log archive state is %q", completeLog.State)
+	}
+	if completeLog.Archive == nil {
 		return errors.New("complete log data is unavailable")
 	}
 	if completeLog.ContentType != completeLogContentType {
@@ -49,20 +59,27 @@ func validateCompleteLog(completeLog *execution.CompleteLog) error {
 	if completeLog.ContentEncoding != completeLogContentEncoding {
 		return fmt.Errorf("unexpected content encoding %q", completeLog.ContentEncoding)
 	}
-	if int64(len(completeLog.Data)) > maximumCompressedLogBytes {
+	if completeLog.CompressedBytes < 0 || completeLog.CompressedBytes > maximumCompressedLogBytes {
 		return fmt.Errorf("compressed data exceeds %d bytes", maximumCompressedLogBytes)
 	}
-	if completeLog.CompressedBytes != int64(len(completeLog.Data)) {
-		return fmt.Errorf("compressed byte count is %d, expected %d", completeLog.CompressedBytes, len(completeLog.Data))
+	info, err := completeLog.Archive.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect complete log archive: %w", err)
 	}
-	digest := sha256.Sum256(completeLog.Data)
-	if completeLog.SHA256 != hex.EncodeToString(digest[:]) {
+	if !info.Mode().IsRegular() || info.Size() != completeLog.CompressedBytes {
+		return fmt.Errorf("compressed byte count is %d, archive contains %d", completeLog.CompressedBytes, info.Size())
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, io.NewSectionReader(completeLog.Archive, 0, completeLog.CompressedBytes)); err != nil {
+		return fmt.Errorf("hash complete log archive: %w", err)
+	}
+	if completeLog.SHA256 != hex.EncodeToString(digest.Sum(nil)) {
 		return errors.New("SHA-256 metadata does not match complete log data")
 	}
 	if completeLog.UncompressedBytes < 0 || completeLog.UncompressedBytes > maximumCompleteLogBytes {
 		return fmt.Errorf("uncompressed byte count is %d, expected between 0 and %d", completeLog.UncompressedBytes, maximumCompleteLogBytes)
 	}
-	compressed := bytes.NewReader(completeLog.Data)
+	compressed := bufio.NewReader(io.NewSectionReader(completeLog.Archive, 0, completeLog.CompressedBytes))
 	reader, err := gzip.NewReader(compressed)
 	if err != nil {
 		return fmt.Errorf("decode gzip data: %w", err)
@@ -79,7 +96,7 @@ func validateCompleteLog(completeLog *execution.CompleteLog) error {
 	if uncompressedBytes > maximumCompleteLogBytes {
 		return fmt.Errorf("gzip data exceeds %d uncompressed bytes", maximumCompleteLogBytes)
 	}
-	if compressed.Len() != 0 {
+	if _, err := compressed.Peek(1); !errors.Is(err, io.EOF) {
 		return errors.New("gzip data contains trailing bytes or additional members")
 	}
 	if completeLog.UncompressedBytes != uncompressedBytes {
@@ -88,20 +105,12 @@ func validateCompleteLog(completeLog *execution.CompleteLog) error {
 	return nil
 }
 
-func writeAll(writer io.Writer, data []byte) error {
-	for len(data) > 0 {
-		written, err := writer.Write(data)
-		if written > 0 {
-			data = data[written:]
-		}
-		if err != nil {
-			return err
-		}
-		if written == 0 {
-			return io.ErrShortWrite
-		}
+func releaseCompleteLog(completeLog *execution.CompleteLog) {
+	if completeLog == nil || completeLog.Archive == nil {
+		return
 	}
-	return nil
+	_ = completeLog.Archive.Close()
+	completeLog.Archive = nil
 }
 
 func wrapCompleteLogError(operation string, err error) error {

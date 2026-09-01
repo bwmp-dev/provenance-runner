@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"unicode/utf8"
 )
@@ -11,15 +12,15 @@ import (
 const (
 	DefaultMaxLineBytes  int64 = 16 << 10
 	DefaultMaxTotalBytes int64 = 1 << 20
-	// Complete logs are retained independently from the bounded live stdout and
-	// stderr projection. Keep the archive ceiling process-local and bounded even
-	// when a caller asks for a much smaller live-output limit.
-	DefaultMaxCompleteLogBytes int64 = 16 << 20
+	// Complete logs are spooled independently from the bounded live stdout and
+	// stderr projection. The operational boundary limits host disk exposure; it
+	// never turns the retained prefix into a purportedly complete archive.
+	DefaultMaxCompleteLogBytes int64 = 256 << 20
 	DefaultMaxEvents                 = 1_024
 	DefaultMaxEventBytes       int64 = 64 << 10
 	MaximumLineBytes           int64 = 1 << 20
 	MaximumTotalBytes          int64 = 64 << 20
-	MaximumCompleteLogBytes    int64 = 16 << 20
+	MaximumCompleteLogBytes    int64 = 256 << 20
 	MaximumEvents                    = 1_024
 	MaximumEventBytes          int64 = 64 << 10
 )
@@ -122,12 +123,15 @@ type StructuredEvent struct {
 }
 
 type CompleteLog struct {
+	State             string
+	Truncated         bool
+	Error             string
 	ContentType       string
 	ContentEncoding   string
 	SHA256            string
 	UncompressedBytes int64
 	CompressedBytes   int64
-	Data              []byte
+	Archive           *os.File
 }
 
 type Usage struct {
@@ -139,6 +143,8 @@ type Usage struct {
 	CompressedLogBytes   int64
 	TruncatedLineCount   int64
 	OutputTruncated      bool
+	CompleteLogState     string
+	CompleteLogTruncated bool
 	EventsTruncated      bool
 }
 

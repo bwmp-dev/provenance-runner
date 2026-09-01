@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -132,12 +133,15 @@ type StructuredEvent struct {
 }
 
 type CompleteLog struct {
-	ContentType       string `json:"contentType"`
-	ContentEncoding   string `json:"contentEncoding"`
-	SHA256            string `json:"sha256"`
-	UncompressedBytes int64  `json:"uncompressedBytes"`
-	CompressedBytes   int64  `json:"compressedBytes"`
-	Data              []byte `json:"-"`
+	State             string   `json:"state"`
+	Truncated         bool     `json:"truncated"`
+	Error             string   `json:"error,omitempty"`
+	ContentType       string   `json:"contentType"`
+	ContentEncoding   string   `json:"contentEncoding"`
+	SHA256            string   `json:"sha256"`
+	UncompressedBytes int64    `json:"uncompressedBytes"`
+	CompressedBytes   int64    `json:"compressedBytes"`
+	Archive           *os.File `json:"-"`
 }
 
 type EvidenceUsage struct {
@@ -149,6 +153,8 @@ type EvidenceUsage struct {
 	CompressedLogBytes   int64
 	TruncatedLineCount   int64
 	OutputTruncated      bool
+	CompleteLogState     string
+	CompleteLogTruncated bool
 	EventsTruncated      bool
 }
 
@@ -239,6 +245,8 @@ type UsageResult struct {
 	CompressedLogBytes        int64          `json:"compressedLogBytes,omitempty"`
 	TruncatedLineCount        int64          `json:"truncatedLineCount,omitempty"`
 	OutputTruncated           bool           `json:"outputTruncated,omitempty"`
+	CompleteLogState          string         `json:"completeLogState,omitempty"`
+	CompleteLogTruncated      bool           `json:"completeLogTruncated,omitempty"`
 	StructuredEventsTruncated bool           `json:"structuredEventsTruncated,omitempty"`
 }
 

@@ -33,7 +33,7 @@ func TestCollectorSeparatesStructuredEventsFromRawLogs(t *testing.T) {
 	if len(bundle.Events) != 1 || bundle.Events[0].Kind != "probe.lifecycle" || string(bundle.Events[0].Payload) != `{"state":"enabled"}` {
 		t.Fatalf("events = %#v", bundle.Events)
 	}
-	complete := decompress(t, bundle.CompleteLog.Data)
+	complete := decompress(t, bundle.CompleteLog)
 	if !strings.Contains(complete, "raw server log") || strings.Contains(complete, "probe.lifecycle") || strings.Contains(complete, "enabled") {
 		t.Fatalf("complete log = %q", complete)
 	}
@@ -43,7 +43,7 @@ func TestCollectorSeparatesStructuredEventsFromRawLogs(t *testing.T) {
 	if bundle.Usage.StructuredEventBytes != int64(len(`{"state":"enabled"}`)) {
 		t.Fatalf("structured event bytes = %d", bundle.Usage.StructuredEventBytes)
 	}
-	digest := sha256.Sum256(bundle.CompleteLog.Data)
+	digest := sha256.Sum256(archiveBytes(t, bundle.CompleteLog))
 	if bundle.CompleteLog.SHA256 != hex.EncodeToString(digest[:]) {
 		t.Fatalf("complete log SHA-256 = %q", bundle.CompleteLog.SHA256)
 	}
@@ -114,7 +114,7 @@ func TestCollectorRedactsSecretsAcrossChunks(t *testing.T) {
 	if bundle.Stdout != want {
 		t.Fatalf("stdout = %q, want %q", bundle.Stdout, want)
 	}
-	complete := decompress(t, bundle.CompleteLog.Data)
+	complete := decompress(t, bundle.CompleteLog)
 	for _, secret := range []string{"token", "token-123", "pässword"} {
 		if strings.Contains(complete, secret) {
 			t.Fatalf("complete log contains secret %q: %q", secret, complete)
@@ -175,7 +175,7 @@ func TestCollectorCapsOutputFloodWithMarker(t *testing.T) {
 	if bundle.Usage.RawBytesObserved <= bundle.Usage.CapturedBytes || !bundle.Usage.OutputTruncated {
 		t.Fatalf("usage = %#v", bundle.Usage)
 	}
-	complete := decompress(t, bundle.CompleteLog.Data)
+	complete := decompress(t, bundle.CompleteLog)
 	if strings.Count(complete, "stdout flood\n") != 1_000 || strings.Count(complete, "stderr flood\n") != 1_000 {
 		t.Fatalf("complete log did not retain the output flood: %d bytes", len(complete))
 	}
@@ -184,19 +184,72 @@ func TestCollectorCapsOutputFloodWithMarker(t *testing.T) {
 	}
 }
 
-func TestCollectorCapsCompleteLogIndependentlyWithMarker(t *testing.T) {
+func TestCollectorStreamsCompleteArchiveBeyondFormer16MiBBoundary(t *testing.T) {
+	const payloadBytes = 17 << 20
+	line := append(bytes.Repeat([]byte{'x'}, 4095), '\n')
+	collector := newTestCollector(t, Config{MaxLineBytes: 4095, MaxTotalBytes: 64 << 10})
+	stdout := rawWriter(t, collector, StreamStdout)
+	wantDigest := sha256.New()
+	_, _ = wantDigest.Write([]byte("[stdout]\n"))
+	for written := 0; written < payloadBytes; written += len(line) {
+		if _, err := stdout.Write(line); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = wantDigest.Write(line)
+	}
+
+	bundle := snapshot(t, collector)
+	if bundle.CompleteLog.State != CompleteLogStateComplete || bundle.CompleteLog.Truncated || bundle.CompleteLog.UncompressedBytes != payloadBytes+int64(len("[stdout]\n")) {
+		t.Fatalf("complete log = %#v", bundle.CompleteLog)
+	}
+	if collector.live.captured != 64<<10 || collector.complete.stdoutBytes != payloadBytes {
+		t.Fatalf("live/archive retention = %d/%d", collector.live.captured, collector.complete.stdoutBytes)
+	}
+	reader, err := gzip.NewReader(io.NewSectionReader(bundle.CompleteLog.Archive, 0, bundle.CompleteLog.CompressedBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDigest := sha256.New()
+	gotBytes, copyErr := io.Copy(gotDigest, reader)
+	closeErr := reader.Close()
+	if copyErr != nil || closeErr != nil {
+		t.Fatal(errors.Join(copyErr, closeErr))
+	}
+	if gotBytes != bundle.CompleteLog.UncompressedBytes || !bytes.Equal(gotDigest.Sum(nil), wantDigest.Sum(nil)) {
+		t.Fatalf("entire archive mismatch: bytes=%d sha256=%x, want bytes=%d sha256=%x", gotBytes, gotDigest.Sum(nil), bundle.CompleteLog.UncompressedBytes, wantDigest.Sum(nil))
+	}
+}
+
+func TestCollectorFailsClosedAtCompleteLogOperationalBoundary(t *testing.T) {
 	collector := newTestCollector(t, Config{MaxLineBytes: 32, MaxTotalBytes: 32, MaxCompleteLogBytes: 64})
 	for range 100 {
 		writeChunks(t, collector, StreamStdout, []byte("complete archive flood\n"))
 	}
 
-	bundle := snapshot(t, collector)
-	complete := decompress(t, bundle.CompleteLog.Data)
-	if !strings.Contains(complete, TotalTruncationMarker) || bundle.Usage.CompleteLogBytes > 64+int64(len("[stdout]\n")+1) {
-		t.Fatalf("complete log = %q, usage = %#v", complete, bundle.Usage)
+	bundle, err := collector.Snapshot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "operational retention boundary") {
+		t.Fatalf("Snapshot() error = %v", err)
 	}
-	if !bundle.Usage.OutputTruncated {
-		t.Fatalf("complete-log truncation was not reported: %#v", bundle.Usage)
+	if bundle.CompleteLog.State != CompleteLogStateTruncated || !bundle.CompleteLog.Truncated || bundle.CompleteLog.Archive != nil || !bundle.Usage.CompleteLogTruncated {
+		t.Fatalf("complete-log boundary state = %#v, usage = %#v", bundle.CompleteLog, bundle.Usage)
+	}
+	if second, secondErr := collector.Snapshot(context.Background()); secondErr == nil || second.CompleteLog.State != CompleteLogStateTruncated {
+		t.Fatalf("second Snapshot() = %#v, %v", second.CompleteLog, secondErr)
+	}
+}
+
+func TestCollectorFailsClosedWhenCompleteLogSpoolWriteFails(t *testing.T) {
+	collector := newTestCollector(t, Config{})
+	if err := collector.complete.stdout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeChunks(t, collector, StreamStdout, []byte("retention must fail\n"))
+	bundle, err := collector.Snapshot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "spool complete log") {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if bundle.CompleteLog.State != CompleteLogStateFailed || bundle.CompleteLog.Truncated || bundle.CompleteLog.Archive != nil || bundle.CompleteLog.Error == "" {
+		t.Fatalf("complete-log failure state = %#v", bundle.CompleteLog)
 	}
 }
 
@@ -230,7 +283,7 @@ func TestCollectorCancellationAndSnapshotIdempotence(t *testing.T) {
 		t.Fatalf("Write() after snapshot = %d, %v", written, err)
 	}
 	second := snapshot(t, collector)
-	if first.Stdout != second.Stdout || !bytes.Equal(first.CompleteLog.Data, second.CompleteLog.Data) {
+	if first.Stdout != second.Stdout || first.CompleteLog.SHA256 != second.CompleteLog.SHA256 || first.CompleteLog.Archive != second.CompleteLog.Archive {
 		t.Fatalf("snapshots differ: first=%#v second=%#v", first, second)
 	}
 }
@@ -371,11 +424,27 @@ func snapshot(t *testing.T, collector *Collector) Bundle {
 	if err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
 	}
+	if bundle.CompleteLog.Archive != nil {
+		t.Cleanup(func() { _ = bundle.CompleteLog.Archive.Close() })
+	}
 	return bundle
 }
 
-func decompress(t *testing.T, content []byte) string {
+func archiveBytes(t *testing.T, completeLog CompleteLog) []byte {
 	t.Helper()
+	if completeLog.Archive == nil {
+		t.Fatalf("complete log archive is unavailable: %#v", completeLog)
+	}
+	content := make([]byte, completeLog.CompressedBytes)
+	if _, err := completeLog.Archive.ReadAt(content, 0); err != nil {
+		t.Fatalf("ReadAt() error = %v", err)
+	}
+	return content
+}
+
+func decompress(t *testing.T, completeLog CompleteLog) string {
+	t.Helper()
+	content := archiveBytes(t, completeLog)
 	reader, err := gzip.NewReader(bytes.NewReader(content))
 	if err != nil {
 		t.Fatalf("gzip.NewReader() error = %v", err)

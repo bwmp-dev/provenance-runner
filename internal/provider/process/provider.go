@@ -108,6 +108,12 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err != nil {
 		return nil, fmt.Errorf("create development process evidence collector: %w", err)
 	}
+	retainCollector := false
+	defer func() {
+		if !retainCollector {
+			_ = collector.Close()
+		}
+	}()
 
 	workingDirectory := e.configuration.WorkingDirectory
 	var jobWorkspace *workspace.Workspace
@@ -136,12 +142,14 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		workingDirectory = absoluteDirectory
 	}
 
-	return &preparedEnvironment{
+	prepared := &preparedEnvironment{
 		configuration:    e.configuration,
 		workingDirectory: workingDirectory,
 		workspace:        jobWorkspace,
 		evidence:         collector,
-	}, nil
+	}
+	retainCollector = true
+	return prepared, nil
 }
 
 type preparedEnvironment struct {
@@ -192,9 +200,6 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		return execution.CollectedOutput{}, err
 	}
 	bundle, err := e.evidence.Snapshot(ctx)
-	if err != nil {
-		return execution.CollectedOutput{}, err
-	}
 	events := make([]execution.StructuredEvent, len(bundle.Events))
 	for index, event := range bundle.Events {
 		events[index] = execution.StructuredEvent{
@@ -211,12 +216,15 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		OutputTruncated:  bundle.Usage.OutputTruncated,
 		StructuredEvents: events,
 		CompleteLog: &execution.CompleteLog{
+			State:             bundle.CompleteLog.State,
+			Truncated:         bundle.CompleteLog.Truncated,
+			Error:             bundle.CompleteLog.Error,
 			ContentType:       bundle.CompleteLog.ContentType,
 			ContentEncoding:   bundle.CompleteLog.ContentEncoding,
 			SHA256:            bundle.CompleteLog.SHA256,
 			UncompressedBytes: bundle.CompleteLog.UncompressedBytes,
 			CompressedBytes:   bundle.CompleteLog.CompressedBytes,
-			Data:              append([]byte(nil), bundle.CompleteLog.Data...),
+			Archive:           bundle.CompleteLog.Archive,
 		},
 		EvidenceUsage: execution.EvidenceUsage{
 			RawBytesObserved:     bundle.Usage.RawBytesObserved,
@@ -227,13 +235,18 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			CompressedLogBytes:   bundle.Usage.CompressedLogBytes,
 			TruncatedLineCount:   bundle.Usage.TruncatedLineCount,
 			OutputTruncated:      bundle.Usage.OutputTruncated,
+			CompleteLogState:     bundle.Usage.CompleteLogState,
+			CompleteLogTruncated: bundle.Usage.CompleteLogTruncated,
 			EventsTruncated:      bundle.Usage.EventsTruncated,
 		},
 		StructuredEventError: bundle.StructuredEventError,
-	}, nil
+	}, err
 }
 
 func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
+	if err := e.evidence.Close(); err != nil {
+		return fmt.Errorf("close development process evidence collector: %w", err)
+	}
 	if e.workspace == nil {
 		return nil
 	}

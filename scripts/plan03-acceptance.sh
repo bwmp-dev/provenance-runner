@@ -291,7 +291,7 @@ validate_result() {
     --arg digest "$digest" \
     --argjson compressed "$compressed_bytes" \
     --argjson uncompressed "$uncompressed_bytes" \
-    '.completeLog.sha256==$digest and .completeLog.compressedBytes==$compressed and .completeLog.uncompressedBytes==$uncompressed and .usage.compressedLogBytes==$compressed and .usage.completeLogBytes==$uncompressed' \
+    '.completeLog.state=="complete" and .completeLog.truncated==false and .completeLog.sha256==$digest and .completeLog.compressedBytes==$compressed and .completeLog.uncompressedBytes==$uncompressed and .usage.compressedLogBytes==$compressed and .usage.completeLogBytes==$uncompressed and .usage.completeLogState=="complete" and (.usage.completeLogTruncated // false)==false' \
     "$result" >/dev/null
   for secret_target in "$result" "$stderr_file" "$decompressed"; do
     if grep -Fq "$secret" "$secret_target"; then
@@ -347,6 +347,172 @@ validate_result() {
   rm -- "$decompressed"
 }
 
+run_complete_log_boundary() {
+  local output_bytes=$((20 * 1024 * 1024))
+  local line=0123456789abcdef0123456789abcde
+  local job="$PLAN03_EVIDENCE_ROOT/jobs/complete-log-boundary.json"
+  local result="$PLAN03_EVIDENCE_ROOT/results/complete-log-boundary.json"
+  local stderr_file="$PLAN03_EVIDENCE_ROOT/results/complete-log-boundary.stderr"
+  local complete_log="$PLAN03_EVIDENCE_ROOT/results/complete-log-boundary.log.gz"
+  local expected="$PLAN03_WORK_ROOT/complete-log-boundary.expected"
+  local actual="$PLAN03_WORK_ROOT/complete-log-boundary.actual"
+  local verification="$PLAN03_EVIDENCE_ROOT/results/complete-log-boundary-verification.json"
+
+  jq -n \
+    --arg script "yes '$line' | head -c $output_bytes" \
+    '{schemaVersion:"provenance.local-job/v1alpha1",id:"plan03-complete-log-boundary",provider:"development-process",timeoutMilliseconds:120000,maxOutputBytes:65536,environment:{acknowledgeUnsandboxed:true,command:"/bin/sh",arguments:["-c",$script],maxLineBytes:64}}' \
+    > "$job"
+
+  bash -c 'kill -STOP $$; exec "$@"' bash \
+    "$PLAN03_RUNNER" execute "$job" --complete-log "$complete_log" \
+    > "$result" 2> "$stderr_file" &
+  local runner_pid=$!
+  local state=""
+  for _ in {1..100}; do
+    state=$(awk '/^State:/{print $2}' "/proc/$runner_pid/status" 2>/dev/null || true)
+    [[ "$state" == T ]] && break
+    sleep 0.01
+  done
+  [[ "$state" == T ]] || { printf 'complete-log boundary did not reach the launch gate\n' >&2; return 1; }
+  printf '%s\n' "$runner_pid" > "$PLAN03_CGROUP_PARENT/runner/cgroup.procs"
+  kill -CONT "$runner_pid"
+  wait "$runner_pid"
+
+  gzip --test "$complete_log"
+  {
+    printf '[stdout]\n'
+    (set +o pipefail; yes "$line" | head -c "$output_bytes")
+  } > "$expected"
+  gzip -cd "$complete_log" > "$actual"
+
+  local expected_size actual_size expected_sha actual_sha compressed_size compressed_sha
+  expected_size=$(stat -c %s "$expected")
+  actual_size=$(stat -c %s "$actual")
+  expected_sha=$(sha256sum "$expected"); expected_sha=${expected_sha%% *}
+  actual_sha=$(sha256sum "$actual"); actual_sha=${actual_sha%% *}
+  compressed_size=$(stat -c %s "$complete_log")
+  compressed_sha=$(sha256sum "$complete_log"); compressed_sha=${compressed_sha%% *}
+  [[ "$expected_size" -gt $((16 * 1024 * 1024)) && "$actual_size" -eq "$expected_size" && "$actual_sha" == "$expected_sha" ]]
+  jq -e \
+    --arg sha "$compressed_sha" \
+    --argjson compressed "$compressed_size" \
+    --argjson uncompressed "$actual_size" \
+    '.classification=="passed" and .completeLog.state=="complete" and .completeLog.truncated==false and .completeLog.sha256==$sha and .completeLog.compressedBytes==$compressed and .completeLog.uncompressedBytes==$uncompressed and .usage.completeLogState=="complete" and (.usage.completeLogTruncated // false)==false and .usage.capturedOutputBytes==65536 and .usage.outputTruncated==true' \
+    "$result" >/dev/null
+  jq -n \
+    --argjson sourceBytes "$output_bytes" \
+    --argjson uncompressedBytes "$actual_size" \
+    --arg uncompressedSHA256 "$actual_sha" \
+    --argjson compressedBytes "$compressed_size" \
+    --arg compressedSHA256 "$compressed_sha" \
+    '{formerBoundaryBytes:16777216,sourceBytes:$sourceBytes,uncompressedBytes:$uncompressedBytes,uncompressedSHA256:$uncompressedSHA256,compressedBytes:$compressedBytes,compressedSHA256:$compressedSHA256,entireArtifactVerified:true}' \
+    > "$verification"
+  rm -- "$expected" "$actual"
+  printf 'accepted complete-log-boundary (%s bytes, sha256 %s)\n' "$actual_size" "$actual_sha"
+}
+
+run_paper_restart_recovery() {
+  local directory="$PLAN03_EVIDENCE_ROOT/restart-recovery"
+  local abandoned_job="$PLAN03_EVIDENCE_ROOT/jobs/restart-abandoned-paper.json"
+  local recovery_result="$directory/recovery-result.json"
+  local recovery_stderr="$directory/recovery.stderr"
+  local recovery_log="$directory/recovery.log.gz"
+  local abandoned_stdout="$directory/abandoned-result.partial.json"
+  local abandoned_stderr="$directory/abandoned.stderr"
+  local secret_file_name=restart-secret-bearing-input.txt
+  mkdir -p "$directory"
+  jq '.id="plan03-restart-abandoned-paper" | .timeoutMilliseconds=300000' \
+    "$PLAN03_EVIDENCE_ROOT/jobs/enable-hang.json" > "$abandoned_job"
+
+  bash -c 'kill -STOP $$; exec "$@"' bash \
+    "$PLAN03_RUNNER" execute "$abandoned_job" --complete-log "$directory/abandoned.log.gz" \
+    > "$abandoned_stdout" 2> "$abandoned_stderr" &
+  local runner_pid=$!
+  local state=""
+  for _ in {1..100}; do
+    state=$(awk '/^State:/{print $2}' "/proc/$runner_pid/status" 2>/dev/null || true)
+    [[ "$state" == T ]] && break
+    sleep 0.01
+  done
+  [[ "$state" == T ]] || { printf 'restart abandonment did not reach the launch gate\n' >&2; return 1; }
+  printf '%s\n' "$runner_pid" > "$PLAN03_CGROUP_PARENT/runner/cgroup.procs"
+  kill -CONT "$runner_pid"
+
+  local bundle="" workspace="" container_id=""
+  for _ in {1..1200}; do
+    bundle=$(find "$PLAN03_WORK_ROOT/bundles" -mindepth 2 -maxdepth 2 -type f -name .provenance-run-attempted -printf '%h\n' -quit 2>/dev/null || true)
+    workspace=$(find "$PLAN03_WORK_ROOT/workspaces" -mindepth 2 -maxdepth 2 -type f -name .provenance-workspace.json -exec sh -c 'jq -e '\''.jobId=="plan03-restart-abandoned-paper"'\'' "$1" >/dev/null && dirname -- "$1"' sh {} \; | head -n 1)
+    if [[ -n "$bundle" && -n "$workspace" ]]; then
+      container_id=$(jq -r '.containerId' "$bundle/.provenance-gvisor.json")
+      if "$PROVENANCE_RUNSC_PATH" --root="$PROVENANCE_GVISOR_STATE_ROOT" state "$container_id" > "$directory/pre-crash-runsc-state.json" 2>/dev/null; then
+        break
+      fi
+    fi
+    sleep 0.1
+  done
+  [[ -n "$bundle" && -n "$workspace" && -n "$container_id" ]] || { printf 'actual Paper workspace did not become abandonable\n' >&2; return 1; }
+  [[ -d "$job_cgroup_root/$container_id" ]]
+  printf '%s\n' "$secret" > "$workspace/server/$secret_file_name"
+  printf 'writable restart residue\n' > "$workspace/server/restart-writable.txt"
+  find "$workspace" -xdev -printf '%M\t%u\t%g\t%p\n' | sort > "$directory/pre-crash-workspace.tsv"
+  find "$bundle" -xdev -printf '%M\t%u\t%g\t%p\n' | sort > "$directory/pre-crash-bundle.tsv"
+  jq -n \
+    --argjson runnerPID "$runner_pid" \
+    --arg bundle "$bundle" \
+    --arg workspace "$workspace" \
+    --arg containerId "$container_id" \
+    --arg cgroup "$job_cgroup_root/$container_id" \
+    --arg secretBearingInput "$workspace/server/$secret_file_name" \
+    '{runnerPID:$runnerPID,bundle:$bundle,workspace:$workspace,containerId:$containerId,cgroup:$cgroup,secretBearingInput:$secretBearingInput}' \
+    > "$directory/abandoned-identities.json"
+
+  kill -KILL "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  local abandoned_status=$?
+  set -e
+  [[ "$abandoned_status" -eq 137 ]]
+  "$PROVENANCE_RUNSC_PATH" --root="$PROVENANCE_GVISOR_STATE_ROOT" state "$container_id" > "$directory/post-crash-runsc-state.json"
+  [[ -d "$bundle" && -d "$workspace" && -f "$workspace/server/$secret_file_name" ]]
+
+  bash -c 'kill -STOP $$; exec "$@"' bash \
+    "$PLAN03_RUNNER" execute "$PLAN03_EVIDENCE_ROOT/jobs/success.json" --complete-log "$recovery_log" \
+    > "$recovery_result" 2> "$recovery_stderr" &
+  local recovery_pid=$!
+  state=""
+  for _ in {1..100}; do
+    state=$(awk '/^State:/{print $2}' "/proc/$recovery_pid/status" 2>/dev/null || true)
+    [[ "$state" == T ]] && break
+    sleep 0.01
+  done
+  [[ "$state" == T ]] || { printf 'restart recovery did not reach the launch gate\n' >&2; return 1; }
+  printf '%s\n' "$recovery_pid" > "$PLAN03_CGROUP_PARENT/runner/cgroup.procs"
+  kill -CONT "$recovery_pid"
+  wait "$recovery_pid"
+  jq -e '.classification=="passed" and .cleanup.succeeded==true and .completeLog.state=="complete"' "$recovery_result" >/dev/null
+  gzip --test "$recovery_log"
+
+  [[ ! -e "$bundle" && ! -e "$workspace" && ! -e "$job_cgroup_root/$container_id" ]]
+  if find "$PLAN03_WORK_ROOT/state" -xdev -print | grep -Fq "$container_id"; then
+    printf 'restart left runsc state for %s\n' "$container_id" >&2
+    return 1
+  fi
+  if grep -R -F -l -- "$secret" "$PLAN03_WORK_ROOT/bundles" "$PLAN03_WORK_ROOT/state" "$PLAN03_WORK_ROOT/workspaces" > "$directory/post-restart-secret-hits.txt"; then
+    printf 'restart left secret-bearing inputs\n' >&2
+    return 1
+  fi
+  printf '{"containerId":"%s"}\n' "$container_id" > "$directory/abandoned-container.ndjson"
+  assert_no_residue restart-recovery "$directory/abandoned-container.ndjson"
+  {
+    find "$PLAN03_WORK_ROOT/bundles" -mindepth 1 -print
+    find "$PLAN03_WORK_ROOT/state" -mindepth 1 -print
+    find "$PLAN03_WORK_ROOT/workspaces" -mindepth 1 -print
+    find "$job_cgroup_root" -mindepth 1 -print 2>/dev/null || true
+  } > "$directory/post-restart-residue.txt"
+  jq -n --arg containerId "$container_id" '{paperWorkspacePrepared:true,runnerKilled:true,productionStartupReconciliation:true,containerId:$containerId,containerRemoved:true,runscStateRemoved:true,cgroupRemoved:true,processesRemoved:true,workspaceRemoved:true,writableFilesRemoved:true,secretBearingInputsRemoved:true}' > "$directory/verdict.json"
+  printf 'accepted real Paper restart recovery (%s)\n' "$container_id"
+}
+
 printf '%s\n' "$(git -c safe.directory="$repository_root" -C "$repository_root" rev-parse HEAD)" > "$PLAN03_EVIDENCE_ROOT/runner-head.txt"
 cp "$fixture_manifest" "$PLAN03_EVIDENCE_ROOT/fixtures.tsv"
 {
@@ -355,6 +521,9 @@ cp "$fixture_manifest" "$PLAN03_EVIDENCE_ROOT/fixtures.tsv"
   "$PROVENANCE_RUNSC_PATH" --version
   sha256sum "$PLAN03_RUNNER" "$PLAN03_RUNSC_BINARY" "$PROVENANCE_RUNSC_PATH"
 } > "$PLAN03_EVIDENCE_ROOT/identities.txt" 2>&1
+
+run_complete_log_boundary
+run_paper_restart_recovery
 
 while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classification phase failure_code exit_code; do
   [[ -z "$fixture" || "$fixture" == \#* ]] && continue

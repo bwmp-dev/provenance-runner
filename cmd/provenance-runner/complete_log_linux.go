@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -59,11 +60,11 @@ var osCompleteLogLinuxOperations = completeLogLinuxOperations{
 	},
 }
 
-func exportCompleteLogFile(path string, data []byte) error {
-	return exportCompleteLogFileWithOperations(path, data, osCompleteLogLinuxOperations)
+func exportCompleteLogFile(path string, source io.Reader) error {
+	return exportCompleteLogFileWithOperations(path, source, osCompleteLogLinuxOperations)
 }
 
-func exportCompleteLogFileWithOperations(path string, data []byte, operations completeLogLinuxOperations) error {
+func exportCompleteLogFileWithOperations(path string, source io.Reader, operations completeLogLinuxOperations) error {
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("resolve destination: %w", err)
@@ -72,11 +73,11 @@ func exportCompleteLogFileWithOperations(path string, data []byte, operations co
 	if err != nil {
 		return fmt.Errorf("open destination directory: %w", err)
 	}
-	exportErr := exportCompleteLogToDirectory(directory, filepath.Base(absolutePath), data, operations)
+	exportErr := exportCompleteLogToDirectory(directory, filepath.Base(absolutePath), source, operations)
 	return errors.Join(exportErr, wrapCompleteLogError("close destination directory", directory.Close()))
 }
 
-func exportCompleteLogToDirectory(directory *os.File, destinationName string, data []byte, operations completeLogLinuxOperations) error {
+func exportCompleteLogToDirectory(directory *os.File, destinationName string, source io.Reader, operations completeLogLinuxOperations) error {
 	destination, err := operations.openTemporary(directory)
 	if err != nil {
 		return fmt.Errorf("create unnamed staging file: %w", err)
@@ -84,7 +85,7 @@ func exportCompleteLogToDirectory(directory *os.File, destinationName string, da
 	if err := destination.Chmod(0o600); err != nil {
 		return errors.Join(fmt.Errorf("set staging file permissions: %w", err), wrapCompleteLogError("close staging file", destination.Close()))
 	}
-	if err := writeAll(destination, data); err != nil {
+	if _, err := io.Copy(destination, source); err != nil {
 		return errors.Join(fmt.Errorf("write staging file: %w", err), wrapCompleteLogError("close staging file", destination.Close()))
 	}
 	if err := destination.Sync(); err != nil {

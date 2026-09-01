@@ -2,8 +2,11 @@
 
 package main
 
-import "errors"
+import (
+	"errors"
+	"io"
+)
 
-func exportCompleteLogFile(string, []byte) error {
+func exportCompleteLogFile(string, io.Reader) error {
 	return errors.New("complete-log export requires Linux O_TMPFILE support")
 }

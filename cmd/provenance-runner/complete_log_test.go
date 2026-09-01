@@ -184,7 +184,7 @@ func TestExportCompleteLogCreatesExactOwnerOnlyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(contents, completeLog.Data) {
+	if !bytes.Equal(contents, completeLogArchiveBytes(t, completeLog)) {
 		t.Fatalf("destination differs from the exact compressed payload")
 	}
 	if runtime.GOOS != "windows" {
@@ -237,7 +237,8 @@ func TestExportCompleteLogRejectsFilesystemWithoutUnnamedTemporaryFiles(t *testi
 	operations.openTemporary = func(*os.File) (completeLogDestination, error) {
 		return nil, errors.New("injected O_TMPFILE rejection")
 	}
-	err := exportCompleteLogFileWithOperations(destination, validCompleteLog([]byte("payload")).Data, operations)
+	payload := validCompleteLog([]byte("payload"))
+	err := exportCompleteLogFileWithOperations(destination, completeLogArchiveReader(payload), operations)
 	if err == nil || !strings.Contains(err.Error(), "create unnamed staging file: injected O_TMPFILE rejection") {
 		t.Fatalf("exportCompleteLogFileWithOperations() error = %v", err)
 	}
@@ -268,7 +269,8 @@ func TestExportCompleteLogRemovesPartialFilesAfterIOFailure(t *testing.T) {
 				}
 				return &faultingCompleteLogDestination{completeLogDestination: destination, fault: test.fault}, nil
 			}
-			if err := exportCompleteLogFileWithOperations(destination, validCompleteLog([]byte("payload")).Data, operations); err == nil {
+			payload := validCompleteLog([]byte("payload"))
+			if err := exportCompleteLogFileWithOperations(destination, completeLogArchiveReader(payload), operations); err == nil {
 				t.Fatal("exportCompleteLogWithOperations() error = nil")
 			}
 			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
@@ -317,14 +319,14 @@ func TestExportCompleteLogPublishesAnchoredFileAfterSuccessfulCloseReplacement(t
 		return errors.Join(copyErr, syncErr, closeErr)
 	}
 
-	if err := exportCompleteLogFileWithOperations(destination, completeLog.Data, operations); err != nil {
+	if err := exportCompleteLogFileWithOperations(destination, completeLogArchiveReader(completeLog), operations); err != nil {
 		t.Fatalf("exportCompleteLogFileWithOperations() error = %v", err)
 	}
 	published, err := os.ReadFile(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(published, completeLog.Data) {
+	if !bytes.Equal(published, completeLogArchiveBytes(t, completeLog)) {
 		t.Fatalf("published bytes came from the replacement staging pathname")
 	}
 	replacement, err := os.ReadFile(stagingPath)
@@ -394,14 +396,38 @@ func validCompleteLog(payload []byte) *execution.CompleteLog {
 	}
 	data := compressed.Bytes()
 	digest := sha256.Sum256(data)
+	archive, err := os.CreateTemp("", "provenance-complete-log-test-*.gz")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Remove(archive.Name()); err != nil {
+		panic(err)
+	}
+	if _, err := archive.Write(data); err != nil {
+		panic(err)
+	}
 	return &execution.CompleteLog{
+		State:             "complete",
 		ContentType:       completeLogContentType,
 		ContentEncoding:   completeLogContentEncoding,
 		SHA256:            hex.EncodeToString(digest[:]),
 		UncompressedBytes: int64(len(payload)),
 		CompressedBytes:   int64(len(data)),
-		Data:              append([]byte(nil), data...),
+		Archive:           archive,
 	}
+}
+
+func completeLogArchiveReader(completeLog *execution.CompleteLog) io.Reader {
+	return io.NewSectionReader(completeLog.Archive, 0, completeLog.CompressedBytes)
+}
+
+func completeLogArchiveBytes(t *testing.T, completeLog *execution.CompleteLog) []byte {
+	t.Helper()
+	content := make([]byte, completeLog.CompressedBytes)
+	if _, err := completeLog.Archive.ReadAt(content, 0); err != nil {
+		t.Fatal(err)
+	}
+	return content
 }
 
 func completeLogExportJob(t *testing.T, mode string) []byte {

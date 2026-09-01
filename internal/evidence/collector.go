@@ -2,10 +2,7 @@ package evidence
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +17,7 @@ type Collector struct {
 	config               Config
 	processors           map[Stream]*rawProcessor
 	live                 boundedOutput
-	complete             boundedOutput
+	complete             *archiveSpool
 	events               []StructuredEvent
 	eventBytes           int64
 	rawObserved          int64
@@ -29,6 +26,7 @@ type Collector struct {
 	structuredEventError string
 	closed               bool
 	snapshot             *Bundle
+	snapshotErr          error
 }
 
 type rawTail struct {
@@ -51,12 +49,16 @@ func NewCollector(config Config) (*Collector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create evidence collector: %w", err)
 	}
+	complete, err := newArchiveSpool(validated.MaxCompleteLogBytes)
+	if err != nil {
+		return nil, fmt.Errorf("create evidence collector: %w", err)
+	}
 	collector := &Collector{
 		config:     validated,
 		processors: make(map[Stream]*rawProcessor, 2),
 		events:     make([]StructuredEvent, 0, validated.MaxEvents),
 		live:       boundedOutput{maximum: validated.MaxTotalBytes},
-		complete:   boundedOutput{maximum: validated.MaxCompleteLogBytes},
+		complete:   complete,
 	}
 	collector.processors[StreamStdout] = newRawProcessor(collector, StreamStdout, validated)
 	collector.processors[StreamStderr] = newRawProcessor(collector, StreamStderr, validated)
@@ -108,7 +110,7 @@ func (c *Collector) Snapshot(ctx context.Context) (Bundle, error) {
 	c.snapshotMu.Lock()
 	defer c.snapshotMu.Unlock()
 	if c.snapshot != nil {
-		return cloneBundle(*c.snapshot), nil
+		return cloneBundle(*c.snapshot), c.snapshotErr
 	}
 
 	c.mu.Lock()
@@ -120,7 +122,6 @@ func (c *Collector) Snapshot(ctx context.Context) (Bundle, error) {
 	c.mu.Lock()
 	stdout := c.live.stdout.String()
 	stderr := c.live.stderr.String()
-	complete := completeLogContent(c.complete.stdout.Bytes(), c.complete.stderr.Bytes())
 	events := append([]StructuredEvent(nil), c.events...)
 	for index := range events {
 		events[index].Payload = append([]byte(nil), events[index].Payload...)
@@ -131,35 +132,42 @@ func (c *Collector) Snapshot(ctx context.Context) (Bundle, error) {
 		StructuredEventCount: int64(len(events)),
 		StructuredEventBytes: c.eventBytes,
 		TruncatedLineCount:   c.truncatedLines,
-		OutputTruncated:      c.live.truncated || c.complete.truncated || c.truncatedLines > 0,
+		OutputTruncated:      c.live.truncated || c.truncatedLines > 0,
 		EventsTruncated:      c.eventsTruncated,
 	}
 	c.mu.Unlock()
 
-	compressed, err := compressCompleteLog(ctx, complete)
-	if err != nil {
-		return Bundle{}, err
-	}
-	digest := sha256.Sum256(compressed)
-	usage.CompleteLogBytes = int64(len(complete))
-	usage.CompressedLogBytes = int64(len(compressed))
+	completeLog, archiveErr := c.complete.finalize(ctx)
+	usage.CompleteLogBytes = completeLog.UncompressedBytes
+	usage.CompressedLogBytes = completeLog.CompressedBytes
+	usage.CompleteLogState = completeLog.State
+	usage.CompleteLogTruncated = completeLog.Truncated
 	bundle := Bundle{
-		Stdout: stdout,
-		Stderr: stderr,
-		Events: events,
-		CompleteLog: CompleteLog{
-			ContentType:       "text/plain; charset=utf-8",
-			ContentEncoding:   "gzip",
-			SHA256:            hex.EncodeToString(digest[:]),
-			UncompressedBytes: int64(len(complete)),
-			CompressedBytes:   int64(len(compressed)),
-			Data:              compressed,
-		},
+		Stdout:               stdout,
+		Stderr:               stderr,
+		Events:               events,
+		CompleteLog:          completeLog,
 		Usage:                usage,
 		StructuredEventError: c.structuredEventError,
 	}
 	c.snapshot = &bundle
-	return cloneBundle(bundle), nil
+	c.snapshotErr = archiveErr
+	return cloneBundle(bundle), archiveErr
+}
+
+// Close releases any source spools left behind when collection could not run.
+// A successfully finalized compressed archive is owned by the returned bundle
+// and is intentionally not closed here.
+func (c *Collector) Close() error {
+	c.snapshotMu.Lock()
+	defer c.snapshotMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	if c.snapshot == nil && c.complete != nil {
+		c.complete.discardSources()
+	}
+	return nil
 }
 
 func (c *Collector) observeRawBytes(count int64) bool {
@@ -194,10 +202,8 @@ func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated bool) 
 	if lineTruncated {
 		c.truncatedLines++
 	}
-	// The complete archive and the bounded live projection deliberately receive
-	// the same normalized, ANSI-free, redacted line. Their independent total
-	// ceilings prevent live backpressure limits from silently discarding the
-	// complete log.
+	// The disk-spooled complete archive and bounded live projection deliberately
+	// receive the same normalized, ANSI-free, redacted line.
 	c.complete.append(stream, line)
 	c.live.append(stream, line)
 }
@@ -339,36 +345,6 @@ func (o *boundedOutput) truncateStream(stream Stream, count int64) int64 {
 	return int64(originalLength - len(content))
 }
 
-func completeLogContent(stdout, stderr []byte) []byte {
-	var complete bytes.Buffer
-	appendStream := func(name string, content []byte) {
-		if len(content) == 0 {
-			return
-		}
-		_, _ = fmt.Fprintf(&complete, "[%s]\n", name)
-		_, _ = complete.Write(content)
-		if content[len(content)-1] != '\n' {
-			_ = complete.WriteByte('\n')
-		}
-	}
-	appendStream(string(StreamStdout), stdout)
-	appendStream(string(StreamStderr), stderr)
-	return complete.Bytes()
-}
-
-func compressCompleteLog(ctx context.Context, content []byte) ([]byte, error) {
-	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&contextWriter{ctx: ctx, writer: &compressed})
-	if _, err := writer.Write(content); err != nil {
-		writer.Close()
-		return nil, fmt.Errorf("compress complete log: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("compress complete log: %w", err)
-	}
-	return compressed.Bytes(), nil
-}
-
 type contextWriter struct {
 	ctx    context.Context
 	writer io.Writer
@@ -386,6 +362,5 @@ func cloneBundle(bundle Bundle) Bundle {
 	for index := range bundle.Events {
 		bundle.Events[index].Payload = append([]byte(nil), bundle.Events[index].Payload...)
 	}
-	bundle.CompleteLog.Data = append([]byte(nil), bundle.CompleteLog.Data...)
 	return bundle
 }
