@@ -48,30 +48,39 @@ jobs:
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/gvisor-x86_64.tar.bz2"
-          install_dir="${RUNNER_TEMP}/gvisor"
+          install_root="/opt/provenance-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install_dir="${install_root}/gvisor"
+          echo "PROVENANCE_INSTALL_ROOT=${install_root}" >> "${GITHUB_ENV}"
           curl --fail --location --silent --show-error \
             --output "${archive}" \
             "https://storage.googleapis.com/gvisor/releases/nightly/${GVISOR_NIGHTLY}/x86_64/gvisor.tar.bz2"
           printf '%s  %s\n' "${GVISOR_SHA512}" "${archive}" | sha512sum --check --strict -
-          mkdir --parents "${install_dir}"
-          tar --extract --bzip2 --file "${archive}" --directory "${install_dir}"
-          chmod --recursive a+rX "${install_dir}"
-          test -x "${install_dir}/runsc"
+          sudo mkdir --parents "${install_dir}"
+          sudo tar --extract --bzip2 --file "${archive}" --directory "${install_dir}"
+          sudo chmod --recursive a+rX "${install_root}"
+          sudo find "${install_dir}/gvisor-bin" -type f -exec chmod a+rx {} +
+          sudo -u nobody test -x "${install_dir}/runsc"
+          while IFS= read -r -d '' helper; do
+            sudo -u nobody test -x "${helper}"
+          done < <(find "${install_dir}/gvisor-bin" -type f -print0)
           "${install_dir}/runsc" --version
-          echo "PROVENANCE_RUNSC_PATH=${install_dir}/runsc" >> "${GITHUB_ENV}"
+          wrapper="${install_dir}/runsc-provenance-smoke"
+          printf '#!/bin/sh\nexec "%s/runsc" --gofer-network-namespace=new "$@"\n' "${install_dir}" | sudo tee "${wrapper}" > /dev/null
+          sudo chmod 0755 "${wrapper}"
+          echo "PROVENANCE_RUNSC_PATH=${wrapper}" >> "${GITHUB_ENV}"
       - name: Prepare pinned Alpine root filesystem
         shell: bash
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
-          rootfs="${RUNNER_TEMP}/alpine-rootfs"
+          rootfs="${PROVENANCE_INSTALL_ROOT}/alpine-rootfs"
           curl --fail --location --silent --show-error \
             --output "${archive}" \
             "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz"
           printf '%s  %s\n' "${ALPINE_SHA512}" "${archive}" | sha512sum --check --strict -
-          mkdir --parents "${rootfs}"
+          sudo mkdir --parents "${rootfs}"
           sudo tar --extract --gzip --file "${archive}" --directory "${rootfs}"
-          sudo test -x "${rootfs}/bin/sh"
+          sudo -u nobody test -x "${rootfs}/bin/sh"
           echo "PROVENANCE_RUNSC_ROOTFS=${rootfs}" >> "${GITHUB_ENV}"
       - name: Compile gVisor smoke test
         run: go test -c -o "${RUNNER_TEMP}/gvisor-smoke.test" ./internal/provider/gvisor
@@ -112,5 +121,18 @@ jobs:
             echo "refusing to remove unexpected cgroup path: ${PROVENANCE_CGROUP_PARENT}" >&2
             exit 1
           fi
-          sudo rmdir "${PROVENANCE_CGROUP_PARENT}/runner"
+          sudo find "${PROVENANCE_CGROUP_PARENT}" -mindepth 1 -depth -type d -exec rmdir {} +
           sudo rmdir "${PROVENANCE_CGROUP_PARENT}"
+      - name: Remove installed smoke assets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROVENANCE_INSTALL_ROOT:-}" ]]; then
+            exit 0
+          fi
+          if [[ ! "${PROVENANCE_INSTALL_ROOT}" =~ ^/opt/provenance-ci-[0-9]+-[0-9]+$ ]]; then
+            echo "refusing to remove unexpected install path: ${PROVENANCE_INSTALL_ROOT}" >&2
+            exit 1
+          fi
+          sudo rm --recursive --force -- "${PROVENANCE_INSTALL_ROOT}"
