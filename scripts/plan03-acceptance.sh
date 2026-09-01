@@ -323,21 +323,9 @@ validate_result() {
       ;;
     fork-pid-bomb)
       jq -es '
-        def at_ceiling: ((.pidsCurrent | tonumber) == (.pidsMax | tonumber));
-        def denied: (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber);
-        def longest_saturation:
-          reduce .[] as $sample
-            ({start: null, longest: 0};
-             if ($sample | at_ceiling) then
-               .start = (.start // $sample.timestampNanoseconds) |
-               .longest = ([.longest, ($sample.timestampNanoseconds - .start)] | max)
-             else
-               .start = null
-             end) |
-          .longest;
         ([.[].sandboxPIDsCurrent // 0] | max) > 0 and
         ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
-        (([.[] | denied] | max) > 0 or longest_saturation >= 10000000000)
+        all(.[]; (.pidsCurrent | tonumber) <= (.pidsMax | tonumber))
       ' "$samples" >/dev/null
       if jq -e '.classification=="workload_failure"' "$result" >/dev/null; then
         # A JVM exit caused by PID denial is acceptable only after the actual
@@ -348,7 +336,27 @@ validate_result() {
         grep -Fq 'Stopping server' "$decompressed"
         jq -es '([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0' "$samples" >/dev/null
       else
-        jq -e '.structuredEvents[] | select(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.enabled==true)' "$result" >/dev/null
+        jq -e '
+          any(.structuredEvents[]; .kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.enabled==true) and
+          any(.structuredEvents[]; .kind=="SERVER_READY") and
+          any(.structuredEvents[]; .kind=="CLEAN_SHUTDOWN_REQUESTED") and
+          any(.structuredEvents[]; .kind=="SERVER_STOPPED")
+        ' "$result" >/dev/null
+        jq -es '
+          def at_ceiling: ((.pidsCurrent | tonumber) == (.pidsMax | tonumber));
+          def longest_saturation:
+            reduce .[] as $sample
+              ({start: null, longest: 0};
+               if ($sample | at_ceiling) then
+                 .start = (.start // $sample.timestampNanoseconds) |
+                 .longest = ([.longest, ($sample.timestampNanoseconds - .start)] | max)
+               else
+                 .start = null
+               end) |
+            .longest;
+          ([.[] | select(at_ceiling)] | length) >= 20 and
+          longest_saturation >= 1000000000
+        ' "$samples" >/dev/null
       fi
       ;;
     disk-fill)
