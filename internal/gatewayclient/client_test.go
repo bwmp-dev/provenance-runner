@@ -34,10 +34,18 @@ const (
 func TestPlatformGatewayWireProtocolCompatibility(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	client := newClient(validConfig(), nil)
-	if got := client.authenticateMessage().GetAuthenticate().GetProtocolVersion(); got != "1" {
+	authenticate, err := client.authenticateMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := authenticate.GetAuthenticate().GetProtocolVersion(); got != "1" {
 		t.Fatalf("Authenticate.protocol_version = %q, want platform gateway literal 1", got)
 	}
-	protocols := client.capabilitiesMessage().GetCapabilities().GetProtocolVersions()
+	capabilitiesMessage, err := client.capabilitiesMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocols := capabilitiesMessage.GetCapabilities().GetProtocolVersions()
 	if len(protocols) != 1 || protocols[0] != "1" {
 		t.Fatalf("Capabilities.protocol_versions = %v, want [1]", protocols)
 	}
@@ -61,6 +69,12 @@ func TestHandshakeCapabilitiesHeartbeatAndDrainOrdering(t *testing.T) {
 					return err
 				}
 			}
+		}
+		firstHeartbeat := received[2]
+		if err := stream.Send(gatewayMessage(now, &runnerv1.GatewayMessage_HeartbeatAcknowledgement{HeartbeatAcknowledgement: &runnerv1.HeartbeatAcknowledgement{
+			RunnerMessageId: firstHeartbeat.GetMessageId(), Sequence: firstHeartbeat.GetHeartbeat().GetSequence(), CommittedAt: timestamppb.New(now),
+		}})); err != nil {
+			return err
 		}
 		if err := stream.Send(gatewayMessage(now, &runnerv1.GatewayMessage_Drain{Drain: &runnerv1.DrainRunner{
 			DrainId: "drain-1", Reason: "maintenance", Deadline: timestamppb.New(now.Add(time.Minute)),
@@ -91,7 +105,7 @@ func TestHandshakeCapabilitiesHeartbeatAndDrainOrdering(t *testing.T) {
 		t.Fatalf("authenticate = %#v", got)
 	}
 	capabilities := received[1].GetCapabilities()
-	if capabilities == nil || capabilities.GetRunnerVersion() != "test" || capabilities.GetOperatingSystem() != runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX || capabilities.GetArchitecture() != runnerv1.Architecture_ARCHITECTURE_AMD64 {
+	if capabilities == nil || capabilities.GetRunnerVersion() != "test" || capabilities.GetOperatingSystem() != runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX || capabilities.GetArchitecture() != runnerv1.Architecture_ARCHITECTURE_AMD64 || fmt.Sprint(capabilities.GetFeatures()) != "[PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS]" {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
 	if fmt.Sprint(capabilities.GetProtocolVersions()) != "[1]" || fmt.Sprint(capabilities.GetSandboxes()) != "[SANDBOX_KIND_GVISOR]" || fmt.Sprint(capabilities.GetProviders()) != "[SERVER_PROVIDER_PAPER]" {
@@ -174,22 +188,18 @@ func TestOrganizationScopeMustMatchExactly(t *testing.T) {
 	}
 }
 
-func TestUnsupportedMessagesAndActiveLeasesFailClosed(t *testing.T) {
+func TestUnsupportedPolicyMessagesFailClosed(t *testing.T) {
 	now := time.Now().UTC()
 	client := newClient(validConfig(), nil)
+	session := &clientSession{client: client, authenticated: authenticatedMessage(now, platformScope()).GetAuthenticated(), send: func(*runnerv1.RunnerMessage) error { return nil }, rootContext: context.Background()}
 	messages := []*runnerv1.GatewayMessage{
-		gatewayMessage(now, &runnerv1.GatewayMessage_Offer{Offer: &runnerv1.LeaseOffer{}}),
-		gatewayMessage(now, &runnerv1.GatewayMessage_Cancel{Cancel: &runnerv1.CancelJob{}}),
 		gatewayMessage(now, &runnerv1.GatewayMessage_PolicyUpdate{PolicyUpdate: &runnerv1.PolicyUpdate{}}),
 		gatewayMessage(now, &runnerv1.GatewayMessage_CredentialRotation{CredentialRotation: &runnerv1.RotateCredential{}}),
 	}
 	for _, message := range messages {
-		if _, err := client.handleGatewayMessage(message, now); err == nil || transient(err) {
+		if err := session.handleGatewayMessage(message, now); err == nil || transient(err) {
 			t.Fatalf("payload %T error = %v, want permanent", message.GetPayload(), err)
 		}
-	}
-	if message, err := client.heartbeatMessage(now, []*runnerv1.HeartbeatLease{{}}); err == nil || message != nil {
-		t.Fatalf("heartbeatMessage(nonempty) = %#v, %v", message, err)
 	}
 }
 
@@ -279,9 +289,17 @@ func TestCredentialExpiryAndCancellationStopSession(t *testing.T) {
 func TestCapabilitiesAndCredentialAreMutationIsolated(t *testing.T) {
 	config := validConfig()
 	client := newClient(config, nil)
-	authenticate := client.authenticateMessage().GetAuthenticate()
+	authenticateMessage, err := client.authenticateMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticate := authenticateMessage.GetAuthenticate()
 	authenticate.ConnectionCredential[0] = 'Y'
-	if got := string(client.authenticateMessage().GetAuthenticate().GetConnectionCredential()); got != "credential" {
+	authenticateMessage, err = client.authenticateMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(authenticateMessage.GetAuthenticate().GetConnectionCredential()); got != "credential" {
 		t.Fatalf("credential clone = %q", got)
 	}
 	first := client.capabilities()
@@ -510,6 +528,12 @@ func gatewayMessage(now time.Time, payload any) *runnerv1.GatewayMessage {
 		message.Payload = payload
 	case *runnerv1.GatewayMessage_Shutdown:
 		message.MessageId = "gateway-shutdown"
+		message.Payload = payload
+	case *runnerv1.GatewayMessage_EventAcknowledgement:
+		message.MessageId = "gateway-event-ack"
+		message.Payload = payload
+	case *runnerv1.GatewayMessage_HeartbeatAcknowledgement:
+		message.MessageId = "gateway-heartbeat-ack"
 		message.Payload = payload
 	default:
 		panic(fmt.Sprintf("unsupported test payload %T", payload))

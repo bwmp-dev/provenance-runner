@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
+	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -68,6 +69,9 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	}
 	if specification.GetLease() == nil || specification.GetLease().GetJobId() == "" {
 		return localjob.Job{}, errors.New("adapt Paper job: lease.job_id is required")
+	}
+	if !pluginname.ValidPaper(specification.GetTargetPluginName()) {
+		return localjob.Job{}, errors.New("adapt Paper job: target_plugin_name is missing or invalid")
 	}
 	if err := p.validateRemoteEnvironment(specification.GetEnvironment()); err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
@@ -142,6 +146,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	dependencies := make([]dependencyReference, 0, len(specification.GetDependencies()))
 	requiredDependencies := make([]string, 0, len(specification.GetDependencies()))
 	seenDependencies := make(map[string]struct{}, len(specification.GetDependencies()))
+	seenPluginNames := map[string]struct{}{strings.ToLower(specification.GetTargetPluginName()): {}}
 	for index, input := range specification.GetDependencies() {
 		if input == nil || input.GetDependencyId() == "" {
 			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependencies[%d].dependency_id is required", index)
@@ -150,6 +155,14 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependency %q is duplicated", input.GetDependencyId())
 		}
 		seenDependencies[input.GetDependencyId()] = struct{}{}
+		if !pluginname.ValidPaper(input.GetPluginName()) {
+			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependencies[%d].plugin_name is missing or invalid", index)
+		}
+		pluginNameKey := strings.ToLower(input.GetPluginName())
+		if _, exists := seenPluginNames[pluginNameKey]; exists {
+			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependency plugin name %q is duplicated", input.GetPluginName())
+		}
+		seenPluginNames[pluginNameKey] = struct{}{}
 		configured, exists := configuredDependencies[input.GetDependencyId()]
 		if !exists {
 			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependency %q is absent from normalized configuration", input.GetDependencyId())
@@ -165,9 +178,9 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 		if expected.filename != reference.Filename || expected.digest != digest {
 			return localjob.Job{}, fmt.Errorf("adapt Paper job: hashes.dependencies entry for %q does not match its download", input.GetDependencyId())
 		}
-		dependencies = append(dependencies, dependencyReference{ID: input.GetDependencyId(), Plugin: input.GetDependencyId(), Artifact: reference})
+		dependencies = append(dependencies, dependencyReference{ID: input.GetDependencyId(), Plugin: input.GetPluginName(), Artifact: reference})
 		if configured.Required {
-			requiredDependencies = append(requiredDependencies, input.GetDependencyId())
+			requiredDependencies = append(requiredDependencies, input.GetPluginName())
 		}
 	}
 	if len(dependencyHashes) != len(dependencies) {
@@ -187,7 +200,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 		Target:        target,
 		Dependencies:  dependencies,
 		TestPlan: testPlan{
-			TargetPlugin:              normalized.Project.Name,
+			TargetPlugin:              specification.GetTargetPluginName(),
 			RequiredDependencies:      requiredDependencies,
 			StabilizationMilliseconds: normalized.Tests.Startup.StabilizationSeconds * 1_000,
 			Console:                   console,

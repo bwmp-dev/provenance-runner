@@ -62,6 +62,7 @@ type Config struct {
 
 	RunnerVersion string `json:"-"`
 	credential    []byte
+	journalFile   string
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {
@@ -75,6 +76,7 @@ func LoadConfig(path, runnerVersion string) (Config, error) {
 	}
 	config = config.normalized()
 	config.RunnerVersion = runnerVersion
+	config.journalFile = filepath.Join(filepath.Dir(path), ".provenance-runner-journal.json")
 	if !filepath.IsAbs(config.CredentialFile) {
 		config.CredentialFile = filepath.Join(filepath.Dir(path), config.CredentialFile)
 	}

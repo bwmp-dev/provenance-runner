@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
+	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -41,8 +42,8 @@ func (r *OfferRejection) Error() string {
 	return r.Code + ": " + r.Message
 }
 
-// validateOffer is deliberately separate from stream handling until the gateway
-// publishes durable lease acknowledgement and resynchronization semantics.
+// validateOffer keeps hostile job validation separate from state transitions so
+// no offer is persisted or acknowledged before every bounded check succeeds.
 func (c *Client) validateOffer(offer *runnerv1.LeaseOffer, now time.Time, leaseDuration time.Duration) *OfferRejection {
 	if c == nil {
 		return rejectUnsupported("invalid_offer", "lease offer cannot be validated")
@@ -88,6 +89,9 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if rejection := validateOfferEnvironment(job.GetEnvironment()); rejection != nil {
 		return rejection
 	}
+	if rejection := validateOfferPluginNames(job); rejection != nil {
+		return rejection
+	}
 	if rejection := validateOfferPolicy(job.GetEffectivePolicy(), config.Resources); rejection != nil {
 		return rejection
 	}
@@ -96,6 +100,24 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	}
 	if job.GetCompleteLogUpload() != nil {
 		return rejectUnsupported("complete_log_upload_unsupported", "complete log upload is not supported by this runner phase")
+	}
+	return nil
+}
+
+func validateOfferPluginNames(job *runnerv1.JobSpecification) *OfferRejection {
+	if !pluginname.ValidPaper(job.GetTargetPluginName()) {
+		return rejectUnsupported("invalid_target_plugin_name", "target plugin name is missing or invalid")
+	}
+	seen := map[string]struct{}{strings.ToLower(job.GetTargetPluginName()): {}}
+	for _, dependency := range job.GetDependencies() {
+		if dependency == nil || !pluginname.ValidPaper(dependency.GetPluginName()) {
+			return rejectUnsupported("invalid_dependency_plugin_name", "dependency plugin name is missing or invalid")
+		}
+		key := strings.ToLower(dependency.GetPluginName())
+		if _, exists := seen[key]; exists {
+			return rejectUnsupported("duplicate_plugin_name", "target and dependency plugin names must be unique")
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }
