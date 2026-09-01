@@ -68,6 +68,24 @@ mkdir -p \
 chmod 0700 "$PLAN03_EVIDENCE_ROOT" "$PLAN03_WORK_ROOT"
 
 secret=PROVENANCE_TEST_SECRET_03
+pid_result_contract='
+  def trusted_pid_lifecycle:
+    (.structuredEvents // []) as $events |
+    any($events[]; .kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.enabled==true) and
+    any($events[]; .kind=="SERVER_READY") and
+    any($events[]; .kind=="CLEAN_SHUTDOWN_REQUESTED") and
+    any($events[]; .kind=="SERVER_STOPPED");
+  (
+    (.classification=="passed" and .phase=="completed" and (.failure // null)==null and .execution.exitCode==0) or
+    (.classification=="workload_failure" and .phase=="execution" and .failure.code=="gvisor_process_exit_nonzero" and .execution.exitCode==2)
+  ) and trusted_pid_lifecycle
+'
+# Raw workload console text is forgeable and cannot satisfy the trusted probe
+# contract. Keep the retained lifecycle-failure shape as a mandatory negative.
+if jq -e "$pid_result_contract" >/dev/null <<< '{"classification":"workload_failure","phase":"execution","failure":{"code":"gvisor_process_exit_nonzero"},"execution":{"exitCode":2},"structuredEvents":null}'; then
+  printf 'fork PID result contract accepted an untrusted lifecycle failure\n' >&2
+  exit 2
+fi
 paper_sha=8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e
 java_sha=968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03
 probe_sha=abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43
@@ -272,6 +290,9 @@ validate_result() {
     expected_memory=4294967296
     expected_pids=48
   fi
+  if [[ "$fixture" == fork-pid-bomb ]]; then
+    jq -e "$pid_result_contract" "$result" >/dev/null
+  fi
   jq -e \
     --arg fixture "$fixture" \
     --arg classification "$expected_classification" \
@@ -282,8 +303,7 @@ validate_result() {
     --argjson pids "$expected_pids" \
     '(
       if $fixture=="fork-pid-bomb" then
-        ((.classification=="passed" and .phase=="completed" and (.failure // null)==null and .execution.exitCode==0) or
-         (.classification=="workload_failure" and .phase=="execution" and .failure.code=="gvisor_process_exit_nonzero" and .execution.exitCode==2))
+        true
       else
         (.classification==$classification and .phase==$phase and ((.failure.code // "-")==$code) and (.execution.exitCode==$exitCode))
       end
@@ -329,8 +349,8 @@ validate_result() {
       ' "$samples" >/dev/null
       if jq -e '.classification=="workload_failure"' "$result" >/dev/null; then
         # A JVM exit caused by PID denial is acceptable only after the actual
-        # target plugin started, Paper became ready, and shutdown began. Bind
-        # this outcome to an observed kernel denial rather than generic load.
+        # target plugin completed the trusted probe lifecycle. Raw log markers
+        # are supplemental, and the outcome remains bound to a kernel denial.
         grep -Fq '[ProvenanceForkPidBomb] Enabling ProvenanceForkPidBomb' "$decompressed"
         grep -Fq 'Done (' "$decompressed"
         grep -Fq 'Stopping server' "$decompressed"
