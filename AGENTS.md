@@ -9,3 +9,4 @@
 - Distinguish infrastructure failures from plugin incompatibility.
 - Keep complete logs in object storage; send only bounded live batches and structured results through the gateway.
 - Hostile fixture tests run only in an explicitly prepared disposable Linux environment.
+- Never request, tag, invoke, or mention an external automated pull-request reviewer unless the user explicitly names and authorizes that exact service.
