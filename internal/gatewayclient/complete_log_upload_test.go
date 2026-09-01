@@ -57,13 +57,62 @@ func TestValidateCompleteLogUploadRejectsHostPathContentTypeAndExpiryBoundaries(
 }
 
 func TestPublicUploadIPRejectsNonPublicRanges(t *testing.T) {
-	for _, value := range []string{"127.0.0.1", "10.0.0.1", "169.254.1.1", "::1", "fc00::1"} {
-		if publicUploadIP(net.ParseIP(value)) {
-			t.Fatalf("publicUploadIP(%q) = true", value)
-		}
+	tests := []struct {
+		name   string
+		value  string
+		public bool
+	}{
+		{name: "IPv4 this network", value: "0.0.0.1"},
+		{name: "IPv4 private 10", value: "10.0.0.1"},
+		{name: "IPv4 CGNAT", value: "100.64.0.1"},
+		{name: "IPv4 loopback", value: "127.0.0.1"},
+		{name: "IPv4 link local", value: "169.254.1.1"},
+		{name: "IPv4 private 172", value: "172.16.0.1"},
+		{name: "IPv4 protocol assignment", value: "192.0.0.1"},
+		{name: "IPv4 documentation 1", value: "192.0.2.1"},
+		{name: "IPv4 AS112", value: "192.31.196.1"},
+		{name: "IPv4 AMT", value: "192.52.193.1"},
+		{name: "IPv4 deprecated transition", value: "192.88.99.1"},
+		{name: "IPv4 private 192", value: "192.168.0.1"},
+		{name: "IPv4 direct delegation AS112", value: "192.175.48.1"},
+		{name: "IPv4 benchmarking", value: "198.18.0.1"},
+		{name: "IPv4 documentation 2", value: "198.51.100.1"},
+		{name: "IPv4 documentation 3", value: "203.0.113.1"},
+		{name: "IPv4 multicast", value: "224.0.0.1"},
+		{name: "IPv4 reserved", value: "240.0.0.1"},
+		{name: "IPv4 limited broadcast", value: "255.255.255.255"},
+		{name: "IPv4 mapped loopback", value: "::ffff:127.0.0.1"},
+		{name: "IPv4 mapped CGNAT", value: "::ffff:100.64.0.1"},
+		{name: "IPv4 mapped documentation", value: "::ffff:192.0.2.1"},
+		{name: "IPv6 unspecified", value: "::"},
+		{name: "IPv6 loopback", value: "::1"},
+		{name: "IPv6 compatible", value: "::192.0.2.1"},
+		{name: "IPv6 translation well known", value: "64:ff9b::1"},
+		{name: "IPv6 translation local", value: "64:ff9b:1::1"},
+		{name: "IPv6 discard only", value: "100::1"},
+		{name: "IPv6 protocol assignment", value: "2001:1::1"},
+		{name: "IPv6 documentation 1", value: "2001:db8::1"},
+		{name: "IPv6 deprecated transition", value: "2002::1"},
+		{name: "IPv6 direct delegation AS112", value: "2620:4f:8000::1"},
+		{name: "IPv6 documentation 2", value: "3fff::1"},
+		{name: "IPv6 segment routing", value: "5f00::1"},
+		{name: "IPv6 unique local", value: "fc00::1"},
+		{name: "IPv6 deprecated site local", value: "fec0::1"},
+		{name: "IPv6 link local", value: "fe80::1"},
+		{name: "IPv6 multicast", value: "ff02::1"},
+		{name: "public IPv4", value: "1.1.1.1", public: true},
+		{name: "public mapped IPv4", value: "::ffff:1.1.1.1", public: true},
+		{name: "public IPv6", value: "2606:4700:4700::1111", public: true},
 	}
-	if !publicUploadIP(net.ParseIP("192.0.2.1")) {
-		t.Fatal("documentation-range address should exercise the public path")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := publicUploadIP(net.ParseIP(test.value)); got != test.public {
+				t.Fatalf("publicUploadIP(%q) = %t, want %t", test.value, got, test.public)
+			}
+		})
+	}
+	if publicUploadIP(nil) || publicUploadIP(net.IP{1, 2, 3}) {
+		t.Fatal("invalid IP representation was accepted")
 	}
 }
 

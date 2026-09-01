@@ -1046,7 +1046,6 @@ func (s *clientSession) queueResult(result execution.Result) error {
 	if err != nil {
 		return err
 	}
-	usage := &runnerv1.ResourceUsage{}
 	var completeLog *runnerv1.LogObject
 	if target := s.client.completeLogTarget(lease, attempt); target != nil {
 		ctx := s.rootContext
@@ -1060,7 +1059,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		}
 		if err != nil {
 			failed := &runnerv1.JobFailed{
-				Lease: lease, Attempt: attempt, Usage: usage, FailedAt: timestamppb.New(result.CompletedAt),
+				Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(result.CompletedAt),
 				Failure: &runnerv1.FailureDetail{
 					Category:  runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE,
 					Stage:     runnerv1.FailureStage_FAILURE_STAGE_RESULT_UPLOAD,
@@ -1077,7 +1076,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		if result.Passed() {
 			outcome = runnerv1.ResultOutcome_RESULT_OUTCOME_PASSED
 		}
-		structured := &runnerv1.StructuredResult{Outcome: outcome, Usage: usage, CompleteLog: completeLog, StartedAt: timestamppb.New(result.StartedAt), CompletedAt: timestamppb.New(result.CompletedAt)}
+		structured := &runnerv1.StructuredResult{Outcome: outcome, CompleteLog: completeLog, StartedAt: timestamppb.New(result.StartedAt), CompletedAt: timestamppb.New(result.CompletedAt)}
 		if result.Execution != nil && result.Execution.ExitCode != nil {
 			value := int32(*result.Execution.ExitCode)
 			structured.ProcessExitCode = &value
@@ -1086,7 +1085,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		return s.queueDurable(&runnerv1.RunnerMessage_Completed{Completed: completed}, nil)
 	}
 	failure := resultFailure(result)
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, Usage: usage, CompleteLog: completeLog, FailedAt: timestamppb.New(result.CompletedAt)}
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, CompleteLog: completeLog, FailedAt: timestamppb.New(result.CompletedAt)}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
 }
 

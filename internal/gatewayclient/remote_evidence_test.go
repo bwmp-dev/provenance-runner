@@ -28,7 +28,7 @@ func (u *recordingCompleteLogUploader) Upload(_ context.Context, target *complet
 	return proto.Clone(u.object).(*runnerv1.LogObject), u.err
 }
 
-func TestRemoteTerminalResultsIncludeCompleteLogAndUsageForSuccessAndFailure(t *testing.T) {
+func TestRemoteTerminalResultsIncludeCompleteLogAndOmitUnavailableUsage(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name           string
@@ -67,12 +67,12 @@ func TestRemoteTerminalResultsIncludeCompleteLogAndUsageForSuccessAndFailure(t *
 			}
 			if test.wantCompleted {
 				structured := sent.GetCompleted().GetResult()
-				if structured == nil || structured.GetOutcome() != test.wantOutcome || structured.GetUsage() == nil || !proto.Equal(structured.GetCompleteLog(), testLogObject()) {
+				if structured == nil || structured.GetOutcome() != test.wantOutcome || structured.GetUsage() != nil || !proto.Equal(structured.GetCompleteLog(), testLogObject()) {
 					t.Fatalf("completed result = %#v", structured)
 				}
 			} else {
 				failed := sent.GetFailed()
-				if failed == nil || failed.GetUsage() == nil || !proto.Equal(failed.GetCompleteLog(), testLogObject()) || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE {
+				if failed == nil || failed.GetUsage() != nil || !proto.Equal(failed.GetCompleteLog(), testLogObject()) || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE {
 					t.Fatalf("failed result = %#v", failed)
 				}
 			}
@@ -99,7 +99,7 @@ func TestRemoteUploadFailureBecomesClassifiedInfrastructureFailure(t *testing.T)
 		t.Fatal(err)
 	}
 	failed := sent.GetFailed()
-	if uploader.calls != 1 || failed == nil || failed.GetFailure().GetCode() != "complete_log_upload_failed" || failed.GetFailure().GetStage() != runnerv1.FailureStage_FAILURE_STAGE_RESULT_UPLOAD || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE || !failed.GetFailure().GetRetryable() || failed.GetUsage() == nil || failed.GetCompleteLog() != nil {
+	if uploader.calls != 1 || failed == nil || failed.GetFailure().GetCode() != "complete_log_upload_failed" || failed.GetFailure().GetStage() != runnerv1.FailureStage_FAILURE_STAGE_RESULT_UPLOAD || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE || !failed.GetFailure().GetRetryable() || failed.GetUsage() != nil || failed.GetCompleteLog() != nil {
 		t.Fatalf("upload failure = %#v calls=%d", failed, uploader.calls)
 	}
 	if strings.Contains(failed.GetFailure().GetSummary(), "secret") {
