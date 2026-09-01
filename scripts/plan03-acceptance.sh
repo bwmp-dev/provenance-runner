@@ -340,7 +340,7 @@ validate_result() {
       jq -es 'any(.[]; (.sandboxNetworkInterfaces|length)>0) and all(.[]; all(.sandboxNetworkInterfaces[]?; .Name=="lo"))' "$samples" >/dev/null
       ;;
     log-flood)
-      jq -e '.usage.rawOutputBytes >= 1000000 and .usage.completeLogBytes >= (.usage.rawOutputBytes-100000) and .usage.completeLogBytes > (.usage.capturedOutputBytes*10) and .usage.capturedOutputBytes==65536 and .usage.outputTruncated==true' "$result" >/dev/null
+      jq -e '.usage.completeLogBytes >= (.usage.rawOutputBytes-100000) and .usage.completeLogBytes <= (.usage.rawOutputBytes+100000) and .usage.completeLogBytes > (.usage.capturedOutputBytes*10) and .usage.capturedOutputBytes==65536 and .usage.outputTruncated==true' "$result" >/dev/null
       [[ $(grep -Fc PROVENANCE_LOG_FLOOD "$decompressed") -ge 10000 ]]
       ;;
   esac

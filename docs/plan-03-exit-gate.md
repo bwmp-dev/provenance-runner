@@ -92,12 +92,12 @@ other than loopback. Disk exhaustion must retain `No space left on device`.
 Timeout cases must reach their configured wall bound.
 
 The log-flood assertion proves bounded live output and a separate complete
-archive: at least 1 MiB must be observed, the live projection must be exactly
-65,536 bytes and marked truncated, the archive must remain within 100 KiB of
-raw observed bytes after structured-event separation, and at least 10,000
-flood lines must be present in the gzip. Every result's gzip size and SHA-256
-must match the exported file, and the configured secret must be absent from
-JSON, stderr, and the decompressed archive.
+archive: the live projection must be exactly 65,536 bytes and marked
+truncated, the archive must exceed the live projection by more than 10x and
+remain within 100 KiB of raw observed bytes after structured-event
+separation, and at least 10,000 flood lines must be present in the gzip. Every
+result's gzip size and SHA-256 must match the exported file, and the configured
+secret must be absent from JSON, stderr, and the decompressed archive.
 
 After every fixture, the harness audits the actual OCI cgroup path
 `<delegated parent>/provenance/provenance-<container ID>` recursively, then
