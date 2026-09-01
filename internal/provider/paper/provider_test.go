@@ -48,6 +48,19 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 			t.Fatalf("Identity() = %q; missing %q", identity, component)
 		}
 	}
+	reporter, ok := environment.(execution.ResourceClassReporter)
+	if !ok {
+		t.Fatal("resolved environment does not report its resource class")
+	}
+	if got := reporter.ResourceClass(); got != (execution.ResourceClass{
+		CPUMillis:    1500,
+		MemoryBytes:  1 << 30,
+		ProcessCount: 64,
+		DiskBytes:    2 << 30,
+		Network:      "none",
+	}) {
+		t.Fatalf("ResourceClass() = %#v", got)
+	}
 	prepared, err := environment.Prepare(context.Background())
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)

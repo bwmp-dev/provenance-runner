@@ -101,6 +101,10 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 		return finishResult(result)
 	}
 	result.Environment = &EnvironmentResult{Provider: provider.Name(), Identity: environment.Identity()}
+	if reporter, ok := environment.(ResourceClassReporter); ok {
+		resourceClass := reporter.ResourceClass()
+		result.Usage.ResourceClass = &resourceClass
+	}
 
 	result.Phase = PhasePreparation
 	prepared, prepareErr := environment.Prepare(preparationContext)

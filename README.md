@@ -8,7 +8,7 @@ The current alpha accepts one bounded local job document and emits one structure
 go run ./cmd/provenance-runner execute job.json
 ```
 
-On Linux filesystems that support `O_TMPFILE`, local execution can export the exact sanitized gzip evidence payload to a new owner-only file. Non-Linux platforms and filesystems without secure unnamed temporary files are rejected. The destination must not already exist, and parent directories are not created:
+On Linux filesystems that support `O_TMPFILE` and expose `/proc/self/fd`, local execution can export the exact sanitized gzip evidence payload to a new owner-only file. Non-Linux platforms and filesystems without secure unnamed temporary files or procfs descriptor links are rejected. The destination must not already exist, and parent directories are not created:
 
 ```sh
 go run ./cmd/provenance-runner execute job.json --complete-log result.log.gz
@@ -55,7 +55,7 @@ Build that archive from the pinned Paper JAR in a trusted networked preparation 
 go run ./cmd/provenance-paper-runtime -paper /path/to/paper-1.21.8-60.jar -output paper-prepared-runtime.tar.gz
 ```
 
-The alpha Paper provider accepts only probe `0.1.0` built from Provenance commit `0741914e16dee1476d8bbd8d7d370eaf8a0eb0c2`: SHA-256 `cc981edc49a1fc27a920c3e39415428d3897eb878e748a6ad2b708972ef6e082`, 462392 bytes. The JAR is reproducible from that commit, but the current public Provenance release does not publish probe bytes, so the operator must host those exact bytes and supply their HTTPS URI.
+The alpha Paper provider accepts only probe `0.1.0` built from Provenance commit `98d5f07f173a9e3f1b365add24b81c934d7e3c61`: SHA-256 `abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43`, 478837 bytes. The JAR is reproducible from that commit, but the current public Provenance release does not publish probe bytes, so the operator must host those exact bytes and supply their HTTPS URI.
 
 Optional limits are `PROVENANCE_MAX_ARTIFACT_BYTES`, `PROVENANCE_MAX_DEPENDENCY_BYTES`, `PROVENANCE_MAX_PREPARATION_BYTES`, and `PROVENANCE_MAX_CACHE_BYTES`. `PROVENANCE_GVISOR_PLATFORM` may be `systrap` (the default) or `kvm`. Implementation hard limits still apply.
 
@@ -75,8 +75,8 @@ The job cannot provide or replace the trusted probe, Paper, Java, prepared runti
 
 The Paper provider's `AdaptJob` boundary consumes the released runner `JobSpecification`, including the inspected target and dependency plugin names. Every target and dependency `ObjectDownload` must declare a positive `size_bytes`, match its job hash, and fit the provider's configured per-artifact, dependency, and preparation quotas. Those exact sizes flow into the content-addressed cache, which rejects short and oversized responses before workspace creation. The adapter materializes `tests.console` into the trusted probe plan and accepts only the reviewed lifecycle and command event/classification inventory. Remote preparation, execution, and graceful-shutdown timeouts remain distinct: preparation starts after `LeaseAccepted` and `JobPreparing` commit, execution starts only after `JobStarted` commits, and graceful shutdown bounds cleanup.
 
-## Current evidence limits
+## Current evidence
 
-Unit and hosted CI exercise preparation, bounded evidence, quotas, download policy, cleanup, and gVisor bundle construction. A dedicated hosted CI job verifies checksum-pinned gVisor nightly and Alpine root filesystem archives, then executes the real `runsc` containment and cleanup smoke test without allowing missing prerequisites to skip. There is not yet live Paper/JVM or hostile-fixture execution evidence for this slice.
+Unit and hosted CI exercise preparation, bounded evidence, quotas, download policy, cleanup, and gVisor bundle construction. A dedicated hosted CI job verifies checksum-pinned gVisor nightly and Alpine root filesystem archives, then executes the real `runsc` containment and cleanup smoke test without allowing missing prerequisites to skip. The [Plan 03 exit-gate evidence](docs/plan-03-exit-gate.md) retains a live Paper/JVM run of every benign and hostile fixture through the standalone CLI.
 
 Probe lifecycle output is bounded and fails closed on missing, malformed, duplicate, out-of-order, or failed assertions. It is not cryptographically attributable: the tested plugin shares the JVM and sandbox UID and could attempt to forge or modify the reserved event channel.

@@ -49,7 +49,13 @@ var osCompleteLogLinuxOperations = completeLogLinuxOperations{
 		return os.NewFile(uintptr(fd), "complete-log-anchor"), nil
 	},
 	publish: func(anchor, directory *os.File, name string) error {
-		return unix.Linkat(int(anchor.Fd()), "", int(directory.Fd()), name, unix.AT_EMPTY_PATH)
+		// AT_EMPTY_PATH requires CAP_DAC_READ_SEARCH even when the caller owns
+		// the O_TMPFILE inode. Keep the runner unprivileged and link the anchored
+		// descriptor through procfs instead. AT_SYMLINK_FOLLOW resolves only the
+		// kernel-owned /proc/self/fd entry; the destination remains relative to
+		// the already-open directory and linkat still refuses replacement.
+		source := fmt.Sprintf("/proc/self/fd/%d", anchor.Fd())
+		return unix.Linkat(unix.AT_FDCWD, source, int(directory.Fd()), name, unix.AT_SYMLINK_FOLLOW)
 	},
 }
 

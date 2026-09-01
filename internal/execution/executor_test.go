@@ -109,6 +109,37 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 	}
 }
 
+func TestExecutorReportsAllocatedResourceClass(t *testing.T) {
+	want := ResourceClass{
+		CPUMillis:                      1500,
+		MemoryBytes:                    2 << 30,
+		ProcessCount:                   64,
+		DiskBytes:                      4 << 30,
+		Network:                        "none",
+		MaximumConnections:             0,
+		MaximumBandwidthBytesPerSecond: 0,
+	}
+	provider := &fakeProvider{
+		name: "fake",
+		resolve: func(context.Context, Request) (Environment, error) {
+			return &resourceReportingEnvironment{
+				fakeEnvironment: &fakeEnvironment{
+					identity: "fake/constrained",
+					prepare: func(context.Context) (PreparedEnvironment, error) {
+						return &fakePrepared{}, nil
+					},
+				},
+				resourceClass: want,
+			}, nil
+		},
+	}
+
+	result := newTestExecutor(t, provider).Execute(context.Background(), validJob())
+	if !result.Passed() || result.Usage.ResourceClass == nil || *result.Usage.ResourceClass != want {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestExecutorRunsObserverImmediatelyBeforeSandboxExecution(t *testing.T) {
 	var phases []string
 	prepared := &fakePrepared{
@@ -463,6 +494,15 @@ func (p *fakeProvider) Resolve(ctx context.Context, request Request) (Environmen
 type fakeEnvironment struct {
 	identity string
 	prepare  func(context.Context) (PreparedEnvironment, error)
+}
+
+type resourceReportingEnvironment struct {
+	*fakeEnvironment
+	resourceClass ResourceClass
+}
+
+func (e *resourceReportingEnvironment) ResourceClass() ResourceClass {
+	return e.resourceClass
 }
 
 func (e *fakeEnvironment) Identity() string {

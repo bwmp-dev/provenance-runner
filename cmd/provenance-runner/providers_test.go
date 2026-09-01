@@ -21,6 +21,29 @@ func TestPaperRegistryFailsBeforeExecutionWhenOperatorPinsAreMissing(t *testing.
 	}
 }
 
+func TestPaperPlatformIsExplicitlyLinuxAMD64(t *testing.T) {
+	for _, test := range []struct {
+		goos   string
+		goarch string
+		valid  bool
+	}{
+		{goos: "linux", goarch: "amd64", valid: true},
+		{goos: "linux", goarch: "arm64"},
+		{goos: "darwin", goarch: "amd64"},
+		{goos: "windows", goarch: "amd64"},
+	} {
+		t.Run(test.goos+"_"+test.goarch, func(t *testing.T) {
+			err := validatePaperPlatform(test.goos, test.goarch)
+			if (err == nil) != test.valid {
+				t.Fatalf("validatePaperPlatform() error = %v", err)
+			}
+			if err != nil && !strings.Contains(err.Error(), test.goos+"/"+test.goarch) {
+				t.Fatalf("validatePaperPlatform() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestPaperRegistryRejectsBadOperatorPinBeforeRuntimeSetup(t *testing.T) {
 	values := map[string]string{
 		"PROVENANCE_PAPER_PROBE_URI":        "https://artifacts.example.com/probe.jar",

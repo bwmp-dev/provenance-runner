@@ -85,6 +85,23 @@ type Environment interface {
 	Prepare(context.Context) (PreparedEnvironment, error)
 }
 
+// ResourceClassReporter exposes the allocation applied to an isolated
+// environment. It is optional so development providers without a resource
+// boundary do not misrepresent host execution as constrained.
+type ResourceClassReporter interface {
+	ResourceClass() ResourceClass
+}
+
+type ResourceClass struct {
+	CPUMillis                      int64  `json:"cpuMillis"`
+	MemoryBytes                    int64  `json:"memoryBytes"`
+	ProcessCount                   int64  `json:"processCount"`
+	DiskBytes                      int64  `json:"diskBytes"`
+	Network                        string `json:"network"`
+	MaximumConnections             int64  `json:"maximumConnections"`
+	MaximumBandwidthBytesPerSecond int64  `json:"maximumBandwidthBytesPerSecond"`
+}
+
 type PreparedEnvironment interface {
 	Execute(context.Context) (ExecutionOutcome, error)
 	Collect(context.Context) (CollectedOutput, error)
@@ -212,16 +229,17 @@ type CleanupResult struct {
 }
 
 type UsageResult struct {
-	WallTimeMilliseconds      int64 `json:"wallTimeMilliseconds"`
-	RawOutputBytes            int64 `json:"rawOutputBytes,omitempty"`
-	CapturedOutputBytes       int64 `json:"capturedOutputBytes,omitempty"`
-	StructuredEventCount      int64 `json:"structuredEventCount,omitempty"`
-	StructuredEventBytes      int64 `json:"structuredEventBytes,omitempty"`
-	CompleteLogBytes          int64 `json:"completeLogBytes,omitempty"`
-	CompressedLogBytes        int64 `json:"compressedLogBytes,omitempty"`
-	TruncatedLineCount        int64 `json:"truncatedLineCount,omitempty"`
-	OutputTruncated           bool  `json:"outputTruncated,omitempty"`
-	StructuredEventsTruncated bool  `json:"structuredEventsTruncated,omitempty"`
+	ResourceClass             *ResourceClass `json:"resourceClass,omitempty"`
+	WallTimeMilliseconds      int64          `json:"wallTimeMilliseconds"`
+	RawOutputBytes            int64          `json:"rawOutputBytes,omitempty"`
+	CapturedOutputBytes       int64          `json:"capturedOutputBytes,omitempty"`
+	StructuredEventCount      int64          `json:"structuredEventCount,omitempty"`
+	StructuredEventBytes      int64          `json:"structuredEventBytes,omitempty"`
+	CompleteLogBytes          int64          `json:"completeLogBytes,omitempty"`
+	CompressedLogBytes        int64          `json:"compressedLogBytes,omitempty"`
+	TruncatedLineCount        int64          `json:"truncatedLineCount,omitempty"`
+	OutputTruncated           bool           `json:"outputTruncated,omitempty"`
+	StructuredEventsTruncated bool           `json:"structuredEventsTruncated,omitempty"`
 }
 
 func (r Result) Passed() bool {

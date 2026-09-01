@@ -412,6 +412,19 @@ func (e *environment) Identity() string {
 	return e.provider.Identity()
 }
 
+func (e *environment) ResourceClass() execution.ResourceClass {
+	return execution.ResourceClass{
+		CPUMillis:          e.config.CPUMillis,
+		MemoryBytes:        e.config.MemoryBytes,
+		ProcessCount:       e.config.PIDs,
+		DiskBytes:          e.config.DiskBytes,
+		Network:            "none",
+		MaximumConnections: 0,
+		// With no network stack, the effective bandwidth ceiling is zero.
+		MaximumBandwidthBytesPerSecond: 0,
+	}
+}
+
 func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironment, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

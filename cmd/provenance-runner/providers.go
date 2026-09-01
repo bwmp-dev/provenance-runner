@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,9 @@ func registryForProviderWithOptions(ctx context.Context, providerName string, lo
 }
 
 func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup, options paperProviderOptions) (*paper.Provider, *instancelock.Set, error) {
+	if err := validatePaperPlatform(runtime.GOOS, runtime.GOARCH); err != nil {
+		return nil, nil, err
+	}
 	catalog, err := operatorCatalog(lookup)
 	if err != nil {
 		return nil, nil, err
@@ -199,6 +203,13 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 		return fail(err)
 	}
 	return provider, instanceLocks, nil
+}
+
+func validatePaperPlatform(goos, goarch string) error {
+	if goos != "linux" || goarch != "amd64" {
+		return fmt.Errorf("Paper provider requires linux/amd64, current platform is %s/%s", goos, goarch)
+	}
+	return nil
 }
 
 func localHostileFixturesOptIn(lookup environmentLookup) (bool, error) {
