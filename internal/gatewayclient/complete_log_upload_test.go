@@ -90,6 +90,7 @@ func TestPublicUploadIPRejectsNonPublicRanges(t *testing.T) {
 		{name: "IPv6 translation well known", value: "64:ff9b::1"},
 		{name: "IPv6 translation local", value: "64:ff9b:1::1"},
 		{name: "IPv6 discard only", value: "100::1"},
+		{name: "IPv6 dummy prefix", value: "100:0:0:1::1"},
 		{name: "IPv6 protocol assignment", value: "2001:1::1"},
 		{name: "IPv6 documentation 1", value: "2001:db8::1"},
 		{name: "IPv6 deprecated transition", value: "2002::1"},
