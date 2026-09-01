@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -127,11 +128,11 @@ func validateJournalState(state journalState) error {
 			return errors.New("active specification identity or expiry is invalid")
 		}
 	}
-	if specification.GetAttempt().GetAttemptNumber() == 0 || specification.GetAttempt().GetAttemptNumber() > maximumAttemptNumber || !validPaperPluginName(specification.GetTargetPluginName()) {
+	if specification.GetAttempt().GetAttemptNumber() == 0 || specification.GetAttempt().GetAttemptNumber() > maximumAttemptNumber || !pluginname.ValidPaper(specification.GetTargetPluginName()) {
 		return errors.New("active specification attempt or target plugin identity is invalid")
 	}
 	for _, dependency := range specification.GetDependencies() {
-		if dependency == nil || !validPaperPluginName(dependency.GetPluginName()) {
+		if dependency == nil || !pluginname.ValidPaper(dependency.GetPluginName()) {
 			return errors.New("active specification dependency plugin identity is invalid")
 		}
 	}

@@ -169,9 +169,33 @@ func TestAdaptJobRejectsDigestAndPolicyMismatches(t *testing.T) {
 			},
 			want: "target_plugin_name is missing or invalid",
 		},
+		"target plugin starts with dot": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.TargetPluginName = ".plugin"
+			},
+			want: "target_plugin_name is missing or invalid",
+		},
+		"target plugin starts with hyphen": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.TargetPluginName = "-plugin"
+			},
+			want: "target_plugin_name is missing or invalid",
+		},
 		"missing dependency plugin name": {
 			mutate: func(specification *runnerv1.JobSpecification) {
 				specification.Dependencies[0].PluginName = ""
+			},
+			want: "dependencies[0].plugin_name is missing or invalid",
+		},
+		"dependency plugin starts with dot": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.Dependencies[0].PluginName = ".plugin"
+			},
+			want: "dependencies[0].plugin_name is missing or invalid",
+		},
+		"dependency plugin starts with hyphen": {
+			mutate: func(specification *runnerv1.JobSpecification) {
+				specification.Dependencies[0].PluginName = "-plugin"
 			},
 			want: "dependencies[0].plugin_name is missing or invalid",
 		},

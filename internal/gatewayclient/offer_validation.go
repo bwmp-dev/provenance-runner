@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
+	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -104,12 +105,12 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 }
 
 func validateOfferPluginNames(job *runnerv1.JobSpecification) *OfferRejection {
-	if !validPaperPluginName(job.GetTargetPluginName()) {
+	if !pluginname.ValidPaper(job.GetTargetPluginName()) {
 		return rejectUnsupported("invalid_target_plugin_name", "target plugin name is missing or invalid")
 	}
 	seen := map[string]struct{}{strings.ToLower(job.GetTargetPluginName()): {}}
 	for _, dependency := range job.GetDependencies() {
-		if dependency == nil || !validPaperPluginName(dependency.GetPluginName()) {
+		if dependency == nil || !pluginname.ValidPaper(dependency.GetPluginName()) {
 			return rejectUnsupported("invalid_dependency_plugin_name", "dependency plugin name is missing or invalid")
 		}
 		key := strings.ToLower(dependency.GetPluginName())
@@ -119,23 +120,6 @@ func validateOfferPluginNames(job *runnerv1.JobSpecification) *OfferRejection {
 		seen[key] = struct{}{}
 	}
 	return nil
-}
-
-func validPaperPluginName(value string) bool {
-	if len(value) == 0 || len(value) > 64 {
-		return false
-	}
-	for _, character := range value {
-		if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' && character != '.' && character != '-' {
-			return false
-		}
-	}
-	switch strings.ToLower(value) {
-	case "bukkit", "minecraft", "mojang", "spigot", "paper":
-		return false
-	default:
-		return true
-	}
 }
 
 func offerExpiration(value *timestamppb.Timestamp, now time.Time, leaseDuration time.Duration) (time.Time, *OfferRejection) {

@@ -481,6 +481,137 @@ func TestPendingEventAuthoritativeStateMatrix(t *testing.T) {
 	}
 }
 
+func TestNonterminalStaleEventsAreReissuedWithoutAdvancingExecution(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		phase   runnerv1.JobPhase
+		payload func(*runnerv1.LeaseOffer, time.Time) any
+		matches func(*runnerv1.RunnerMessage) bool
+	}{
+		{name: "accepted", phase: runnerv1.JobPhase_JOB_PHASE_ACCEPTED, payload: func(offer *runnerv1.LeaseOffer, now time.Time) any {
+			return &runnerv1.RunnerMessage_LeaseAccepted{LeaseAccepted: &runnerv1.LeaseAccepted{Lease: offer.GetJob().GetLease(), Attempt: offer.GetJob().GetAttempt(), AcceptedAt: timestamppb.New(now.Add(-time.Minute))}}
+		}, matches: func(message *runnerv1.RunnerMessage) bool { return message.GetLeaseAccepted() != nil }},
+		{name: "preparing", phase: runnerv1.JobPhase_JOB_PHASE_PREPARING, payload: func(offer *runnerv1.LeaseOffer, now time.Time) any {
+			return &runnerv1.RunnerMessage_JobPreparing{JobPreparing: &runnerv1.JobPreparing{Lease: offer.GetJob().GetLease(), Attempt: offer.GetJob().GetAttempt(), StartedAt: timestamppb.New(now.Add(-time.Minute))}}
+		}, matches: func(message *runnerv1.RunnerMessage) bool { return message.GetJobPreparing() != nil }},
+		{name: "started", phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, payload: func(offer *runnerv1.LeaseOffer, now time.Time) any {
+			return &runnerv1.RunnerMessage_JobStarted{JobStarted: &runnerv1.JobStarted{Lease: offer.GetJob().GetLease(), Attempt: offer.GetJob().GetAttempt(), StartedAt: timestamppb.New(now.Add(-time.Minute))}}
+		}, matches: func(message *runnerv1.RunnerMessage) bool { return message.GetJobStarted() != nil }},
+		{name: "completed", phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, payload: func(offer *runnerv1.LeaseOffer, now time.Time) any {
+			return &runnerv1.RunnerMessage_Completed{Completed: &runnerv1.JobCompleted{Lease: offer.GetJob().GetLease(), Attempt: offer.GetJob().GetAttempt(), Result: &runnerv1.StructuredResult{Outcome: runnerv1.ResultOutcome_RESULT_OUTCOME_PASSED, StartedAt: timestamppb.New(now.Add(-2 * time.Minute)), CompletedAt: timestamppb.New(now.Add(-time.Minute))}}}
+		}, matches: func(message *runnerv1.RunnerMessage) bool { return message.GetCompleted() != nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+			client := newClient(validConfig(), nil)
+			client.now = func() time.Time { return now }
+			offer := validLeaseOffer(now)
+			specification, err := proto.MarshalOptions{Deterministic: true}.Marshal(offer.GetJob())
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending := &runnerv1.RunnerMessage{MessageId: "000000000000000000000000-0000000000000001", SentAt: timestamppb.New(now)}
+			switch payload := test.payload(offer, now).(type) {
+			case *runnerv1.RunnerMessage_LeaseAccepted:
+				pending.Payload = payload
+			case *runnerv1.RunnerMessage_JobPreparing:
+				pending.Payload = payload
+			case *runnerv1.RunnerMessage_JobStarted:
+				pending.Payload = payload
+			case *runnerv1.RunnerMessage_Completed:
+				pending.Payload = payload
+			default:
+				t.Fatal("unsupported test payload")
+			}
+			encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.journal.update(func(state *journalState) error {
+				state.MessageSequence = 1
+				state.Active = &journalJob{Specification: specification, OfferMessageID: "offer", OfferDigest: bytes.Repeat([]byte{1}, sha256.Size), Phase: test.phase, ExpiresAt: offer.GetJob().GetLease().GetExpiresAt().AsTime()}
+				state.PendingMessage = encoded
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			startResponse := make(chan error, 1)
+			if test.name == "started" {
+				client.setStartResponse(startResponse)
+			}
+			var sent []*runnerv1.RunnerMessage
+			session := &clientSession{client: client, authenticated: authenticatedMessage(now, platformScope()).GetAuthenticated(), send: func(message *runnerv1.RunnerMessage) error {
+				sent = append(sent, proto.Clone(message).(*runnerv1.RunnerMessage))
+				return nil
+			}, rootContext: context.Background()}
+			renewedLease := proto.Clone(offer.GetJob().GetLease()).(*runnerv1.LeaseIdentity)
+			renewedLease.ExpiresAt = timestamppb.New(now.Add(9 * time.Minute))
+			reconciliation := &runnerv1.LeaseReconciliation{Lease: renewedLease, Attempt: proto.Clone(offer.GetJob().GetAttempt()).(*runnerv1.AttemptIdentity), Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE, Status: runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, Phase: test.phase}
+			acknowledgement := &runnerv1.RunnerEventAcknowledgement{RunnerMessageId: pending.GetMessageId(), Reconciliation: reconciliation, CommittedAt: timestamppb.New(now)}
+			if err := session.handleEventAcknowledgement(acknowledgement, now); err != nil {
+				t.Fatal(err)
+			}
+			state := client.journal.snapshot()
+			reissued := new(runnerv1.RunnerMessage)
+			if state.Active == nil || !state.Active.ExpiresAt.Equal(now.Add(9*time.Minute)) || len(state.PendingMessage) == 0 || proto.Unmarshal(state.PendingMessage, reissued) != nil || reissued.GetMessageId() == pending.GetMessageId() || !test.matches(reissued) || len(sent) != 1 {
+				t.Fatalf("stale %s transition state = %#v, reissued = %#v, sent = %#v", test.name, state, reissued, sent)
+			}
+			reissuedLease, _ := runnerMessageIdentity(reissued)
+			if !reissuedLease.GetExpiresAt().AsTime().Equal(now.Add(9 * time.Minute)) {
+				t.Fatalf("reissued %s lease expiry = %v", test.name, reissuedLease.GetExpiresAt())
+			}
+			if test.name == "started" {
+				select {
+				case err := <-startResponse:
+					t.Fatalf("sandbox start gate completed on STALE acknowledgement: %v", err)
+				default:
+				}
+				applied := proto.Clone(reconciliation).(*runnerv1.LeaseReconciliation)
+				applied.Disposition = runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_APPLIED
+				if err := session.handleEventAcknowledgement(&runnerv1.RunnerEventAcknowledgement{RunnerMessageId: reissued.GetMessageId(), Reconciliation: applied, CommittedAt: timestamppb.New(now)}, now); err != nil {
+					t.Fatal(err)
+				}
+				if err := <-startResponse; err != nil {
+					t.Fatalf("sandbox start gate after APPLIED acknowledgement = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestNonterminalStaleHeartbeatPreservesLiveLeaseWithoutPhaseRegression(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	client := newClient(validConfig(), nil)
+	client.now = func() time.Time { return now }
+	offer := validLeaseOffer(now)
+	specification, err := proto.MarshalOptions{Deterministic: true}.Marshal(offer.GetJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.journal.update(func(state *journalState) error {
+		state.Active = &journalJob{Specification: specification, OfferMessageID: "offer", OfferDigest: bytes.Repeat([]byte{1}, sha256.Size), Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, ExpiresAt: offer.GetJob().GetLease().GetExpiresAt().AsTime()}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session := &clientSession{client: client, authenticated: authenticatedMessage(now, platformScope()).GetAuthenticated(), send: func(*runnerv1.RunnerMessage) error { return nil }, rootContext: context.Background()}
+	if err := session.sendHeartbeat(now); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := session.pendingHeartbeat
+	renewedLease := proto.Clone(offer.GetJob().GetLease()).(*runnerv1.LeaseIdentity)
+	renewedLease.ExpiresAt = timestamppb.New(now.Add(9 * time.Minute))
+	reconciliation := &runnerv1.LeaseReconciliation{Lease: renewedLease, Attempt: proto.Clone(offer.GetJob().GetAttempt()).(*runnerv1.AttemptIdentity), Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE, Status: runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, Phase: runnerv1.JobPhase_JOB_PHASE_PREPARING}
+	acknowledgement := &runnerv1.HeartbeatAcknowledgement{RunnerMessageId: heartbeat.GetMessageId(), Sequence: heartbeat.GetHeartbeat().GetSequence(), Reconciliations: []*runnerv1.LeaseReconciliation{reconciliation}, CommittedAt: timestamppb.New(now)}
+	if err := session.handleHeartbeatAcknowledgement(acknowledgement, now); err != nil {
+		t.Fatal(err)
+	}
+	state := client.journal.snapshot()
+	if state.Active == nil || state.Active.Phase != runnerv1.JobPhase_JOB_PHASE_RUNNING || !state.Active.ExpiresAt.Equal(now.Add(9*time.Minute)) {
+		t.Fatalf("nonterminal stale heartbeat state = %#v", state)
+	}
+}
+
 func TestCancellationCommandIsIdempotentAcrossReconnectAndPayloadConflictsFail(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	client := newClient(validConfig(), nil)
@@ -659,8 +790,8 @@ func TestDeferredCleanupResultWaitsForSemanticCancellationCommand(t *testing.T) 
 	if err := session.handleWorkerEvent(workerEvent{result: &cleanupResult}); err != nil {
 		t.Fatal(err)
 	}
-	if client.isWorkerRunning() || len(session.deferred) != 1 {
-		t.Fatalf("deferred cleanup state: workerRunning=%t deferred=%d", client.isWorkerRunning(), len(session.deferred))
+	if client.isWorkerRunning() || client.deferredWorkerEventCount() != 1 {
+		t.Fatalf("deferred cleanup state: workerRunning=%t deferred=%d", client.isWorkerRunning(), client.deferredWorkerEventCount())
 	}
 	renewal := sent[0]
 	acknowledgement := eventAcknowledgement(now, "renewal-cancel-ack", renewal, runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, runnerv1.JobPhase_JOB_PHASE_CANCELLING).GetEventAcknowledgement()
@@ -669,15 +800,124 @@ func TestDeferredCleanupResultWaitsForSemanticCancellationCommand(t *testing.T) 
 	if err := session.handleEventAcknowledgement(acknowledgement, now); err != nil {
 		t.Fatal(err)
 	}
-	if state := client.journal.snapshot(); state.Active == nil || len(state.Active.CancellationDigest) != 0 || len(state.PendingMessage) != 0 || len(session.deferred) != 1 {
-		t.Fatalf("pre-command cancellation state = %#v, deferred=%d", state, len(session.deferred))
+	if state := client.journal.snapshot(); state.Active == nil || len(state.Active.CancellationDigest) != 0 || len(state.PendingMessage) != 0 || client.deferredWorkerEventCount() != 1 {
+		t.Fatalf("pre-command cancellation state = %#v, deferred=%d", state, client.deferredWorkerEventCount())
 	}
 	cancellation := &runnerv1.CancelJob{Lease: proto.Clone(offer.GetJob().GetLease()).(*runnerv1.LeaseIdentity), Attempt: proto.Clone(offer.GetJob().GetAttempt()).(*runnerv1.AttemptIdentity), CancellationId: "cancellation-1", Reason: "requested", Deadline: timestamppb.New(now.Add(time.Minute))}
 	if err := session.handleCancellation(uniqueGatewayMessage(now, "cancel-command", &runnerv1.GatewayMessage_Cancel{Cancel: cancellation}), now); err != nil {
 		t.Fatal(err)
 	}
-	if len(sent) != 2 || sent[1].GetCancelled() == nil || sent[1].GetCancelled().GetCleanupCompleted() || sent[1].GetCancelled().GetCleanupFailure().GetCode() != "cleanup_failed" || len(session.deferred) != 0 {
-		t.Fatalf("cancellation cleanup result = %#v, deferred=%d", sent, len(session.deferred))
+	if len(sent) != 2 || sent[1].GetCancelled() == nil || sent[1].GetCancelled().GetCleanupCompleted() || sent[1].GetCancelled().GetCleanupFailure().GetCode() != "cleanup_failed" || client.deferredWorkerEventCount() != 0 {
+		t.Fatalf("cancellation cleanup result = %#v, deferred=%d", sent, client.deferredWorkerEventCount())
+	}
+}
+
+func TestDeferredWorkerStartSurvivesSessionReplacement(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	client := newClient(validConfig(), nil)
+	client.now = func() time.Time { return now }
+	offer := validLeaseOffer(now)
+	specification, err := proto.MarshalOptions{Deterministic: true}.Marshal(offer.GetJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.journal.update(func(state *journalState) error {
+		state.Active = &journalJob{Specification: specification, OfferMessageID: "offer", OfferDigest: bytes.Repeat([]byte{1}, sha256.Size), Phase: runnerv1.JobPhase_JOB_PHASE_PREPARING, ExpiresAt: offer.GetJob().GetLease().GetExpiresAt().AsTime()}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client.workerMu.Lock()
+	client.workerRunning = true
+	client.workerMu.Unlock()
+	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
+	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
+	var firstSent []*runnerv1.RunnerMessage
+	first := &clientSession{client: client, authenticated: authenticated, send: func(message *runnerv1.RunnerMessage) error {
+		firstSent = append(firstSent, proto.Clone(message).(*runnerv1.RunnerMessage))
+		return nil
+	}, rootContext: context.Background()}
+	if err := first.queueRenewal(now); err != nil {
+		t.Fatal(err)
+	}
+	startResponse := make(chan error, 1)
+	if err := first.handleWorkerEvent(workerEvent{start: startResponse}); err != nil {
+		t.Fatal(err)
+	}
+	if client.deferredWorkerEventCount() != 1 {
+		t.Fatalf("first session deferred starts = %d", client.deferredWorkerEventCount())
+	}
+	var secondSent []*runnerv1.RunnerMessage
+	second := &clientSession{client: client, authenticated: authenticated, send: func(message *runnerv1.RunnerMessage) error {
+		secondSent = append(secondSent, proto.Clone(message).(*runnerv1.RunnerMessage))
+		return nil
+	}, rootContext: context.Background()}
+	renewal := firstSent[0]
+	if err := second.handleEventAcknowledgement(eventAcknowledgement(now, "renewal-ack", renewal, runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, runnerv1.JobPhase_JOB_PHASE_PREPARING).GetEventAcknowledgement(), now); err != nil {
+		t.Fatal(err)
+	}
+	if client.deferredWorkerEventCount() != 0 || len(secondSent) != 1 || secondSent[0].GetJobStarted() == nil {
+		t.Fatalf("replacement session start state: deferred=%d sent=%#v", client.deferredWorkerEventCount(), secondSent)
+	}
+	select {
+	case err := <-startResponse:
+		t.Fatalf("start gate completed before replacement session ACK: %v", err)
+	default:
+	}
+	if err := second.handleEventAcknowledgement(eventAcknowledgement(now, "started-ack", secondSent[0], runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, runnerv1.JobPhase_JOB_PHASE_RUNNING).GetEventAcknowledgement(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-startResponse; err != nil {
+		t.Fatalf("replacement session start gate = %v", err)
+	}
+	client.markWorkerStopped()
+}
+
+func TestDeferredWorkerResultSurvivesSessionReplacement(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	client := newClient(validConfig(), nil)
+	client.now = func() time.Time { return now }
+	offer := validLeaseOffer(now)
+	specification, err := proto.MarshalOptions{Deterministic: true}.Marshal(offer.GetJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.journal.update(func(state *journalState) error {
+		state.Active = &journalJob{Specification: specification, OfferMessageID: "offer", OfferDigest: bytes.Repeat([]byte{1}, sha256.Size), Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, ExpiresAt: offer.GetJob().GetLease().GetExpiresAt().AsTime()}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client.workerMu.Lock()
+	client.workerRunning = true
+	client.workerMu.Unlock()
+	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
+	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
+	var firstSent []*runnerv1.RunnerMessage
+	first := &clientSession{client: client, authenticated: authenticated, send: func(message *runnerv1.RunnerMessage) error {
+		firstSent = append(firstSent, proto.Clone(message).(*runnerv1.RunnerMessage))
+		return nil
+	}, rootContext: context.Background()}
+	if err := first.queueRenewal(now); err != nil {
+		t.Fatal(err)
+	}
+	result := execution.Result{SchemaVersion: execution.ResultSchemaVersion, Status: "passed", Classification: execution.ClassificationPassed, Phase: execution.PhaseCompleted, StartedAt: now, CompletedAt: now}
+	if err := first.handleWorkerEvent(workerEvent{result: &result}); err != nil {
+		t.Fatal(err)
+	}
+	if client.isWorkerRunning() || client.deferredWorkerEventCount() != 1 {
+		t.Fatalf("first session result state: running=%t deferred=%d", client.isWorkerRunning(), client.deferredWorkerEventCount())
+	}
+	var secondSent []*runnerv1.RunnerMessage
+	second := &clientSession{client: client, authenticated: authenticated, send: func(message *runnerv1.RunnerMessage) error {
+		secondSent = append(secondSent, proto.Clone(message).(*runnerv1.RunnerMessage))
+		return nil
+	}, rootContext: context.Background()}
+	if err := second.handleEventAcknowledgement(eventAcknowledgement(now, "renewal-ack", firstSent[0], runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, runnerv1.JobPhase_JOB_PHASE_RUNNING).GetEventAcknowledgement(), now); err != nil {
+		t.Fatal(err)
+	}
+	if client.deferredWorkerEventCount() != 0 || len(secondSent) != 1 || secondSent[0].GetCompleted() == nil {
+		t.Fatalf("replacement session result state: deferred=%d sent=%#v", client.deferredWorkerEventCount(), secondSent)
 	}
 }
 

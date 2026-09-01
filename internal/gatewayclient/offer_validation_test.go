@@ -59,8 +59,12 @@ func TestValidateOfferReturnsStableBoundedRejections(t *testing.T) {
 		}, code: "unsupported_environment", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "missing catalog pin", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Environment.CatalogSnapshotId = "" }, code: "invalid_environment", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "missing target plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.TargetPluginName = "" }, code: "invalid_target_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "target plugin starts with dot", mutate: func(value *runnerv1.LeaseOffer) { value.Job.TargetPluginName = ".plugin" }, code: "invalid_target_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "target plugin starts with hyphen", mutate: func(value *runnerv1.LeaseOffer) { value.Job.TargetPluginName = "-plugin" }, code: "invalid_target_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "reserved target plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.TargetPluginName = "Paper" }, code: "invalid_target_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "missing dependency plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Dependencies[0].PluginName = "" }, code: "invalid_dependency_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "dependency plugin starts with dot", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Dependencies[0].PluginName = ".plugin" }, code: "invalid_dependency_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
+		{name: "dependency plugin starts with hyphen", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Dependencies[0].PluginName = "-plugin" }, code: "invalid_dependency_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "duplicate dependency plugin name", mutate: func(value *runnerv1.LeaseOffer) { value.Job.Dependencies[0].PluginName = value.Job.TargetPluginName }, code: "duplicate_plugin_name", reason: runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED},
 		{name: "unsupported network", mutate: func(value *runnerv1.LeaseOffer) {
 			value.Job.EffectivePolicy.Network.Mode = runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST

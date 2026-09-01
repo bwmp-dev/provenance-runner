@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
+	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -69,7 +70,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if specification.GetLease() == nil || specification.GetLease().GetJobId() == "" {
 		return localjob.Job{}, errors.New("adapt Paper job: lease.job_id is required")
 	}
-	if !validRemotePluginName(specification.GetTargetPluginName()) {
+	if !pluginname.ValidPaper(specification.GetTargetPluginName()) {
 		return localjob.Job{}, errors.New("adapt Paper job: target_plugin_name is missing or invalid")
 	}
 	if err := p.validateRemoteEnvironment(specification.GetEnvironment()); err != nil {
@@ -154,7 +155,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependency %q is duplicated", input.GetDependencyId())
 		}
 		seenDependencies[input.GetDependencyId()] = struct{}{}
-		if !validRemotePluginName(input.GetPluginName()) {
+		if !pluginname.ValidPaper(input.GetPluginName()) {
 			return localjob.Job{}, fmt.Errorf("adapt Paper job: dependencies[%d].plugin_name is missing or invalid", index)
 		}
 		pluginNameKey := strings.ToLower(input.GetPluginName())
@@ -242,23 +243,6 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
 	return job, nil
-}
-
-func validRemotePluginName(value string) bool {
-	if len(value) == 0 || len(value) > 64 {
-		return false
-	}
-	for _, character := range value {
-		if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' && character != '.' && character != '-' {
-			return false
-		}
-	}
-	switch strings.ToLower(value) {
-	case "bukkit", "minecraft", "mojang", "spigot", "paper":
-		return false
-	default:
-		return true
-	}
 }
 
 func (p *Provider) validateRemoteEnvironment(environment *runnerv1.ResolvedEnvironment) error {

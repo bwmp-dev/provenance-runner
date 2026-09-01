@@ -80,6 +80,9 @@ type Client struct {
 	startResponse chan error
 	workerEvents  chan workerEvent
 	recovering    bool
+
+	deferredMu           sync.Mutex
+	deferredWorkerEvents []workerEvent
 }
 
 type workerEvent struct {

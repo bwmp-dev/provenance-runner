@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -29,7 +28,6 @@ type clientSession struct {
 	pendingHeartbeat       *runnerv1.RunnerMessage
 	rootContext            context.Context
 	reconciled             bool
-	deferred               []workerEvent
 	settledEvents          map[string]settledRunnerEvent
 	settledEventOrder      []string
 	acknowledgedHeartbeats map[string]*runnerv1.RunnerMessage
@@ -272,11 +270,9 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 	if err := validatePendingReconciliation(pending, reconciliation, state); err != nil {
 		return permanent("event acknowledgement: %v", err)
 	}
-	terminalStatus := terminalLeaseStatus(reconciliation.GetStatus())
-	stale := reconciliation.GetDisposition() == runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE
-	cancellationStale := stale && !terminalStatus && reconciliation.GetCancellationId() != ""
-	terminal := terminalStatus || (stale && !cancellationStale)
-	if cancellationStale {
+	terminal := terminalLeaseStatus(reconciliation.GetStatus())
+	cancelling := !terminal && reconciliation.GetCancellationId() != ""
+	if cancelling {
 		if activeMatches {
 			if err := s.applyAuthoritativeReconciliation(reconciliation); err != nil {
 				return err
@@ -311,6 +307,12 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 		if err := s.applyAuthoritativeReconciliation(reconciliation); err != nil {
 			return err
 		}
+	}
+	if reconciliation.GetDisposition() == runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE {
+		if err := s.clearPendingAcknowledged(pending, state.Active); err != nil {
+			return err
+		}
+		return s.reissueStaleEvent(pending, now)
 	}
 	if pending.GetLeaseRejected() != nil {
 		return s.clearPendingAcknowledged(pending, state.Active)
@@ -374,6 +376,57 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 		return err
 	default:
 		return permanent("pending runner event is unsupported")
+	}
+}
+
+func (s *clientSession) reissueStaleEvent(message *runnerv1.RunnerMessage, now time.Time) error {
+	lease, attempt := runnerMessageIdentity(message)
+	state := s.client.journal.snapshot()
+	if state.Active != nil && activeMatchesIdentity(state.Active, lease, attempt) {
+		var err error
+		lease, attempt, err = activeIdentity(state)
+		if err != nil {
+			return err
+		}
+	} else {
+		lease = proto.Clone(lease).(*runnerv1.LeaseIdentity)
+		attempt = proto.Clone(attempt).(*runnerv1.AttemptIdentity)
+	}
+	switch {
+	case message.GetLeaseAccepted() != nil:
+		accepted := proto.Clone(message.GetLeaseAccepted()).(*runnerv1.LeaseAccepted)
+		accepted.Lease, accepted.Attempt, accepted.AcceptedAt = lease, attempt, timestamppb.New(now)
+		return s.queueDurable(&runnerv1.RunnerMessage_LeaseAccepted{LeaseAccepted: accepted}, nil)
+	case message.GetLeaseRejected() != nil:
+		rejected := proto.Clone(message.GetLeaseRejected()).(*runnerv1.LeaseRejected)
+		rejected.Lease, rejected.Attempt = lease, attempt
+		return s.queueDurable(&runnerv1.RunnerMessage_LeaseRejected{LeaseRejected: rejected}, nil)
+	case message.GetLeaseRenewal() != nil:
+		renewal := proto.Clone(message.GetLeaseRenewal()).(*runnerv1.LeaseRenewal)
+		renewal.Lease, renewal.Attempt, renewal.ObservedAt = lease, attempt, timestamppb.New(now)
+		return s.queueDurable(&runnerv1.RunnerMessage_LeaseRenewal{LeaseRenewal: renewal}, nil)
+	case message.GetJobPreparing() != nil:
+		preparing := proto.Clone(message.GetJobPreparing()).(*runnerv1.JobPreparing)
+		preparing.Lease, preparing.Attempt, preparing.StartedAt = lease, attempt, timestamppb.New(now)
+		return s.queueDurable(&runnerv1.RunnerMessage_JobPreparing{JobPreparing: preparing}, nil)
+	case message.GetJobStarted() != nil:
+		started := proto.Clone(message.GetJobStarted()).(*runnerv1.JobStarted)
+		started.Lease, started.Attempt, started.StartedAt = lease, attempt, timestamppb.New(now)
+		return s.queueDurable(&runnerv1.RunnerMessage_JobStarted{JobStarted: started}, nil)
+	case message.GetCompleted() != nil:
+		completed := proto.Clone(message.GetCompleted()).(*runnerv1.JobCompleted)
+		completed.Lease, completed.Attempt = lease, attempt
+		return s.queueDurable(&runnerv1.RunnerMessage_Completed{Completed: completed}, nil)
+	case message.GetFailed() != nil:
+		failed := proto.Clone(message.GetFailed()).(*runnerv1.JobFailed)
+		failed.Lease, failed.Attempt = lease, attempt
+		return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+	case message.GetCancelled() != nil:
+		cancelled := proto.Clone(message.GetCancelled()).(*runnerv1.JobCancelled)
+		cancelled.Lease, cancelled.Attempt = lease, attempt
+		return s.queueDurable(&runnerv1.RunnerMessage_Cancelled{Cancelled: cancelled}, nil)
+	default:
+		return errors.New("stale runner event cannot be reissued")
 	}
 }
 
@@ -450,10 +503,8 @@ func (s *clientSession) applyLateReconciliation(reconciliation *runnerv1.LeaseRe
 	if state.Active == nil || !activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt()) {
 		return nil
 	}
-	terminalStatus := terminalLeaseStatus(reconciliation.GetStatus())
-	stale := reconciliation.GetDisposition() == runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE
-	cancellationStale := stale && !terminalStatus && reconciliation.GetCancellationId() != ""
-	if terminalStatus || (stale && !cancellationStale) {
+	terminal := terminalLeaseStatus(reconciliation.GetStatus())
+	if terminal {
 		s.client.stopWorker(errors.New("gateway reconciled the lease as terminal"))
 		s.client.failStartResponse(errors.New("gateway reconciled the lease as terminal"))
 		pending := bytes.Clone(state.PendingMessage)
@@ -469,23 +520,12 @@ func (s *clientSession) applyLateReconciliation(reconciliation *runnerv1.LeaseRe
 		s.discardDeferred(errors.New("gateway reconciled the lease as terminal"))
 		return nil
 	}
-	if cancellationStale {
+	if reconciliation.GetCancellationId() != "" {
 		if err := s.applyAuthoritativeReconciliation(reconciliation); err != nil {
 			return err
 		}
 		s.client.stopWorker(context.Canceled)
 		s.client.failStartResponse(context.Canceled)
-		pending := bytes.Clone(state.PendingMessage)
-		if err := s.client.journal.update(func(state *journalState) error {
-			state.PendingMessage = nil
-			return nil
-		}); err != nil {
-			return err
-		}
-		s.rememberSettledEvent(pending, state.Active.Phase)
-		return nil
-	}
-	if reconciliation.GetPhase() != runnerv1.JobPhase_JOB_PHASE_UNSPECIFIED && jobPhaseRank(reconciliation.GetPhase()) < jobPhaseRank(state.Active.Phase) {
 		return nil
 	}
 	if err := s.applyAuthoritativeReconciliation(reconciliation); err != nil {
@@ -516,10 +556,7 @@ func (s *clientSession) applyAuthoritativeReconciliation(reconciliation *runnerv
 		}
 		state.Active.Specification = encoded
 		state.Active.ExpiresAt = expiresAt
-		if reconciliation.GetPhase() != runnerv1.JobPhase_JOB_PHASE_UNSPECIFIED {
-			if jobPhaseRank(reconciliation.GetPhase()) < jobPhaseRank(state.Active.Phase) {
-				return errors.New("authoritative reconciliation regressed the active phase")
-			}
+		if reconciliation.GetPhase() != runnerv1.JobPhase_JOB_PHASE_UNSPECIFIED && jobPhaseRank(reconciliation.GetPhase()) >= jobPhaseRank(state.Active.Phase) {
 			state.Active.Phase = reconciliation.GetPhase()
 		}
 		if reconciliation.GetCancellationId() != "" {
@@ -560,9 +597,6 @@ func (s *clientSession) handleHeartbeatAcknowledgement(acknowledgement *runnerv1
 		if !sameLeaseAttempt(expected.GetLease(), expected.GetAttempt(), reconciliation.GetLease(), reconciliation.GetAttempt()) {
 			return permanent("heartbeat acknowledgement reconciliation identity does not match active lease")
 		}
-		if s.heartbeatStaleWasSuperseded(message, reconciliation) {
-			continue
-		}
 		if err := s.applyLateReconciliation(reconciliation, now); err != nil {
 			return err
 		}
@@ -580,47 +614,6 @@ func (s *clientSession) handleHeartbeatAcknowledgement(acknowledgement *runnerv1
 	}
 	s.reconciled = true
 	return s.advance(now)
-}
-
-func (s *clientSession) heartbeatStaleWasSuperseded(heartbeat *runnerv1.RunnerMessage, reconciliation *runnerv1.LeaseReconciliation) bool {
-	if reconciliation.GetDisposition() != runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE || reconciliation.GetCancellationId() != "" || terminalLeaseStatus(reconciliation.GetStatus()) {
-		return false
-	}
-	heartbeatSequence, ok := runnerMessageSequence(heartbeat.GetMessageId())
-	if !ok {
-		return false
-	}
-	state := s.client.journal.snapshot()
-	if len(state.PendingMessage) != 0 {
-		pending := new(runnerv1.RunnerMessage)
-		if proto.Unmarshal(state.PendingMessage, pending) == nil && runnerEventSupersedesHeartbeat(pending, heartbeatSequence, reconciliation) {
-			return true
-		}
-	}
-	for _, settled := range s.settledEvents {
-		if runnerEventSupersedesHeartbeat(settled.message, heartbeatSequence, reconciliation) {
-			return true
-		}
-	}
-	return false
-}
-
-func runnerEventSupersedesHeartbeat(event *runnerv1.RunnerMessage, heartbeatSequence uint64, reconciliation *runnerv1.LeaseReconciliation) bool {
-	lease, attempt := runnerMessageIdentity(event)
-	if !sameLeaseAttempt(lease, attempt, reconciliation.GetLease(), reconciliation.GetAttempt()) {
-		return false
-	}
-	eventSequence, valid := runnerMessageSequence(event.GetMessageId())
-	return valid && eventSequence > heartbeatSequence
-}
-
-func runnerMessageSequence(messageID string) (uint64, bool) {
-	separator := strings.LastIndexByte(messageID, '-')
-	if separator < 0 || len(messageID)-separator-1 != 16 {
-		return 0, false
-	}
-	sequence, err := strconv.ParseUint(messageID[separator+1:], 16, 64)
-	return sequence, err == nil
 }
 
 func (s *clientSession) rememberSettledEvent(encoded []byte, phase runnerv1.JobPhase) {
@@ -859,7 +852,7 @@ func (s *clientSession) advance(now time.Time) error {
 			return nil
 		}
 		if !s.client.isWorkerRunning() {
-			if len(s.deferred) != 0 {
+			if s.client.hasDeferredWorkerEvents() {
 				return s.drainDeferred(now)
 			}
 			return s.queueCancellation(now, nil)
@@ -918,7 +911,7 @@ func (s *clientSession) handleWorkerEvent(event workerEvent) error {
 		return nil
 	}
 	if len(state.PendingMessage) != 0 {
-		s.deferred = append(s.deferred, event)
+		s.client.deferWorkerEvent(event)
 		return nil
 	}
 	if event.start != nil {
@@ -944,7 +937,7 @@ func (s *clientSession) handleWorkerEvent(event workerEvent) error {
 		}
 		if state.Active.CancellationID != "" {
 			if len(state.Active.CancellationDigest) == 0 {
-				s.deferred = append(s.deferred, event)
+				s.client.deferWorkerEvent(event)
 				return nil
 			}
 			return s.queueCancellation(s.client.now().UTC(), event.result)
@@ -958,9 +951,11 @@ func (s *clientSession) handleWorkerEvent(event workerEvent) error {
 }
 
 func (s *clientSession) drainDeferred(now time.Time) error {
-	for len(s.deferred) != 0 && len(s.client.journal.snapshot().PendingMessage) == 0 {
-		event := s.deferred[0]
-		s.deferred = s.deferred[1:]
+	for len(s.client.journal.snapshot().PendingMessage) == 0 {
+		event, exists := s.client.popDeferredWorkerEvent()
+		if !exists {
+			return nil
+		}
 		if err := s.handleWorkerEvent(event); err != nil {
 			return err
 		}
@@ -969,12 +964,48 @@ func (s *clientSession) drainDeferred(now time.Time) error {
 }
 
 func (s *clientSession) discardDeferred(reason error) {
-	for _, event := range s.deferred {
+	for _, event := range s.client.takeDeferredWorkerEvents() {
 		if event.start != nil {
 			event.start <- reason
 		}
 	}
-	s.deferred = nil
+}
+
+func (c *Client) deferWorkerEvent(event workerEvent) {
+	c.deferredMu.Lock()
+	defer c.deferredMu.Unlock()
+	c.deferredWorkerEvents = append(c.deferredWorkerEvents, event)
+}
+
+func (c *Client) popDeferredWorkerEvent() (workerEvent, bool) {
+	c.deferredMu.Lock()
+	defer c.deferredMu.Unlock()
+	if len(c.deferredWorkerEvents) == 0 {
+		return workerEvent{}, false
+	}
+	event := c.deferredWorkerEvents[0]
+	c.deferredWorkerEvents = c.deferredWorkerEvents[1:]
+	return event, true
+}
+
+func (c *Client) takeDeferredWorkerEvents() []workerEvent {
+	c.deferredMu.Lock()
+	defer c.deferredMu.Unlock()
+	events := c.deferredWorkerEvents
+	c.deferredWorkerEvents = nil
+	return events
+}
+
+func (c *Client) hasDeferredWorkerEvents() bool {
+	c.deferredMu.Lock()
+	defer c.deferredMu.Unlock()
+	return len(c.deferredWorkerEvents) != 0
+}
+
+func (c *Client) deferredWorkerEventCount() int {
+	c.deferredMu.Lock()
+	defer c.deferredMu.Unlock()
+	return len(c.deferredWorkerEvents)
 }
 
 func (s *clientSession) queueResult(result execution.Result) error {
