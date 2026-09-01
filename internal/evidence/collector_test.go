@@ -175,6 +175,29 @@ func TestCollectorCapsOutputFloodWithMarker(t *testing.T) {
 	if bundle.Usage.RawBytesObserved <= bundle.Usage.CapturedBytes || !bundle.Usage.OutputTruncated {
 		t.Fatalf("usage = %#v", bundle.Usage)
 	}
+	complete := decompress(t, bundle.CompleteLog.Data)
+	if strings.Count(complete, "stdout flood\n") != 1_000 || strings.Count(complete, "stderr flood\n") != 1_000 {
+		t.Fatalf("complete log did not retain the output flood: %d bytes", len(complete))
+	}
+	if strings.Contains(complete, TotalTruncationMarker) || bundle.Usage.CompleteLogBytes <= bundle.Usage.CapturedBytes {
+		t.Fatalf("complete log was bounded by the live limit: usage=%#v", bundle.Usage)
+	}
+}
+
+func TestCollectorCapsCompleteLogIndependentlyWithMarker(t *testing.T) {
+	collector := newTestCollector(t, Config{MaxLineBytes: 32, MaxTotalBytes: 32, MaxCompleteLogBytes: 64})
+	for range 100 {
+		writeChunks(t, collector, StreamStdout, []byte("complete archive flood\n"))
+	}
+
+	bundle := snapshot(t, collector)
+	complete := decompress(t, bundle.CompleteLog.Data)
+	if !strings.Contains(complete, TotalTruncationMarker) || bundle.Usage.CompleteLogBytes > 64+int64(len("[stdout]\n")+1) {
+		t.Fatalf("complete log = %q, usage = %#v", complete, bundle.Usage)
+	}
+	if !bundle.Usage.OutputTruncated {
+		t.Fatalf("complete-log truncation was not reported: %#v", bundle.Usage)
+	}
 }
 
 func TestCollectorKeepsTruncatedMultibyteOutputValid(t *testing.T) {
@@ -300,6 +323,7 @@ func TestCollectorAcceptsConcurrentRawStreams(t *testing.T) {
 func TestCollectorRejectsUnsafeConfiguration(t *testing.T) {
 	tests := []Config{
 		{MaxTotalBytes: MaximumTotalBytes + 1},
+		{MaxCompleteLogBytes: MaximumCompleteLogBytes + 1},
 		{MaxLineBytes: MaximumLineBytes + 1, MaxTotalBytes: MaximumTotalBytes},
 		{MaxEvents: MaximumEvents + 1},
 		{MaxEventBytes: MaximumEventBytes + 1},

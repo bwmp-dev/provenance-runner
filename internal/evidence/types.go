@@ -11,12 +11,17 @@ import (
 const (
 	DefaultMaxLineBytes  int64 = 16 << 10
 	DefaultMaxTotalBytes int64 = 1 << 20
-	DefaultMaxEvents           = 1_024
-	DefaultMaxEventBytes int64 = 64 << 10
-	MaximumLineBytes     int64 = 1 << 20
-	MaximumTotalBytes    int64 = 64 << 20
-	MaximumEvents              = 1_024
-	MaximumEventBytes    int64 = 64 << 10
+	// Complete logs are retained independently from the bounded live stdout and
+	// stderr projection. Keep the archive ceiling process-local and bounded even
+	// when a caller asks for a much smaller live-output limit.
+	DefaultMaxCompleteLogBytes int64 = 16 << 20
+	DefaultMaxEvents                 = 1_024
+	DefaultMaxEventBytes       int64 = 64 << 10
+	MaximumLineBytes           int64 = 1 << 20
+	MaximumTotalBytes          int64 = 64 << 20
+	MaximumCompleteLogBytes    int64 = 16 << 20
+	MaximumEvents                    = 1_024
+	MaximumEventBytes          int64 = 64 << 10
 )
 
 const (
@@ -35,6 +40,7 @@ const (
 type Config struct {
 	MaxLineBytes         int64
 	MaxTotalBytes        int64
+	MaxCompleteLogBytes  int64
 	MaxEvents            int
 	MaxEventBytes        int64
 	Secrets              []string
@@ -48,7 +54,7 @@ func ValidateConfig(config Config) error {
 }
 
 func (c Config) withDefaults() (Config, error) {
-	if c.MaxLineBytes < 0 || c.MaxTotalBytes < 0 || c.MaxEvents < 0 || c.MaxEventBytes < 0 {
+	if c.MaxLineBytes < 0 || c.MaxTotalBytes < 0 || c.MaxCompleteLogBytes < 0 || c.MaxEvents < 0 || c.MaxEventBytes < 0 {
 		return Config{}, errors.New("evidence limits cannot be negative")
 	}
 	if c.MaxLineBytes == 0 {
@@ -57,13 +63,16 @@ func (c Config) withDefaults() (Config, error) {
 	if c.MaxTotalBytes == 0 {
 		c.MaxTotalBytes = DefaultMaxTotalBytes
 	}
+	if c.MaxCompleteLogBytes == 0 {
+		c.MaxCompleteLogBytes = DefaultMaxCompleteLogBytes
+	}
 	if c.MaxEvents == 0 {
 		c.MaxEvents = DefaultMaxEvents
 	}
 	if c.MaxEventBytes == 0 {
 		c.MaxEventBytes = DefaultMaxEventBytes
 	}
-	if c.MaxLineBytes > MaximumLineBytes || c.MaxTotalBytes > MaximumTotalBytes || c.MaxEvents > MaximumEvents || c.MaxEventBytes > MaximumEventBytes {
+	if c.MaxLineBytes > MaximumLineBytes || c.MaxTotalBytes > MaximumTotalBytes || c.MaxCompleteLogBytes > MaximumCompleteLogBytes || c.MaxEvents > MaximumEvents || c.MaxEventBytes > MaximumEventBytes {
 		return Config{}, errors.New("evidence configuration exceeds supported limits")
 	}
 	if c.StructuredLinePrefix == "" && c.MaxLineBytes > c.MaxTotalBytes {
