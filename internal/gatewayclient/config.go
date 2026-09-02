@@ -12,7 +12,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"github.com/bwmp-dev/provenance-runner/internal/runneridentity"
 )
 
 const (
@@ -52,13 +55,14 @@ type Resources struct {
 }
 
 type Config struct {
-	SchemaVersion  string        `json:"schemaVersion"`
-	GatewayAddress string        `json:"gatewayAddress"`
-	RunnerID       string        `json:"runnerId"`
-	InstanceID     string        `json:"instanceId"`
-	CredentialFile string        `json:"credentialFile"`
-	ExpectedScope  ExpectedScope `json:"expectedScope"`
-	Resources      Resources     `json:"resources"`
+	SchemaVersion   string        `json:"schemaVersion"`
+	GatewayAddress  string        `json:"gatewayAddress"`
+	RunnerID        string        `json:"runnerId"`
+	InstanceID      string        `json:"instanceId"`
+	CredentialFile  string        `json:"credentialFile"`
+	IdentityKeyFile string        `json:"identityKeyFile,omitempty"`
+	ExpectedScope   ExpectedScope `json:"expectedScope"`
+	Resources       Resources     `json:"resources"`
 
 	RunnerVersion   string `json:"-"`
 	credential      []byte
@@ -67,6 +71,49 @@ type Config struct {
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {
+	config, err := LoadPublicConfig(path)
+	if err != nil {
+		return Config{}, err
+	}
+	config.RunnerVersion = runnerVersion
+	credential, err := readRegularFile(config.CredentialFile, MaximumCredentialBytes, true)
+	if err != nil {
+		return Config{}, fmt.Errorf("read connection credential: %w", err)
+	}
+	if len(credential) == 0 {
+		return Config{}, errors.New("connection credential is empty")
+	}
+	config.credential = credential
+	if config.IdentityKeyFile != "" {
+		identityData, readErr := readRegularFile(config.IdentityKeyFile, runneridentity.MaximumDocumentBytes, true)
+		if readErr != nil {
+			clear(config.credential)
+			return Config{}, fmt.Errorf("read runner identity: %w", readErr)
+		}
+		identity, decodeErr := runneridentity.Decode(identityData)
+		clear(identityData)
+		credentialBound := decodeErr == nil && (identity.MatchesCredential(config.credential) || credentialMatchesCommittedRotation(config.journalFile, config.RunnerID, config.credential, time.Now().UTC()))
+		if decodeErr != nil || identity.Phase != runneridentity.PhaseActive || identity.RunnerID != config.RunnerID || !credentialBound ||
+			(config.ExpectedScope.Kind == ScopeOrganization && identity.OrganizationID != config.ExpectedScope.OrganizationID) {
+			clear(config.credential)
+			return Config{}, errors.New("runner identity does not match the connect configuration")
+		}
+	}
+	if err := config.validate(); err != nil {
+		clear(config.credential)
+		return Config{}, err
+	}
+	return config, nil
+}
+
+// LoadPublicConfig validates non-secret connection metadata without requiring an
+// installed credential. Enrollment uses it before the runner is allowed to connect.
+func LoadPublicConfig(path string) (Config, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve connect config: %w", err)
+	}
+	path = absolute
 	data, err := readRegularFile(path, MaximumConfigBytes, false)
 	if err != nil {
 		return Config{}, fmt.Errorf("read connect config: %w", err)
@@ -76,26 +123,20 @@ func LoadConfig(path, runnerVersion string) (Config, error) {
 		return Config{}, err
 	}
 	config = config.normalized()
-	config.RunnerVersion = runnerVersion
 	config.journalFile = filepath.Join(filepath.Dir(path), ".provenance-runner-journal.json")
 	if !filepath.IsAbs(config.CredentialFile) {
 		config.CredentialFile = filepath.Join(filepath.Dir(path), config.CredentialFile)
 	}
-	credential, err := readRegularFile(config.CredentialFile, MaximumCredentialBytes, true)
-	if err != nil {
-		return Config{}, fmt.Errorf("read connection credential: %w", err)
-	}
-	if len(credential) == 0 {
-		return Config{}, errors.New("connection credential is empty")
-	}
-	config.credential = credential
-	if err := config.validate(); err != nil {
-		return Config{}, err
+	if config.IdentityKeyFile != "" && !filepath.IsAbs(config.IdentityKeyFile) {
+		config.IdentityKeyFile = filepath.Join(filepath.Dir(path), config.IdentityKeyFile)
 	}
 	return config, nil
 }
 
 func decodeConfig(data []byte) (Config, error) {
+	if err := rejectDuplicateConfigMembers(data); err != nil {
+		return Config{}, fmt.Errorf("decode connect config: %w", err)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var config Config
@@ -113,6 +154,58 @@ func decodeConfig(data []byte) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+func rejectDuplicateConfigMembers(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var walk func() error
+	walk = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := map[string]bool{}
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok || seen[key] {
+					return errors.New("duplicate JSON member")
+				}
+				seen[key] = true
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		default:
+			return errors.New("invalid JSON delimiter")
+		}
+	}
+	if err := walk(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing JSON data")
+	}
+	return nil
 }
 
 func (c Config) validate() error {
@@ -147,10 +240,19 @@ func (c Config) validatePublic() error {
 	if len(c.CredentialFile) > 4096 {
 		return errors.New("credentialFile must be at most 4096 bytes")
 	}
+	if len(c.IdentityKeyFile) > 4096 {
+		return errors.New("identityKeyFile must be at most 4096 bytes")
+	}
+	if c.IdentityKeyFile != "" && strings.TrimSpace(c.IdentityKeyFile) == "" {
+		return errors.New("identityKeyFile must be empty or a non-blank path")
+	}
 	switch c.ExpectedScope.Kind {
 	case ScopePlatform:
 		if c.ExpectedScope.OrganizationID != "" {
 			return errors.New("expectedScope.organizationId must be empty for platform scope")
+		}
+		if c.IdentityKeyFile != "" {
+			return errors.New("identityKeyFile requires organization scope")
 		}
 	case ScopeOrganization:
 		if err := validateUUID("expectedScope.organizationId", c.ExpectedScope.OrganizationID); err != nil {
@@ -252,7 +354,7 @@ func readRegularFile(path string, maximum int64, private bool) ([]byte, error) {
 	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return nil, errors.New("file must be a regular file and not a symbolic link")
 	}
-	if private && !privateFileMode(before.Mode().Perm()) {
+	if private && (!privateFileMode(before.Mode().Perm()) || !privateFileMetadata(before)) {
 		return nil, errors.New("file permissions must be owner-readable and must not grant execute, group, or other access")
 	}
 	file, err := os.Open(path)
@@ -267,7 +369,7 @@ func readRegularFile(path string, maximum int64, private bool) ([]byte, error) {
 	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
 		return nil, errors.New("file changed while it was opened")
 	}
-	if private && !privateFileMode(after.Mode().Perm()) {
+	if private && (!privateFileMode(after.Mode().Perm()) || !privateFileMetadata(after)) {
 		return nil, errors.New("file permissions must be owner-readable and must not grant execute, group, or other access")
 	}
 	if after.Size() > maximum {

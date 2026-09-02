@@ -59,6 +59,9 @@ func TestRunPrintsUsageForUnknownCommand(t *testing.T) {
 	if !strings.Contains(stderr.String(), "connect <connect.json>") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "enroll <enrollment.json>") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
 }
 
 func TestRunFailsPaperInitializationBeforeExecutionWhenTrustedPinIsMissing(t *testing.T) {
