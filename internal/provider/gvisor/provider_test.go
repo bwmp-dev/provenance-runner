@@ -331,7 +331,7 @@ func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *tes
 		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
 		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
 		RedactSecrets:       []string{"sensitive"},
-		StructuredEventFile: &execution.StructuredEventFile{Destination: "/workspace/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
+		StructuredEventFile: &execution.StructuredEventFile{Destination: "/tmp/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +350,7 @@ func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *tes
 	if err := json.Unmarshal(content, &spec); err != nil {
 		t.Fatal(err)
 	}
-	mount := findMount(t, spec.Mounts, "/workspace/provenance-probe-events.ndjson")
+	mount := findMount(t, spec.Mounts, "/tmp/provenance-probe-events.ndjson")
 	if mount.Source != prepared.structuredEventPath || !reflect.DeepEqual(mount.Options, []string{"bind", "rw", "nosuid", "nodev", "noexec"}) {
 		t.Fatalf("structured event mount = %#v", mount)
 	}
@@ -393,7 +393,7 @@ func TestStructuredEventFileTransportFailsClosed(t *testing.T) {
 			environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
 				Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
 				MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
-				StructuredEventFile: &execution.StructuredEventFile{Destination: "/workspace/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: test.maximum},
+				StructuredEventFile: &execution.StructuredEventFile{Destination: "/tmp/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: test.maximum},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -426,7 +426,7 @@ func TestResolveRejectsUnsafeStructuredEventFile(t *testing.T) {
 	base := execution.IsolatedWorkload{
 		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
 		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
-		StructuredEventFile: &execution.StructuredEventFile{Destination: "/workspace/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
+		StructuredEventFile: &execution.StructuredEventFile{Destination: "/tmp/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
 	}
 	for name, mutate := range map[string]func(*execution.IsolatedWorkload){
 		"host path": func(workload *execution.IsolatedWorkload) { workload.StructuredEventFile.Destination = "/etc/shadow" },

@@ -296,8 +296,8 @@ func validateStructuredEventFile(requested *execution.StructuredEventFile) (*exe
 	if requested == nil {
 		return nil, nil
 	}
-	if requested.Destination != "/workspace/provenance-probe-events.ndjson" {
-		return nil, errors.New("structured event file destination must be /workspace/provenance-probe-events.ndjson")
+	if requested.Destination != "/tmp/provenance-probe-events.ndjson" {
+		return nil, errors.New("structured event file destination must be /tmp/provenance-probe-events.ndjson")
 	}
 	if requested.MaximumBytes < 1 || requested.MaximumBytes > maximumStructuredEventBytes {
 		return nil, fmt.Errorf("structured event file maximumBytes must be between 1 and %d", maximumStructuredEventBytes)

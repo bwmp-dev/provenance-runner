@@ -559,7 +559,7 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 		"-Dhttp.agent=" + DownloadUserAgent,
 		"-Dprovenance.probe.target=" + e.config.TestPlan.TargetPlugin,
 		"-Dprovenance.probe.requiredDependencies=" + strings.Join(required, ","),
-		"-Dprovenance.probe.events=/workspace/provenance-probe-events.ndjson",
+		"-Dprovenance.probe.events=/tmp/provenance-probe-events.ndjson",
 		"-Dprovenance.probe.testPlan=/workspace/provenance-test-plan.json",
 		"-Dprovenance.probe.stabilizationMillis=" + strconv.FormatInt(e.config.TestPlan.StabilizationMilliseconds, 10),
 		"-Dprovenance.probe.requestShutdown=true",
@@ -589,7 +589,7 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 		MaxLineBytes:   e.config.MaxLineBytes,
 		RedactSecrets:  append([]string(nil), e.config.RedactSecrets...),
 		StructuredEventFile: &execution.StructuredEventFile{
-			Destination:  "/workspace/provenance-probe-events.ndjson",
+			Destination:  "/tmp/provenance-probe-events.ndjson",
 			Kind:         probeEventKind,
 			MaximumBytes: 4 << 20,
 		},

@@ -70,7 +70,7 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 	if workload.Command != "/bin/sh" || workload.Network != "none" {
 		t.Errorf("workload command/network = %q/%q", workload.Command, workload.Network)
 	}
-	if workload.StructuredOutputPrefix != "" || workload.StructuredOutputKind != "" || workload.StructuredEventFile == nil || workload.StructuredEventFile.Destination != "/workspace/provenance-probe-events.ndjson" || workload.StructuredEventFile.Kind != probeEventKind || workload.StructuredEventFile.MaximumBytes != 4<<20 {
+	if workload.StructuredOutputPrefix != "" || workload.StructuredOutputKind != "" || workload.StructuredEventFile == nil || workload.StructuredEventFile.Destination != "/tmp/provenance-probe-events.ndjson" || workload.StructuredEventFile.Kind != probeEventKind || workload.StructuredEventFile.MaximumBytes != 4<<20 {
 		t.Errorf("structured event file = %#v; legacy channel = %q/%q", workload.StructuredEventFile, workload.StructuredOutputPrefix, workload.StructuredOutputKind)
 	}
 	if workload.MemoryBytes != 1<<30 || workload.CPUMillis != 1500 || workload.PIDs != 64 || workload.DiskBytes != 2<<30 {
@@ -98,7 +98,7 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 		"-Xmx768M",
 		"-Dprovenance.probe.target=SuccessFixture",
 		"-Dprovenance.probe.requiredDependencies=DependencyFixture",
-		"-Dprovenance.probe.events=/workspace/provenance-probe-events.ndjson",
+		"-Dprovenance.probe.events=/tmp/provenance-probe-events.ndjson",
 		"-Dprovenance.probe.testPlan=/workspace/provenance-test-plan.json",
 		"-Dprovenance.probe.stabilizationMillis=25",
 		"-Dprovenance.probe.requestShutdown=true",
