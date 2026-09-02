@@ -27,6 +27,15 @@ type Collector struct {
 	closed               bool
 	snapshot             *Bundle
 	snapshotErr          error
+	liveSink             func(LiveEntry)
+}
+
+// SetLiveSink replaces the optional non-blocking sink for sanitized lines.
+// The sink is called synchronously and therefore must never wait on I/O.
+func (c *Collector) SetLiveSink(sink func(LiveEntry)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.liveSink = sink
 }
 
 type rawTail struct {
@@ -177,7 +186,7 @@ func (c *Collector) observeRawBytes(count int64) bool {
 	return c.live.truncated
 }
 
-func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated bool) {
+func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated, partial, redacted bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if stream == StreamStdout && c.config.StructuredLinePrefix != "" && bytes.HasPrefix(line, []byte(c.config.StructuredLinePrefix)) {
@@ -206,6 +215,9 @@ func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated bool) 
 	// receive the same normalized, ANSI-free, redacted line.
 	c.complete.append(stream, line)
 	c.live.append(stream, line)
+	if c.liveSink != nil {
+		c.liveSink(LiveEntry{Stream: stream, Data: append([]byte(nil), line...), Partial: partial, Redacted: redacted})
+	}
 }
 
 func rawContentLength(line []byte) int64 {

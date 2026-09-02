@@ -65,7 +65,7 @@ func TestRunscSmoke(t *testing.T) {
 	t.Run("contained execution and cleanup", func(t *testing.T) {
 		config := configuration{
 			Command:     "/bin/sh",
-			Arguments:   []string{"-c", `test "$(id -u)" = 65532 && test "$TMPDIR" = /tmp && touch /workspace/ok && touch /tmp/ok && ! touch /provenance-root-write-test && test ! -S /run/docker.sock && test "$(tail -n +2 /proc/net/route | wc -l)" = 0 && ! nc -z -w 1 10.0.0.1 80 && ! nc -z -w 1 169.254.169.254 80 && echo gvisor-smoke-ok && echo gvisor-network-none-ok`},
+			Arguments:   []string{"-c", `test "$(id -u)" = 65532 && test "$TMPDIR" = /tmp && touch /workspace/ok && touch /tmp/ok && ! touch /provenance-root-write-test && test ! -S /run/docker.sock && test "$(tail -n +2 /proc/net/route | wc -l)" = 0 && ! nc -z -w 1 10.0.0.1 80 && ! nc -z -w 1 169.254.169.254 80 && sleep 1 && echo gvisor-smoke-ok && echo gvisor-network-none-ok`},
 			Network:     "none",
 			MemoryBytes: 128 << 20,
 			CPUMillis:   500,
@@ -73,6 +73,7 @@ func TestRunscSmoke(t *testing.T) {
 			DiskBytes:   8 << 20,
 		}
 		prepared := prepareSmokeEnvironment(t, provider, "smoke", config)
+		defer cleanupSmokeEnvironment(t, prepared)
 		containerID := prepared.containerID
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -92,6 +93,9 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		if !strings.Contains(output.Stdout, "gvisor-network-none-ok") {
 			t.Fatalf("sandbox output did not confirm failed private and metadata probes; stdout=%q stderr=%q", output.Stdout, output.Stderr)
+		}
+		if output.ResourceUsage == nil || output.ResourceUsage.CPUTime <= 0 || output.ResourceUsage.PeakMemoryBytes == 0 || output.ResourceUsage.NetworkReceiveBytes != 0 || output.ResourceUsage.NetworkTransmitBytes != 0 {
+			t.Fatalf("sandbox measured usage = %#v", output.ResourceUsage)
 		}
 		cleanupSmokeEnvironment(t, prepared)
 		assertNoSandboxResidue(t, provider, containerID)

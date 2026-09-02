@@ -117,6 +117,11 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 		}
 		return finishResult(result)
 	}
+	if observer := observerFromContext(parent); observer != nil {
+		if attacher, ok := prepared.(ObserverAttacher); ok {
+			attacher.AttachObserver(observer)
+		}
+	}
 
 	if result.Failure == nil {
 		if failure := contextFailure(parent, preparationContext); failure != nil {
@@ -200,12 +205,30 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 	result.Usage.CompleteLogState = output.EvidenceUsage.CompleteLogState
 	result.Usage.CompleteLogTruncated = output.EvidenceUsage.CompleteLogTruncated
 	result.Usage.StructuredEventsTruncated = output.EvidenceUsage.EventsTruncated
+	if output.ResourceUsage != nil {
+		usage := *output.ResourceUsage
+		result.Usage.MeasuredResources = &usage
+	}
 	if err != nil {
 		result.Logs.Error = err.Error()
 		if result.Failure == nil {
 			setFailure(result, PhaseCollection, classifyDetachedError(collectionContext, "output_collection_failed", err))
 		}
 	}
+}
+
+type observerContextKey struct{}
+
+func WithObserver(ctx context.Context, observer ExecutionObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, observerContextKey{}, observer)
+}
+
+func observerFromContext(ctx context.Context) ExecutionObserver {
+	observer, _ := ctx.Value(observerContextKey{}).(ExecutionObserver)
+	return observer
 }
 
 func cleanupPrepared(parent context.Context, prepared PreparedEnvironment, timeout time.Duration, result *Result) {

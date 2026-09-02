@@ -74,13 +74,15 @@ type Client struct {
 
 	draining atomic.Bool
 
-	workerMu      sync.Mutex
-	workerRunning bool
-	workerCancel  context.CancelFunc
-	workerWG      sync.WaitGroup
-	startResponse chan error
-	workerEvents  chan workerEvent
-	recovering    bool
+	workerMu          sync.Mutex
+	workerRunning     bool
+	workerCancel      context.CancelFunc
+	workerWG          sync.WaitGroup
+	startResponse     chan error
+	workerEvents      chan workerEvent
+	recovering        bool
+	sessionGeneration atomic.Uint64
+	ephemeralSequence atomic.Uint64
 
 	uploadMu     sync.Mutex
 	activeUpload *activeCompleteLogUpload
@@ -91,8 +93,11 @@ type Client struct {
 }
 
 type workerEvent struct {
-	start  chan error
-	result *execution.Result
+	start         chan error
+	result        *execution.Result
+	evidence      *workerEvidenceEvent
+	finalEvidence *workerEvidenceEvent
+	finalUsage    *workerEvidenceEvent
 }
 
 func New(config Config, rpc runnerv1.RunnerGatewayClient) (*Client, error) {
@@ -132,7 +137,7 @@ func newClientWithWorker(config Config, connector streamConnector, worker Remote
 		now:              time.Now,
 		wait:             waitContext,
 		handshakeTimeout: maximumHandshakeDuration,
-		workerEvents:     make(chan workerEvent, 2),
+		workerEvents:     make(chan workerEvent, 64),
 		logUploader:      newHTTPCompleteLogUploader(),
 	}
 	client.recovering = journal.snapshot().Active != nil
@@ -272,6 +277,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		return false, err
 	}
 	established = true
+	generation := c.sessionGeneration.Add(1)
 	capabilities, err := c.capabilitiesMessage()
 	if err != nil {
 		return true, err
@@ -285,6 +291,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		send:          send,
 		seen:          make(map[string][sha256.Size]byte),
 		rootContext:   ctx,
+		generation:    generation,
 	}
 	if err := session.rememberGatewayMessage(first); err != nil {
 		return true, err

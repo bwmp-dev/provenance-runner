@@ -30,8 +30,8 @@ func newRawProcessor(collector *Collector, stream Stream, config Config) *rawPro
 	}
 	processor.line = lineLimiter{
 		maximum: maximumLineBytes,
-		emit: func(line []byte, truncated bool) {
-			collector.emitRawLine(stream, line, truncated)
+		emit: func(line []byte, truncated, partial, redacted bool) {
+			collector.emitRawLine(stream, line, truncated, partial, redacted)
 		},
 	}
 	processor.redactor = newSecretRedactor(config.Secrets, processor.line.write)
@@ -200,10 +200,10 @@ type secretRedactor struct {
 	pending []byte
 	secrets [][]byte
 	maximum int
-	emit    func([]byte)
+	emit    func([]byte, bool)
 }
 
-func newSecretRedactor(secrets []string, emit func([]byte)) secretRedactor {
+func newSecretRedactor(secrets []string, emit func([]byte, bool)) secretRedactor {
 	unique := make(map[string]struct{}, len(secrets))
 	redactor := secretRedactor{emit: emit}
 	for _, secret := range secrets {
@@ -225,7 +225,7 @@ func newSecretRedactor(secrets []string, emit func([]byte)) secretRedactor {
 
 func (r *secretRedactor) write(content []byte) {
 	if len(r.secrets) == 0 {
-		r.emit(content)
+		r.emit(content, false)
 		return
 	}
 	r.pending = append(r.pending, content...)
@@ -243,12 +243,12 @@ func (r *secretRedactor) finish() {
 func (r *secretRedactor) emitNext() {
 	for _, secret := range r.secrets {
 		if bytes.HasPrefix(r.pending, secret) {
-			r.emit([]byte(RedactionMarker))
+			r.emit([]byte(RedactionMarker), true)
 			r.pending = r.pending[len(secret):]
 			return
 		}
 	}
-	r.emit(r.pending[:1])
+	r.emit(r.pending[:1], false)
 	r.pending = r.pending[1:]
 }
 
@@ -256,10 +256,14 @@ type lineLimiter struct {
 	maximum    int64
 	line       []byte
 	discarding bool
-	emit       func([]byte, bool)
+	redacted   bool
+	emit       func([]byte, bool, bool, bool)
 }
 
-func (l *lineLimiter) write(content []byte) {
+func (l *lineLimiter) write(content []byte, redacted bool) {
+	if redacted {
+		l.redacted = true
+	}
 	for _, value := range content {
 		if value == '\n' {
 			l.flush(true)
@@ -295,9 +299,10 @@ func (l *lineLimiter) flush(newline bool) {
 	if newline {
 		output = append(output, '\n')
 	}
-	l.emit(output, l.discarding)
+	l.emit(output, l.discarding, !newline, l.redacted)
 	l.line = l.line[:0]
 	l.discarding = false
+	l.redacted = false
 }
 
 var _ io.Writer = (*rawProcessor)(nil)

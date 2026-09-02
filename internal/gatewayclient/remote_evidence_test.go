@@ -107,6 +107,67 @@ func TestRemoteUploadFailureBecomesClassifiedInfrastructureFailure(t *testing.T)
 	}
 }
 
+func TestRemoteTerminalResultsCarryMeasuredUsageForEveryCompletedOrFailedOutcome(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 123456789, time.FixedZone("fixture", 90*60))
+	completedAt := now.Add(2*time.Second + 765432*time.Nanosecond)
+	tests := []struct {
+		name           string
+		classification execution.Classification
+		completed      bool
+	}{
+		{name: "passed", classification: execution.ClassificationPassed, completed: true},
+		{name: "workload failure", classification: execution.ClassificationWorkloadFailure, completed: true},
+		{name: "infrastructure failure", classification: execution.ClassificationInfrastructureFailure},
+		{name: "timeout", classification: execution.ClassificationTimedOut},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, offer := activeEvidenceClient(t, now)
+			client.clearCompleteLogTarget()
+			var sent *runnerv1.RunnerMessage
+			session := &clientSession{client: client, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+				sent = proto.Clone(message).(*runnerv1.RunnerMessage)
+				return nil
+			}}
+			measured := execution.ResourceUsage{CPUTime: 4 * time.Second, PeakMemoryBytes: 2048, DiskReadBytes: 10, DiskWriteBytes: 20}
+			status := "failed"
+			if test.classification == execution.ClassificationPassed {
+				status = "passed"
+			}
+			result := execution.Result{SchemaVersion: execution.ResultSchemaVersion, JobID: offer.GetJob().GetLease().GetJobId(), Status: status, Classification: test.classification, Phase: execution.PhaseCompleted, StartedAt: now, CompletedAt: completedAt, Usage: execution.UsageResult{MeasuredResources: &measured}}
+			if test.classification != execution.ClassificationPassed {
+				result.Failure = execution.NewFailure(test.classification, "execution_failed", "execution failed")
+			}
+			if err := session.handleWorkerEvent(workerEvent{result: &result}); err != nil {
+				t.Fatal(err)
+			}
+			var usage *runnerv1.ResourceUsage
+			if test.completed {
+				usage = sent.GetCompleted().GetResult().GetUsage()
+				terminal := sent.GetCompleted().GetResult()
+				if terminal.GetStartedAt().AsTime() != now.UTC().Truncate(time.Microsecond) || terminal.GetCompletedAt().AsTime() != completedAt.UTC().Truncate(time.Microsecond) || terminal.GetCompletedAt().AsTime().Sub(terminal.GetStartedAt().AsTime()) != completedAt.UTC().Truncate(time.Microsecond).Sub(now.UTC().Truncate(time.Microsecond)) {
+					t.Fatalf("normalized completed timestamps = %s .. %s", terminal.GetStartedAt().AsTime(), terminal.GetCompletedAt().AsTime())
+				}
+			} else {
+				usage = sent.GetFailed().GetUsage()
+				if sent.GetFailed().GetFailedAt().AsTime() != completedAt.UTC().Truncate(time.Microsecond) {
+					t.Fatalf("normalized failed timestamp = %s", sent.GetFailed().GetFailedAt().AsTime())
+				}
+			}
+			if usage.GetCpuTime().AsDuration() != 4*time.Second || usage.GetPeakMemoryBytes() != 2048 || usage.GetDiskReadBytes() != 10 || usage.GetDiskWriteBytes() != 20 {
+				t.Fatalf("terminal usage = %#v", usage)
+			}
+		})
+	}
+}
+
+func TestTerminalTimestampNormalizationRejectsNegativeDuration(t *testing.T) {
+	started := time.Date(2026, 8, 31, 12, 0, 1, 999999999, time.UTC)
+	if _, _, err := normalizedTerminalTimes(started, started.Add(-time.Nanosecond)); err == nil {
+		t.Fatal("negative normalized terminal duration was accepted")
+	}
+}
+
 func TestRemoteTerminalReplayDoesNotReuploadOrReexecute(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	client, _ := activeEvidenceClient(t, now)

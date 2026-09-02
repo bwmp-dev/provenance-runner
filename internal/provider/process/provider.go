@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
@@ -153,10 +155,22 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 }
 
 type preparedEnvironment struct {
+	mu               sync.Mutex
 	configuration    configuration
 	workingDirectory string
 	workspace        *workspace.Workspace
 	evidence         *evidence.Collector
+	observer         execution.ExecutionObserver
+	resourceUsage    execution.ResourceUsage
+}
+
+func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
+	e.mu.Lock()
+	e.observer = observer
+	e.mu.Unlock()
+	e.evidence.SetLiveSink(func(entry evidence.LiveEntry) {
+		observer.ObserveLog(execution.LiveLogEntry{Stream: string(entry.Stream), Data: entry.Data, Partial: entry.Partial, Redacted: entry.Redacted})
+	})
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
@@ -179,6 +193,17 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	if command.ProcessState != nil {
 		code := command.ProcessState.ExitCode()
 		exitCode = &code
+		usage := execution.ResourceUsage{CPUTime: command.ProcessState.UserTime() + command.ProcessState.SystemTime()}
+		if raw, ok := command.ProcessState.SysUsage().(*syscall.Rusage); ok && raw.Maxrss > 0 {
+			usage.PeakMemoryBytes = uint64(raw.Maxrss) * 1024
+		}
+		e.mu.Lock()
+		e.resourceUsage = usage
+		observer := e.observer
+		e.mu.Unlock()
+		if observer != nil {
+			observer.ObserveUsage(usage)
+		}
 	}
 	outcome := execution.ExecutionOutcome{ExitCode: exitCode}
 	if err == nil {
@@ -200,6 +225,9 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		return execution.CollectedOutput{}, err
 	}
 	bundle, err := e.evidence.Snapshot(ctx)
+	e.mu.Lock()
+	usage := e.resourceUsage
+	e.mu.Unlock()
 	events := make([]execution.StructuredEvent, len(bundle.Events))
 	for index, event := range bundle.Events {
 		events[index] = execution.StructuredEvent{
@@ -240,6 +268,7 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			EventsTruncated:      bundle.Usage.EventsTruncated,
 		},
 		StructuredEventError: bundle.StructuredEventError,
+		ResourceUsage:        &usage,
 	}, err
 }
 
