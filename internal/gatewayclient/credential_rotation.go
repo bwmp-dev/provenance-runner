@@ -156,14 +156,16 @@ func (c *Client) reconcileCredentialRotationAfterAuthentication() error {
 				if rotation.RunnerID != c.config.RunnerID || !now.Before(rotation.ExpiresAt) {
 					return errors.New("credential rotation is not bound to this runner")
 				}
-				if state.CommittedCredential == nil {
-					if !rotation.PersistedAt.IsZero() {
-						return errors.New("persisted credential rotation lacks a committed binding")
+				if rotation.PersistedAt.IsZero() {
+					if state.CommittedCredential != nil && !validCredentialPredecessor(state.CommittedCredential, rotation) {
+						return errors.New("pending credential rotation conflicts with committed binding")
 					}
 					state.CommittedCredential = &journalCommittedCredential{
 						RunnerID: rotation.RunnerID, RotationID: rotation.RotationID, Fingerprint: bytes.Clone(rotation.Fingerprint),
 						IssuedAt: rotation.IssuedAt, ExpiresAt: rotation.ExpiresAt, PersistedAt: now,
 					}
+				} else if state.CommittedCredential == nil {
+					return errors.New("persisted credential rotation lacks a committed binding")
 				}
 			}
 			state.CredentialRotation = nil

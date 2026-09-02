@@ -151,6 +151,40 @@ func TestLoadConfigAcceptsOnlyDurablyCommittedRunnerBoundRotation(t *testing.T) 
 	}
 }
 
+func TestLoadConfigAcceptsCommittedPredecessorWhileNextRotationIsPending(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	initial := canonicalCredential(75)
+	committedCredential := canonicalCredential(76)
+	pendingCredential := canonicalCredential(77)
+	committedFingerprint := sha256.Sum256(committedCredential)
+	pendingFingerprint := sha256.Sum256(pendingCredential)
+	configPath, credentialPath, journalPath := activeIdentityConfig(t, initial)
+	if err := os.WriteFile(credentialPath, committedCredential, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := openJournal(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.update(func(state *journalState) error {
+		state.CommittedCredential = &journalCommittedCredential{
+			RunnerID: testRunnerID, RotationID: "60000000-0000-4000-8000-000000000076", Fingerprint: bytes.Clone(committedFingerprint[:]),
+			IssuedAt: now.Add(-time.Minute), ExpiresAt: now.Add(14 * time.Minute), PersistedAt: now.Add(-time.Minute),
+		}
+		state.CredentialRotation = &journalCredentialRotation{
+			RunnerID: testRunnerID, RotationID: "60000000-0000-4000-8000-000000000077", Fingerprint: bytes.Clone(pendingFingerprint[:]),
+			IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig(configPath, "test")
+	if err != nil || !bytes.Equal(loaded.credential, committedCredential) {
+		t.Fatalf("committed predecessor with pending rotation credential=%q err=%v", loaded.credential, err)
+	}
+}
+
 func TestLoadConfigRejectsPendingConflictingStaleAndWrongRunnerRotationBindings(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	initial := canonicalCredential(72)
@@ -178,6 +212,18 @@ func TestLoadConfigRejectsPendingConflictingStaleAndWrongRunnerRotationBindings(
 		{name: "conflicting pending", mutate: func(state *journalState) {
 			state.CommittedCredential = &journalCommittedCredential{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), PersistedAt: now}
 			state.CredentialRotation = &journalCredentialRotation{RotationID: "60000000-0000-4000-8000-000000000074", Fingerprint: bytes.Clone(otherFingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute)}
+		}},
+		{name: "pending reuses committed rotation identity", mutate: func(state *journalState) {
+			state.CommittedCredential = &journalCommittedCredential{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(otherFingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), PersistedAt: now}
+			state.CredentialRotation = &journalCredentialRotation{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now.Add(time.Second), ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute)}
+		}},
+		{name: "pending reuses committed fingerprint", mutate: func(state *journalState) {
+			state.CommittedCredential = &journalCommittedCredential{RunnerID: testRunnerID, RotationID: "60000000-0000-4000-8000-000000000074", Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), PersistedAt: now}
+			state.CredentialRotation = &journalCredentialRotation{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now.Add(time.Second), ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute)}
+		}},
+		{name: "pending predates committed credential", mutate: func(state *journalState) {
+			state.CommittedCredential = &journalCommittedCredential{RunnerID: testRunnerID, RotationID: "60000000-0000-4000-8000-000000000074", Fingerprint: bytes.Clone(otherFingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), PersistedAt: now}
+			state.CredentialRotation = &journalCredentialRotation{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now.Add(-maximumClockSkew - time.Second), ExpiresAt: now.Add(4 * time.Minute), ReconnectBefore: now.Add(-maximumClockSkew + time.Minute)}
 		}},
 		{name: "wrong runner", mutate: func(state *journalState) {
 			state.CommittedCredential = &journalCommittedCredential{RunnerID: otherRunner, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), PersistedAt: now}

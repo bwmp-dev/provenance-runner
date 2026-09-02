@@ -282,11 +282,20 @@ func credentialMatchesCommittedRotation(path, runnerID string, credential []byte
 	}
 	state := journal.snapshot()
 	if rotation := state.CredentialRotation; rotation != nil && rotation.PersistedAt.IsZero() {
-		if state.CommittedCredential != nil || rotation.RunnerID != runnerID || !now.Before(rotation.ExpiresAt) {
+		if rotation.RunnerID != runnerID || !now.Before(rotation.ExpiresAt) {
 			return false
 		}
 		digest := sha256.Sum256(credential)
-		return subtle.ConstantTimeCompare(digest[:], rotation.Fingerprint) == 1
+		if state.CommittedCredential == nil {
+			return subtle.ConstantTimeCompare(digest[:], rotation.Fingerprint) == 1
+		}
+		committed := state.CommittedCredential
+		if !validCredentialPredecessor(committed, rotation) {
+			return false
+		}
+		matchesPending := subtle.ConstantTimeCompare(digest[:], rotation.Fingerprint) == 1
+		matchesCommitted := now.Before(committed.ExpiresAt) && subtle.ConstantTimeCompare(digest[:], committed.Fingerprint) == 1
+		return matchesPending || matchesCommitted
 	}
 	committed := state.CommittedCredential
 	if committed == nil || committed.RunnerID != runnerID || !now.Before(committed.ExpiresAt) {
@@ -297,6 +306,15 @@ func credentialMatchesCommittedRotation(path, runnerID string, credential []byte
 	}
 	digest := sha256.Sum256(credential)
 	return subtle.ConstantTimeCompare(digest[:], committed.Fingerprint) == 1
+}
+
+func validCredentialPredecessor(committed *journalCommittedCredential, pending *journalCredentialRotation) bool {
+	if committed == nil || pending == nil || committed.RunnerID != pending.RunnerID ||
+		committed.RotationID == pending.RotationID || bytes.Equal(committed.Fingerprint, pending.Fingerprint) {
+		return false
+	}
+	return !pending.IssuedAt.Before(committed.IssuedAt.Add(-maximumClockSkew)) &&
+		!pending.IssuedAt.Before(committed.PersistedAt.Add(-maximumClockSkew))
 }
 
 func (j *journal) update(update func(*journalState) error) error {
