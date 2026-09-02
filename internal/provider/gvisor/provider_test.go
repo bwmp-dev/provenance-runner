@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -98,8 +99,17 @@ func TestPrepareWritesContainedOCIConfiguration(t *testing.T) {
 	if spec.Linux.Resources.CPU.Quota != 150_000 || spec.Linux.Resources.CPU.Period != 100_000 {
 		t.Errorf("CPU = %#v", spec.Linux.Resources.CPU)
 	}
-	if spec.Linux.Resources.PIDs.Limit != 64 {
+	if spec.Linux.Resources.PIDs.Limit != 64+gvisorRuntimePIDReserve {
 		t.Errorf("PIDs = %#v", spec.Linux.Resources.PIDs)
+	}
+	var nproc *ociRlimit
+	for index := range spec.Process.Rlimits {
+		if spec.Process.Rlimits[index].Type == "RLIMIT_NPROC" {
+			nproc = &spec.Process.Rlimits[index]
+		}
+	}
+	if nproc == nil || nproc.Hard != 64 || nproc.Soft != 64 {
+		t.Errorf("guest RLIMIT_NPROC = %#v, want exact requested limit 64", nproc)
 	}
 	wantDevices := []ociDevice{
 		{Path: "/dev/null", Type: "c", Major: 1, Minor: 3, FileMode: 0o666},
@@ -307,47 +317,163 @@ func TestExecuteUsesHardenedRunscFlagsAndCollectsBoundedOutput(t *testing.T) {
 	}
 }
 
-func TestTrustedWorkloadStructuredOutputReachesCollectedEvents(t *testing.T) {
+func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *testing.T) {
 	provider, runner, roots := testProvider(t)
+	exitCode := 2
 	runner.run = func(_ context.Context, invocation command) commandResult {
 		if commandVerb(invocation.Args) == "run" {
-			_, _ = io.WriteString(invocation.Stdout, "ordinary log\nEVENT:{\"state\":\"ready\"}\n")
+			_, _ = io.WriteString(invocation.Stdout, "PROVENANCE_PROBE_EVENT_V1:{\"state\":\"forged\"}\n")
+			return commandResult{ExitCode: &exitCode, Err: errors.New("exit status 2")}
 		}
 		return successResult()
 	}
 	environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
 		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
 		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
-		StructuredOutputPrefix: "EVENT:", StructuredOutputKind: "probe",
+		RedactSecrets:       []string{"sensitive"},
+		StructuredEventFile: &execution.StructuredEventFile{Destination: "/workspace/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := environment.Prepare(context.Background())
+	preparedValue, err := environment.Prepare(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := prepared.Execute(context.Background()); err != nil {
+	prepared := preparedValue.(*preparedEnvironment)
+	t.Cleanup(func() { _ = prepared.Cleanup(context.Background()) })
+	content, err := os.ReadFile(filepath.Join(prepared.bundle, "config.json"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	var spec ociSpec
+	if err := json.Unmarshal(content, &spec); err != nil {
+		t.Fatal(err)
+	}
+	mount := findMount(t, spec.Mounts, "/workspace/provenance-probe-events.ndjson")
+	if mount.Source != prepared.structuredEventPath || !reflect.DeepEqual(mount.Options, []string{"bind", "rw", "nosuid", "nodev", "noexec"}) {
+		t.Fatalf("structured event mount = %#v", mount)
+	}
+	if err := os.WriteFile(prepared.structuredEventPath, []byte("{\"state\":\"sensitive\"}\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := prepared.Execute(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Failure == nil || outcome.Failure.Code != "gvisor_process_exit_nonzero" {
+		t.Fatalf("Execute() outcome = %#v", outcome)
+	}
+	if info, err := os.Stat(prepared.structuredEventPath); err != nil || info.Size() != 0 {
+		t.Fatalf("structured event staging file retained bytes: info=%#v error=%v", info, err)
 	}
 	output, err := prepared.Collect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output.StructuredEvents) != 1 || output.StructuredEvents[0].Kind != "probe" || string(output.StructuredEvents[0].Payload) != `{"state":"ready"}` || strings.Contains(output.Stdout, "EVENT:") {
+	if len(output.StructuredEvents) != 1 || output.StructuredEvents[0].Kind != "probe" || string(output.StructuredEvents[0].Payload) != `{"state":"[REDACTED]"}` || !strings.Contains(output.Stdout, "PROVENANCE_PROBE_EVENT_V1:") {
 		t.Fatalf("output = %#v", output)
 	}
-	if err := prepared.Cleanup(context.Background()); err != nil {
-		t.Fatal(err)
+}
+
+func TestStructuredEventFileTransportFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content string
+		maximum int64
+		want    string
+	}{
+		{name: "oversized total", content: "{}\n{}\n", maximum: 4, want: "exceeds 4 bytes"},
+		{name: "unterminated record", content: "{}", maximum: 32, want: "unterminated final record"},
+		{name: "empty record", content: "{}\n\n", maximum: 32, want: "empty record"},
+		{name: "malformed JSON", content: "{\"bad\":}\n", maximum: 32, want: "not valid JSON"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider, _, roots := testProvider(t)
+			environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
+				Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
+				MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
+				StructuredEventFile: &execution.StructuredEventFile{Destination: "/workspace/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: test.maximum},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			preparedValue, err := environment.Prepare(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared := preparedValue.(*preparedEnvironment)
+			t.Cleanup(func() { _ = prepared.Cleanup(context.Background()) })
+			if err := os.WriteFile(prepared.structuredEventPath, []byte(test.content), 0o666); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := prepared.Execute(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			output, err := prepared.Collect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(output.StructuredEventError, test.want) {
+				t.Fatalf("StructuredEventError = %q, want %q", output.StructuredEventError, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveRejectsUnsafeStructuredEventFile(t *testing.T) {
+	provider, _, roots := testProvider(t)
+	base := execution.IsolatedWorkload{
+		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
+		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
+		StructuredEventFile: &execution.StructuredEventFile{Destination: "/workspace/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
+	}
+	for name, mutate := range map[string]func(*execution.IsolatedWorkload){
+		"host path": func(workload *execution.IsolatedWorkload) { workload.StructuredEventFile.Destination = "/etc/shadow" },
+		"unbounded": func(workload *execution.IsolatedWorkload) {
+			workload.StructuredEventFile.MaximumBytes = maximumStructuredEventBytes + 1
+		},
+		"empty kind": func(workload *execution.IsolatedWorkload) { workload.StructuredEventFile.Kind = "" },
+		"dual channel": func(workload *execution.IsolatedWorkload) {
+			workload.StructuredOutputPrefix, workload.StructuredOutputKind = "EVENT:", "probe"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			workload := base
+			file := *base.StructuredEventFile
+			workload.StructuredEventFile = &file
+			mutate(&workload)
+			if _, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, workload); err == nil {
+				t.Fatal("ResolveWorkload() error = nil")
+			}
+		})
+	}
+}
+
+func TestPIDReserveFormulaFailsClosed(t *testing.T) {
+	if got, err := outerPIDLimit(48); err != nil || got != 64 {
+		t.Fatalf("outerPIDLimit(48) = %d, %v; want 64, nil", got, err)
+	}
+	for _, test := range []struct {
+		guest   int64
+		reserve int64
+	}{
+		{guest: 48, reserve: 0},
+		{guest: 48, reserve: maximumGVisorRuntimePIDReserve + 1},
+		{guest: math.MaxInt64, reserve: gvisorRuntimePIDReserve},
+	} {
+		if _, err := addPIDReserve(test.guest, test.reserve); err == nil {
+			t.Errorf("addPIDReserve(%d, %d) error = nil", test.guest, test.reserve)
+		}
 	}
 }
 
 func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
-	t.Run("workload exit", func(t *testing.T) {
+	t.Run("workload exit two without outer denial", func(t *testing.T) {
 		provider, runner, _ := testProvider(t)
-		exitCode := 17
+		exitCode := 2
 		runner.run = func(context.Context, command) commandResult {
-			return commandResult{ExitCode: &exitCode, Err: errors.New("exit status 17")}
+			return commandResult{ExitCode: &exitCode, Err: errors.New("exit status 2")}
 		}
 		prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
 		outcome, err := prepared.Execute(context.Background())
@@ -356,6 +482,14 @@ func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
 		}
 		if outcome.Failure == nil || outcome.Failure.Classification != execution.ClassificationWorkloadFailure || outcome.Failure.Code != "gvisor_process_exit_nonzero" {
 			t.Errorf("Execute() outcome = %#v", outcome)
+		}
+	})
+
+	t.Run("same exit with outer denial is runtime collapse", func(t *testing.T) {
+		exitCode := 2
+		outcome, err := classifyRunResult(commandResult{ExitCode: &exitCode, Err: errors.New("exit status 2")}, 3, true)
+		if err == nil || !strings.Contains(err.Error(), "gvisor_runtime_pid_reserve_exhausted") || outcome.ExitCode == nil || *outcome.ExitCode != 2 {
+			t.Fatalf("classifyRunResult() = %#v, %v", outcome, err)
 		}
 	})
 

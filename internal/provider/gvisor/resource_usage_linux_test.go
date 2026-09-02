@@ -60,6 +60,28 @@ func TestReadCgroupUsageFallsBackToCurrentMemory(t *testing.T) {
 	}
 }
 
+func TestReadPIDMaxEventsFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pids.events")
+	for _, test := range []struct {
+		content string
+		want    uint64
+		ok      bool
+	}{
+		{content: "max 0\n", want: 0, ok: true},
+		{content: "max 17\n", want: 17, ok: true},
+		{content: "max nope\n", ok: false},
+		{content: "other 1\n", ok: false},
+	} {
+		if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := readPIDMaxEvents(path)
+		if got != test.want || ok != test.ok {
+			t.Errorf("readPIDMaxEvents(%q) = %d, %t; want %d, %t", test.content, got, ok, test.want, test.ok)
+		}
+	}
+}
+
 func TestMergeMeasuredUsageNeverMovesCumulativeCountersBackward(t *testing.T) {
 	current := execution.ResourceUsage{CPUTime: 2 * time.Second, PeakMemoryBytes: 20, DiskReadBytes: 30, DiskWriteBytes: 40}
 	if mergeMeasuredUsage(&current, execution.ResourceUsage{CPUTime: time.Second, PeakMemoryBytes: 10, DiskReadBytes: 50}) != true {

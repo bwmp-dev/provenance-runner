@@ -25,15 +25,17 @@ import (
 )
 
 const (
-	ProviderName                  = "gvisor"
-	containerUID           uint32 = 65532
-	containerGID           uint32 = 65532
-	cleanupTimeout                = 10 * time.Second
-	metadataName                  = ".provenance-gvisor.json"
-	attemptName                   = ".provenance-run-attempted"
-	metadataVersion               = 1
-	metadataPhasePrepared         = "prepared"
-	metadataPhaseAttempted        = "run_attempted"
+	ProviderName                       = "gvisor"
+	containerUID                uint32 = 65532
+	containerGID                uint32 = 65532
+	cleanupTimeout                     = 10 * time.Second
+	metadataName                       = ".provenance-gvisor.json"
+	attemptName                        = ".provenance-run-attempted"
+	metadataVersion                    = 1
+	metadataPhasePrepared              = "prepared"
+	metadataPhaseAttempted             = "run_attempted"
+	structuredEventFileName            = "structured-events.ndjson"
+	maximumStructuredEventBytes        = int64(4 << 20)
 )
 
 // runsc reserves 128 for failures in the runtime command itself.
@@ -257,16 +259,54 @@ func (p *Provider) resolveWorkload(ctx context.Context, request execution.Reques
 	if err != nil {
 		return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_mounts_invalid", err)
 	}
+	structuredEventFile, err := validateStructuredEventFile(workload.StructuredEventFile)
+	if err != nil {
+		return nil, invalidEnvironment(err)
+	}
+	if structuredEventFile != nil && (workload.StructuredOutputPrefix != "" || workload.StructuredOutputKind != "") {
+		return nil, invalidEnvironment(errors.New("structured event file cannot be combined with the legacy stdout event channel"))
+	}
+	structuredEventPrefix := ""
+	if structuredEventFile != nil {
+		structuredEventPrefix, err = randomStructuredEventPrefix()
+		if err != nil {
+			return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_event_channel_unavailable", err)
+		}
+		evidenceConfig.StructuredLinePrefix = structuredEventPrefix
+		evidenceConfig.StructuredLineKind = structuredEventFile.Kind
+		if err := evidence.ValidateConfig(evidenceConfig); err != nil {
+			return nil, invalidEnvironment(err)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return &environment{
-		provider:       p,
-		config:         config,
-		inputs:         inputs,
-		mounts:         mounts,
-		evidenceConfig: evidenceConfig,
+		provider:              p,
+		config:                config,
+		inputs:                inputs,
+		mounts:                mounts,
+		evidenceConfig:        evidenceConfig,
+		structuredEventFile:   structuredEventFile,
+		structuredEventPrefix: structuredEventPrefix,
 	}, nil
+}
+
+func validateStructuredEventFile(requested *execution.StructuredEventFile) (*execution.StructuredEventFile, error) {
+	if requested == nil {
+		return nil, nil
+	}
+	if requested.Destination != "/workspace/provenance-probe-events.ndjson" {
+		return nil, errors.New("structured event file destination must be /workspace/provenance-probe-events.ndjson")
+	}
+	if requested.MaximumBytes < 1 || requested.MaximumBytes > maximumStructuredEventBytes {
+		return nil, fmt.Errorf("structured event file maximumBytes must be between 1 and %d", maximumStructuredEventBytes)
+	}
+	if err := evidence.ValidateConfig(evidence.Config{StructuredLinePrefix: "VALIDATE:", StructuredLineKind: requested.Kind}); err != nil {
+		return nil, fmt.Errorf("structured event file kind: %w", err)
+	}
+	validated := *requested
+	return &validated, nil
 }
 
 func cloneMap(values map[string]string) map[string]string {
@@ -278,6 +318,14 @@ func cloneMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func randomStructuredEventPrefix() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("create structured event channel identity: %w", err)
+	}
+	return "PROVENANCE_HOST_EVENT_" + hex.EncodeToString(value) + ":", nil
 }
 
 func invalidEnvironment(err error) error {
@@ -401,11 +449,13 @@ func (p *Provider) validateMountSource(inputs, path string) (string, error) {
 }
 
 type environment struct {
-	provider       *Provider
-	config         configuration
-	inputs         string
-	mounts         []execution.ReadOnlyMount
-	evidenceConfig evidence.Config
+	provider              *Provider
+	config                configuration
+	inputs                string
+	mounts                []execution.ReadOnlyMount
+	evidenceConfig        evidence.Config
+	structuredEventFile   *execution.StructuredEventFile
+	structuredEventPrefix string
 }
 
 func (e *environment) Identity() string {
@@ -442,15 +492,35 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		return nil, errors.Join(fmt.Errorf("create gVisor bundle: %w", err), collector.Close())
 	}
 	prepared := &preparedEnvironment{
-		provider:    e.provider,
-		containerID: containerID,
-		bundle:      bundle,
-		evidence:    collector,
+		provider:              e.provider,
+		containerID:           containerID,
+		bundle:                bundle,
+		evidence:              collector,
+		structuredEventFile:   e.structuredEventFile,
+		structuredEventPrefix: e.structuredEventPrefix,
 	}
 	if err := prepared.writeMetadata(); err != nil {
 		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
-	spec := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID, e.mounts)
+	var eventMount *structuredEventMount
+	if e.structuredEventFile != nil {
+		prepared.structuredEventPath = filepath.Join(bundle, structuredEventFileName)
+		file, createErr := os.OpenFile(prepared.structuredEventPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+		if createErr != nil {
+			return nil, errors.Join(fmt.Errorf("create structured event file: %w", createErr), collector.Close(), os.RemoveAll(bundle))
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(fmt.Errorf("close structured event file: %w", closeErr), collector.Close(), os.RemoveAll(bundle))
+		}
+		if chmodErr := os.Chmod(prepared.structuredEventPath, 0o666); chmodErr != nil {
+			return nil, errors.Join(fmt.Errorf("make structured event file sandbox-writable: %w", chmodErr), collector.Close(), os.RemoveAll(bundle))
+		}
+		eventMount = &structuredEventMount{source: prepared.structuredEventPath, destination: e.structuredEventFile.Destination}
+	}
+	spec, err := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID, e.mounts, eventMount)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("build OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
+	}
 	if err := writeJSONFile(filepath.Join(bundle, "config.json"), spec); err != nil {
 		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
@@ -461,15 +531,19 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 }
 
 type preparedEnvironment struct {
-	mu          sync.Mutex
-	usageMu     sync.Mutex
-	provider    *Provider
-	containerID string
-	bundle      string
-	evidence    *evidence.Collector
-	cleaned     bool
-	observer    execution.ExecutionObserver
-	usage       execution.ResourceUsage
+	mu                    sync.Mutex
+	usageMu               sync.Mutex
+	provider              *Provider
+	containerID           string
+	bundle                string
+	evidence              *evidence.Collector
+	cleaned               bool
+	observer              execution.ExecutionObserver
+	usage                 execution.ResourceUsage
+	structuredEventPath   string
+	structuredEventFile   *execution.StructuredEventFile
+	structuredEventPrefix string
+	structuredEventErr    string
 }
 
 func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
@@ -493,6 +567,10 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	if err := e.markRunAttempted(); err != nil {
 		return execution.ExecutionOutcome{}, fmt.Errorf("mark gVisor run attempted: %w", err)
 	}
+	// The host-backed file is collected after every execution path, including a
+	// cancelled or non-zero sandbox. This preserves records the probe flushed
+	// before teardown without changing execution-failure precedence.
+	defer e.collectStructuredEvents()
 	stopSampling := make(chan struct{})
 	samplingDone := make(chan struct{})
 	go e.sampleUsageUntil(stopSampling, samplingDone)
@@ -517,6 +595,18 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 		}
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, ctx.Err()
 	}
+	outerPIDDenials, denialEvidenceAvailable := readOuterPIDDenials(e.containerID)
+	return classifyRunResult(result, outerPIDDenials, denialEvidenceAvailable)
+}
+
+func classifyRunResult(result commandResult, outerPIDDenials uint64, denialEvidenceAvailable bool) (execution.ExecutionOutcome, error) {
+	if denialEvidenceAvailable && outerPIDDenials > 0 {
+		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, execution.NewClassifiedError(
+			execution.ClassificationInfrastructureFailure,
+			"gvisor_runtime_pid_reserve_exhausted",
+			fmt.Errorf("outer gVisor cgroup rejected %d process creations", outerPIDDenials),
+		)
+	}
 	if result.Err == nil {
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, nil
 	}
@@ -534,6 +624,9 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		return execution.CollectedOutput{}, err
 	}
 	bundle, err := e.evidence.Snapshot(ctx)
+	if e.structuredEventErr != "" && bundle.StructuredEventError == "" {
+		bundle.StructuredEventError = e.structuredEventErr
+	}
 	e.usageMu.Lock()
 	usage := e.usage
 	e.usageMu.Unlock()
@@ -575,6 +668,74 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		StructuredEventError: bundle.StructuredEventError,
 		ResourceUsage:        &usage,
 	}, err
+}
+
+func (e *preparedEnvironment) collectStructuredEvents() {
+	if e.structuredEventFile == nil {
+		return
+	}
+	content, err := readBoundedRegularFile(e.structuredEventPath, e.structuredEventFile.MaximumBytes)
+	if err != nil {
+		e.structuredEventErr = err.Error()
+		return
+	}
+	defer func() {
+		if err := os.Truncate(e.structuredEventPath, 0); err != nil && e.structuredEventErr == "" {
+			e.structuredEventErr = fmt.Sprintf("clear structured event file: %v", err)
+		}
+	}()
+	if len(content) == 0 {
+		return
+	}
+	if content[len(content)-1] != '\n' {
+		e.structuredEventErr = "structured event file has an unterminated final record"
+		return
+	}
+	writer, err := e.evidence.RawWriter(evidence.StreamStdout)
+	if err != nil {
+		e.structuredEventErr = err.Error()
+		return
+	}
+	for _, line := range bytes.Split(content[:len(content)-1], []byte{'\n'}) {
+		if len(line) == 0 {
+			e.structuredEventErr = "structured event file contains an empty record"
+			return
+		}
+		record := make([]byte, 0, len(e.structuredEventPrefix)+len(line)+1)
+		record = append(record, e.structuredEventPrefix...)
+		record = append(record, line...)
+		record = append(record, '\n')
+		if _, err := writer.Write(record); err != nil {
+			e.structuredEventErr = err.Error()
+			return
+		}
+	}
+}
+
+func readBoundedRegularFile(path string, maximum int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect structured event file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("structured event file is not a regular file")
+	}
+	if info.Size() > maximum {
+		return nil, fmt.Errorf("structured event file exceeds %d bytes", maximum)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open structured event file: %w", err)
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, fmt.Errorf("read structured event file: %w", err)
+	}
+	if int64(len(content)) > maximum {
+		return nil, fmt.Errorf("structured event file exceeds %d bytes", maximum)
+	}
+	return content, nil
 }
 
 func (e *preparedEnvironment) Cleanup(ctx context.Context) error {

@@ -70,8 +70,8 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 	if workload.Command != "/bin/sh" || workload.Network != "none" {
 		t.Errorf("workload command/network = %q/%q", workload.Command, workload.Network)
 	}
-	if workload.StructuredOutputPrefix != probeEventPrefix || workload.StructuredOutputKind != probeEventKind {
-		t.Errorf("structured output channel = %q/%q", workload.StructuredOutputPrefix, workload.StructuredOutputKind)
+	if workload.StructuredOutputPrefix != "" || workload.StructuredOutputKind != "" || workload.StructuredEventFile == nil || workload.StructuredEventFile.Destination != "/workspace/provenance-probe-events.ndjson" || workload.StructuredEventFile.Kind != probeEventKind || workload.StructuredEventFile.MaximumBytes != 4<<20 {
+		t.Errorf("structured event file = %#v; legacy channel = %q/%q", workload.StructuredEventFile, workload.StructuredOutputPrefix, workload.StructuredOutputKind)
 	}
 	if workload.MemoryBytes != 1<<30 || workload.CPUMillis != 1500 || workload.PIDs != 64 || workload.DiskBytes != 2<<30 {
 		t.Errorf("workload limits = %#v", workload)
@@ -84,6 +84,9 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(workload.Arguments, "\n"), `if [ "$status" -eq 125 ]; then exit 126`) {
 		t.Errorf("workload does not preserve reserved wrapper exit 125: %#v", workload.Arguments)
+	}
+	if strings.Contains(strings.Join(workload.Arguments, "\n"), "PROVENANCE_PROBE_EVENT_V1:") {
+		t.Errorf("workload retained post-Java event replay: %#v", workload.Arguments)
 	}
 	joinedArguments := strings.Join(workload.Arguments, "\x00")
 	if strings.Contains(joinedArguments, "provenance.fixture.hostile.enabled") {

@@ -31,7 +31,6 @@ const (
 	defaultMaximumArtifactBytes    = int64(512 << 20)
 	defaultMaximumDependencyBytes  = int64(1 << 30)
 	defaultMaximumPreparationBytes = int64(2 << 30)
-	probeEventPrefix               = "PROVENANCE_PROBE_EVENT_V1:"
 	probeEventKind                 = "paper_probe_event"
 	workspaceSeedFailureExitCode   = 125
 )
@@ -571,26 +570,29 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 	javaArguments = append(javaArguments, "-jar", "/workspace/paper.jar", "--nogui")
 	arguments := []string{
 		"-cu",
-		`cp -R /inputs/server/. /workspace/ || exit 125; chmod -R u+rwX /workspace || exit 125; "$@"; status=$?; if [ -f /workspace/provenance-probe-events.ndjson ]; then while IFS= read -r event || [ -n "$event" ]; do printf '%s%s\n' 'PROVENANCE_PROBE_EVENT_V1:' "$event"; done < /workspace/provenance-probe-events.ndjson; fi; if [ "$status" -eq 125 ]; then exit 126; fi; exit "$status"`,
+		`cp -R /inputs/server/. /workspace/ || exit 125; chmod -R u+rwX /workspace || exit 125; "$@"; status=$?; if [ "$status" -eq 125 ]; then exit 126; fi; exit "$status"`,
 		"provenance-paper",
 		"/runtime/bin/java",
 	}
 	arguments = append(arguments, javaArguments...)
 	return execution.IsolatedWorkload{
-		Command:                "/bin/sh",
-		Arguments:              arguments,
-		Environment:            map[string]string{"JAVA_HOME": "/runtime"},
-		InputsPath:             jobWorkspace.Root(),
-		ReadOnlyMounts:         []execution.ReadOnlyMount{{Source: javaHome, Destination: "/runtime", Executable: true}},
-		Network:                "none",
-		MemoryBytes:            e.config.MemoryBytes,
-		CPUMillis:              e.config.CPUMillis,
-		PIDs:                   e.config.PIDs,
-		DiskBytes:              e.config.DiskBytes,
-		MaxLineBytes:           e.config.MaxLineBytes,
-		RedactSecrets:          append([]string(nil), e.config.RedactSecrets...),
-		StructuredOutputPrefix: probeEventPrefix,
-		StructuredOutputKind:   probeEventKind,
+		Command:        "/bin/sh",
+		Arguments:      arguments,
+		Environment:    map[string]string{"JAVA_HOME": "/runtime"},
+		InputsPath:     jobWorkspace.Root(),
+		ReadOnlyMounts: []execution.ReadOnlyMount{{Source: javaHome, Destination: "/runtime", Executable: true}},
+		Network:        "none",
+		MemoryBytes:    e.config.MemoryBytes,
+		CPUMillis:      e.config.CPUMillis,
+		PIDs:           e.config.PIDs,
+		DiskBytes:      e.config.DiskBytes,
+		MaxLineBytes:   e.config.MaxLineBytes,
+		RedactSecrets:  append([]string(nil), e.config.RedactSecrets...),
+		StructuredEventFile: &execution.StructuredEventFile{
+			Destination:  "/workspace/provenance-probe-events.ndjson",
+			Kind:         probeEventKind,
+			MaximumBytes: 4 << 20,
+		},
 	}, nil
 }
 

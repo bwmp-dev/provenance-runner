@@ -11,3 +11,5 @@ func (e *preparedEnvironment) sampleUsageUntil(stop <-chan struct{}, done chan<-
 }
 
 func (e *preparedEnvironment) sampleUsage() {}
+
+func readOuterPIDDenials(string) (uint64, bool) { return 0, false }

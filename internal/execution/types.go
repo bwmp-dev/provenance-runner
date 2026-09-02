@@ -71,6 +71,18 @@ type IsolatedWorkload struct {
 	RedactSecrets          []string
 	StructuredOutputPrefix string
 	StructuredOutputKind   string
+	StructuredEventFile    *StructuredEventFile
+}
+
+// StructuredEventFile requests a bounded host-backed NDJSON channel created by
+// the sandbox provider before execution. Only a trusted product provider can
+// select the destination and event kind. The file preserves flushed events
+// across abnormal sandbox teardown, but it does not authenticate which process
+// inside the sandbox wrote them; consumers must validate the complete protocol.
+type StructuredEventFile struct {
+	Destination  string
+	Kind         string
+	MaximumBytes int64
 }
 
 type ReadOnlyMount struct {

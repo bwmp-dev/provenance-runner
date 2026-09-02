@@ -1,10 +1,19 @@
 package gvisor
 
 import (
+	"errors"
+	"math"
 	"strconv"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 )
+
+// gVisor uses host tasks for the Sentry, gofer, and teardown/control paths.
+// Keep those tasks outside the customer-visible guest process quota. Sixteen
+// tasks covers the observed Paper shutdown burst while remaining a small,
+// fixed, auditable expansion of the outer containment boundary.
+const gvisorRuntimePIDReserve int64 = 16
+const maximumGVisorRuntimePIDReserve int64 = 64
 
 type ociSpec struct {
 	OCIVersion string     `json:"ociVersion"`
@@ -111,8 +120,34 @@ type ociPIDs struct {
 	Limit int64 `json:"limit"`
 }
 
-func buildSpec(config configuration, rootFS, inputs, containerID string, readOnlyMounts []execution.ReadOnlyMount) ociSpec {
+type structuredEventMount struct {
+	source      string
+	destination string
+}
+
+func outerPIDLimit(guestLimit int64) (int64, error) {
+	if guestLimit < 1 || guestLimit > 4_096 {
+		return 0, errors.New("guest PID limit must be between 1 and 4096")
+	}
+	return addPIDReserve(guestLimit, gvisorRuntimePIDReserve)
+}
+
+func addPIDReserve(guestLimit, reserve int64) (int64, error) {
+	if reserve < 1 || reserve > maximumGVisorRuntimePIDReserve {
+		return 0, errors.New("gVisor runtime PID reserve is outside its bounded range")
+	}
+	if guestLimit > math.MaxInt64-reserve {
+		return 0, errors.New("guest PID limit overflows the gVisor runtime reserve")
+	}
+	return guestLimit + reserve, nil
+}
+
+func buildSpec(config configuration, rootFS, inputs, containerID string, readOnlyMounts []execution.ReadOnlyMount, eventMount *structuredEventMount) (ociSpec, error) {
 	const cpuPeriod = uint64(100_000)
+	outerPIDs, err := outerPIDLimit(config.PIDs)
+	if err != nil {
+		return ociSpec{}, err
+	}
 	command := append([]string{config.Command}, config.Arguments...)
 	emptyCapabilities := []string{}
 	devices := standardDevices()
@@ -137,6 +172,14 @@ func buildSpec(config configuration, rootFS, inputs, containerID string, readOnl
 			options = append(options, "noexec")
 		}
 		mounts = append(mounts, ociMount{Destination: mount.Destination, Type: "bind", Source: mount.Source, Options: options})
+	}
+	if eventMount != nil {
+		mounts = append(mounts, ociMount{
+			Destination: eventMount.destination,
+			Type:        "bind",
+			Source:      eventMount.source,
+			Options:     []string{"bind", "rw", "nosuid", "nodev", "noexec"},
+		})
 	}
 	return ociSpec{
 		OCIVersion: "1.1.0",
@@ -176,7 +219,7 @@ func buildSpec(config configuration, rootFS, inputs, containerID string, readOnl
 				Devices: deviceRules,
 				Memory:  ociMemory{Limit: config.MemoryBytes, Swap: config.MemoryBytes},
 				CPU:     ociCPU{Quota: config.CPUMillis * int64(cpuPeriod) / 1000, Period: cpuPeriod},
-				PIDs:    ociPIDs{Limit: config.PIDs},
+				PIDs:    ociPIDs{Limit: outerPIDs},
 			},
 			CgroupsPath: "provenance/" + containerID,
 			MaskedPaths: []string{
@@ -186,7 +229,7 @@ func buildSpec(config configuration, rootFS, inputs, containerID string, readOnl
 				"/proc/asound", "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger",
 			},
 		},
-	}
+	}, nil
 }
 
 func standardDevices() []ociDevice {
