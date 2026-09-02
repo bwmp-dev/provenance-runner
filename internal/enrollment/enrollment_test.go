@@ -123,6 +123,97 @@ func TestEnrollmentUsesExactReleasedRequestAndActivatesOnlyAfterDurability(t *te
 	if _, err := gatewayclient.LoadConfig(paths.connect, "test"); err != nil {
 		t.Fatalf("normal gateway startup rejected active enrollment: %v", err)
 	}
+	freshToken := tokenFor(92)
+	if err := os.WriteFile(paths.token, []byte(freshToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), paths.enrollment, Options{HTTPClient: doerFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("active enrollment attempted another redemption")
+		return nil, nil
+	})}); err == nil || !strings.Contains(err.Error(), "left untouched") {
+		t.Fatalf("active enrollment error = %v", err)
+	}
+	retained, err := os.ReadFile(paths.token)
+	if err != nil || string(retained) != freshToken {
+		t.Fatalf("active identity removed fresh token: %q, %v", retained, err)
+	}
+}
+
+func TestResponseReceivedRecoveryInstallsWithoutHTTPAndRejectsMismatchedToken(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		token         string
+		wantSuccess   bool
+		wantTokenFile bool
+	}{
+		{name: "matching token", token: testToken, wantSuccess: true},
+		{name: "mismatched token", token: tokenFor(93), wantTokenFile: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			paths := setupEnrollment(t, "https://api.example.test", test.token)
+			tokenHash := sha256.Sum256([]byte(testToken))
+			document, err := runneridentity.NewPrepared(testOrganizationID, testRunnerID, tokenHash, "response-recovery-test", 900, strings.NewReader(strings.Repeat("r", 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			credential := credentialFor(94)
+			credentialHash := sha256.Sum256([]byte(credential))
+			now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+			document, err = document.Received(runneridentity.Response{CredentialID: "60000000-0000-0000-0000-000000000094", Credential: credential, CredentialSHA256: hex.EncodeToString(credentialHash[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			opened, err := openStore(paths.identity, paths.credential, paths.token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := opened.WriteIdentity(document); err != nil {
+				t.Fatal(err)
+			}
+			if err := opened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			err = Run(context.Background(), paths.enrollment, Options{HTTPClient: doerFunc(func(*http.Request) (*http.Response, error) {
+				called = true
+				return nil, errors.New("must not be called")
+			})})
+			if called {
+				t.Fatal("response recovery called the registration authority")
+			}
+			if test.wantSuccess {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := gatewayclient.LoadConfig(paths.connect, "test"); err != nil {
+					t.Fatalf("recovered enrollment did not enable startup: %v", err)
+				}
+				identityData, _ := os.ReadFile(paths.identity)
+				if bytes.Contains(identityData, []byte(credential)) {
+					t.Fatal("recovered active identity retained credential plaintext")
+				}
+				if _, err := os.Stat(paths.token); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("recovered enrollment retained consumed token: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "does not match") {
+				t.Fatalf("mismatched recovery error = %v", err)
+			}
+			if _, err := os.Stat(paths.credential); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("mismatched recovery installed credential: %v", err)
+			}
+			retained, readErr := os.ReadFile(paths.token)
+			if readErr != nil || string(retained) != test.token {
+				t.Fatalf("mismatched recovery changed token: %q, %v", retained, readErr)
+			}
+			identityData, readErr := os.ReadFile(paths.identity)
+			identity, decodeErr := runneridentity.Decode(identityData)
+			if readErr != nil || decodeErr != nil || identity.Phase != runneridentity.PhaseReceived {
+				t.Fatalf("mismatched recovery changed identity: %#v read=%v decode=%v", identity, readErr, decodeErr)
+			}
+		})
+	}
 }
 
 func TestLostSuccessRetryFailsClosedAndReplacementTokenSucceeds(t *testing.T) {

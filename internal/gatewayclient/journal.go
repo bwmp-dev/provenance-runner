@@ -3,6 +3,7 @@ package gatewayclient
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,13 +37,14 @@ type journalJob struct {
 }
 
 type journalState struct {
-	SchemaVersion      string                     `json:"schemaVersion"`
-	MessageSequence    uint64                     `json:"messageSequence"`
-	HeartbeatSequence  uint64                     `json:"heartbeatSequence"`
-	Active             *journalJob                `json:"active,omitempty"`
-	PendingMessage     []byte                     `json:"pendingMessage,omitempty"`
-	PendingHeartbeat   []byte                     `json:"pendingHeartbeat,omitempty"`
-	CredentialRotation *journalCredentialRotation `json:"credentialRotation,omitempty"`
+	SchemaVersion       string                      `json:"schemaVersion"`
+	MessageSequence     uint64                      `json:"messageSequence"`
+	HeartbeatSequence   uint64                      `json:"heartbeatSequence"`
+	Active              *journalJob                 `json:"active,omitempty"`
+	PendingMessage      []byte                      `json:"pendingMessage,omitempty"`
+	PendingHeartbeat    []byte                      `json:"pendingHeartbeat,omitempty"`
+	CredentialRotation  *journalCredentialRotation  `json:"credentialRotation,omitempty"`
+	CommittedCredential *journalCommittedCredential `json:"committedCredential,omitempty"`
 }
 
 type journalCredentialRotation struct {
@@ -52,6 +54,15 @@ type journalCredentialRotation struct {
 	ExpiresAt       time.Time `json:"expiresAt"`
 	ReconnectBefore time.Time `json:"reconnectBefore"`
 	PersistedAt     time.Time `json:"persistedAt,omitempty"`
+}
+
+type journalCommittedCredential struct {
+	RunnerID    string    `json:"runnerId"`
+	RotationID  string    `json:"rotationId"`
+	Fingerprint []byte    `json:"fingerprint"`
+	IssuedAt    time.Time `json:"issuedAt"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	PersistedAt time.Time `json:"persistedAt"`
 }
 
 type journal struct {
@@ -103,6 +114,19 @@ func validateJournalState(state journalState) error {
 			!rotation.ReconnectBefore.After(rotation.IssuedAt) || !rotation.ReconnectBefore.Before(rotation.ExpiresAt) || rotation.ReconnectBefore.Sub(rotation.IssuedAt) > 5*time.Minute ||
 			(!rotation.PersistedAt.IsZero() && rotation.PersistedAt.Before(rotation.IssuedAt.Add(-maximumClockSkew))) {
 			return errors.New("credential rotation state is invalid")
+		}
+	}
+	if committed := state.CommittedCredential; committed != nil {
+		if validateUUID("committed credential runnerId", committed.RunnerID) != nil || committed.RunnerID != strings.ToLower(committed.RunnerID) ||
+			validateUUID("committed credential rotationId", committed.RotationID) != nil || committed.RotationID != strings.ToLower(committed.RotationID) ||
+			len(committed.Fingerprint) != sha256.Size || committed.IssuedAt.IsZero() || committed.ExpiresAt.IsZero() || committed.PersistedAt.IsZero() ||
+			!committed.ExpiresAt.After(committed.IssuedAt) || committed.ExpiresAt.Sub(committed.IssuedAt) > time.Hour ||
+			committed.PersistedAt.Before(committed.IssuedAt.Add(-maximumClockSkew)) || !committed.ExpiresAt.After(committed.PersistedAt) {
+			return errors.New("committed credential state is invalid")
+		}
+		if rotation := state.CredentialRotation; rotation != nil && !rotation.PersistedAt.IsZero() &&
+			(committed.RotationID != rotation.RotationID || !bytes.Equal(committed.Fingerprint, rotation.Fingerprint) || !committed.IssuedAt.Equal(rotation.IssuedAt) || !committed.ExpiresAt.Equal(rotation.ExpiresAt) || !committed.PersistedAt.Equal(rotation.PersistedAt)) {
+			return errors.New("committed credential conflicts with active rotation")
 		}
 	}
 	if len(state.PendingHeartbeat) != 0 {
@@ -228,6 +252,11 @@ func cloneJournalState(state journalState) journalState {
 		rotation.Fingerprint = bytes.Clone(state.CredentialRotation.Fingerprint)
 		cloned.CredentialRotation = &rotation
 	}
+	if state.CommittedCredential != nil {
+		credential := *state.CommittedCredential
+		credential.Fingerprint = bytes.Clone(state.CommittedCredential.Fingerprint)
+		cloned.CommittedCredential = &credential
+	}
 	if state.Active != nil {
 		active := *state.Active
 		active.Specification = bytes.Clone(state.Active.Specification)
@@ -236,6 +265,29 @@ func cloneJournalState(state journalState) journalState {
 		cloned.Active = &active
 	}
 	return cloned
+}
+
+func credentialMatchesCommittedRotation(path, runnerID string, credential []byte, now time.Time) bool {
+	if path == "" || len(credential) == 0 {
+		return false
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	journal, err := openJournal(path)
+	if err != nil {
+		return false
+	}
+	state := journal.snapshot()
+	committed := state.CommittedCredential
+	if committed == nil || committed.RunnerID != runnerID || !now.Before(committed.ExpiresAt) {
+		return false
+	}
+	if rotation := state.CredentialRotation; rotation != nil && (rotation.PersistedAt.IsZero() || rotation.RotationID != committed.RotationID || !bytes.Equal(rotation.Fingerprint, committed.Fingerprint)) {
+		return false
+	}
+	digest := sha256.Sum256(credential)
+	return subtle.ConstantTimeCompare(digest[:], committed.Fingerprint) == 1
 }
 
 func (j *journal) update(update func(*journalState) error) error {

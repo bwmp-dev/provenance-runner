@@ -87,10 +87,7 @@ func Run(ctx context.Context, configPath string, options Options) error {
 		return err
 	}
 	if exists && document.Phase == runneridentity.PhaseActive {
-		if document.TokenSHA256 == "" {
-			_ = store.RemoveToken(tokenHash)
-		}
-		return errors.New("runner identity is already active")
+		return errors.New("runner identity is already active; the supplied registration token was left untouched")
 	}
 	if !exists || (document.Phase != runneridentity.PhaseReceived && document.Phase != runneridentity.PhaseActive) {
 		credentialExists, credentialErr := store.CredentialExists()

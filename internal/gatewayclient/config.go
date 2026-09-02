@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/runneridentity"
@@ -91,7 +92,8 @@ func LoadConfig(path, runnerVersion string) (Config, error) {
 		}
 		identity, decodeErr := runneridentity.Decode(identityData)
 		clear(identityData)
-		if decodeErr != nil || identity.Phase != runneridentity.PhaseActive || identity.RunnerID != config.RunnerID || !identity.MatchesCredential(config.credential) ||
+		credentialBound := decodeErr == nil && (identity.MatchesCredential(config.credential) || credentialMatchesCommittedRotation(config.journalFile, config.RunnerID, config.credential, time.Now().UTC()))
+		if decodeErr != nil || identity.Phase != runneridentity.PhaseActive || identity.RunnerID != config.RunnerID || !credentialBound ||
 			(config.ExpectedScope.Kind == ScopeOrganization && identity.OrganizationID != config.ExpectedScope.OrganizationID) {
 			clear(config.credential)
 			return Config{}, errors.New("runner identity does not match the connect configuration")

@@ -62,6 +62,10 @@ func (s *clientSession) handleCredentialRotation(rotation *runnerv1.RotateCreden
 		if state.CredentialRotation.PersistedAt.IsZero() {
 			state.CredentialRotation.PersistedAt = now.UTC()
 		}
+		state.CommittedCredential = &journalCommittedCredential{
+			RunnerID: s.client.config.RunnerID, RotationID: metadata.RotationID, Fingerprint: bytes.Clone(metadata.Fingerprint),
+			IssuedAt: metadata.IssuedAt, ExpiresAt: metadata.ExpiresAt, PersistedAt: state.CredentialRotation.PersistedAt,
+		}
 		return nil
 	}); err != nil {
 		// The credential itself is already durable. Reconnect without claiming
