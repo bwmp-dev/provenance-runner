@@ -314,8 +314,8 @@ run_contract_tests() {
   fi
 
   [[ $(awk -F '\t' '$1=="fork-pid-bomb" && $2=="b4d936c12370892047839396786b6e65b1b5ccf65c6ddae70e283b43fe3e8e16" && $3==7593 {count++} END {print count+0}' "$fixture_manifest") -eq 1 ]]
-  grep -Fq 'PLAN03_TOOLKIT_SHA: 81fe72c8788a46baf27a152845f96e7bc5d16fdd' "$repository_root/.github/workflows/plan03-acceptance.yml"
-  [[ $(grep -Fc 'ref: 81fe72c8788a46baf27a152845f96e7bc5d16fdd' "$repository_root/.github/workflows/plan03-acceptance.yml") -eq 1 ]]
+  grep -Fq 'PLAN03_TOOLKIT_SHA: c4bf6bc9ddd0be3221e897e0ee9e2d409d206dec' "$repository_root/.github/workflows/plan03-acceptance.yml"
+  [[ $(grep -Fc 'ref: c4bf6bc9ddd0be3221e897e0ee9e2d409d206dec' "$repository_root/.github/workflows/plan03-acceptance.yml") -eq 1 ]]
   [[ $(fixture_repetitions fork-pid-bomb) == 3 ]]
   [[ $(fixture_case_identity fork-pid-bomb 1) == fork-pid-bomb-run-1 ]]
   [[ $(fixture_case_identity fork-pid-bomb 2) == fork-pid-bomb-run-2 ]]
