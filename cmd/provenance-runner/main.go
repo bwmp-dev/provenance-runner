@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/bwmp-dev/provenance-runner/internal/buildinfo"
+	"github.com/bwmp-dev/provenance-runner/internal/enrollment"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/gatewayclient"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
@@ -34,6 +35,9 @@ func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout
 	if len(arguments) == 2 && arguments[0] == "connect" {
 		return runConnect(ctx, arguments[1], stderr)
 	}
+	if len(arguments) == 2 && arguments[0] == "enroll" {
+		return runEnroll(ctx, arguments[1], stderr)
+	}
 	if len(arguments) == 2 && arguments[0] == "execute" {
 		return runExecuteContext(ctx, arguments[1], stdin, stdout, stderr, os.Getenv, registryForLocalExecution)
 	}
@@ -42,6 +46,18 @@ func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout
 	}
 	writeUsage(stderr)
 	return 2
+}
+
+func runEnroll(ctx context.Context, configPath string, stderr io.Writer) int {
+	if runtime.GOOS != "linux" {
+		fmt.Fprintln(stderr, "enroll runner: enrollment requires Linux owner-only filesystem semantics")
+		return 1
+	}
+	if err := enrollment.Run(ctx, configPath, enrollment.Options{}); err != nil {
+		fmt.Fprintf(stderr, "enroll runner: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 type localRegistryFactory func(context.Context, string, environmentLookup) (*providerRegistry, error)
@@ -126,6 +142,7 @@ func writeUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "usage: provenance-runner execute <job.json|->")
 	fmt.Fprintln(writer, "       provenance-runner execute <job.json|-> --complete-log <new-path>")
 	fmt.Fprintln(writer, "       provenance-runner connect <connect.json>")
+	fmt.Fprintln(writer, "       provenance-runner enroll <enrollment.json>")
 }
 
 func readJob(path string, stdin io.Reader) ([]byte, error) {
