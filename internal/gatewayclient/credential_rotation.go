@@ -28,6 +28,7 @@ func (s *clientSession) handleCredentialRotation(rotation *runnerv1.RotateCreden
 	if err != nil {
 		return permanent("credential rotation is invalid")
 	}
+	metadata.RunnerID = s.client.config.RunnerID
 	defer clear(credential)
 	var reconnectDeadlineExpired atomic.Bool
 	var reconnectTimer *time.Timer
@@ -45,6 +46,9 @@ func (s *clientSession) handleCredentialRotation(rotation *runnerv1.RotateCreden
 		}
 		if !sameCredentialRotation(state.CredentialRotation, metadata) {
 			return errors.New("credential rotation identity conflicts with durable state")
+		}
+		if state.CredentialRotation.RunnerID == "" {
+			state.CredentialRotation.RunnerID = metadata.RunnerID
 		}
 		return nil
 	}); err != nil {
@@ -135,7 +139,8 @@ func validateCredentialRotation(rotation *runnerv1.RotateCredential, now time.Ti
 }
 
 func sameCredentialRotation(left, right *journalCredentialRotation) bool {
-	return left != nil && right != nil && left.RotationID == right.RotationID && bytes.Equal(left.Fingerprint, right.Fingerprint) &&
+	runnerCompatible := left != nil && right != nil && (left.RunnerID == right.RunnerID || left.RunnerID == "" || right.RunnerID == "")
+	return runnerCompatible && left.RotationID == right.RotationID && bytes.Equal(left.Fingerprint, right.Fingerprint) &&
 		left.IssuedAt.Equal(right.IssuedAt) && left.ExpiresAt.Equal(right.ExpiresAt) && left.ReconnectBefore.Equal(right.ReconnectBefore)
 }
 
@@ -144,8 +149,23 @@ func (c *Client) reconcileCredentialRotationAfterAuthentication() error {
 	if rotation == nil || sha256.Sum256(c.config.credential) != bytesToDigest(rotation.Fingerprint) {
 		return nil
 	}
+	now := c.now().UTC()
 	return c.journal.update(func(state *journalState) error {
 		if state.CredentialRotation != nil && sameCredentialRotation(state.CredentialRotation, rotation) {
+			if c.config.IdentityKeyFile != "" {
+				if rotation.RunnerID != c.config.RunnerID || !now.Before(rotation.ExpiresAt) {
+					return errors.New("credential rotation is not bound to this runner")
+				}
+				if state.CommittedCredential == nil {
+					if !rotation.PersistedAt.IsZero() {
+						return errors.New("persisted credential rotation lacks a committed binding")
+					}
+					state.CommittedCredential = &journalCommittedCredential{
+						RunnerID: rotation.RunnerID, RotationID: rotation.RotationID, Fingerprint: bytes.Clone(rotation.Fingerprint),
+						IssuedAt: rotation.IssuedAt, ExpiresAt: rotation.ExpiresAt, PersistedAt: now,
+					}
+				}
+			}
 			state.CredentialRotation = nil
 		}
 		return nil

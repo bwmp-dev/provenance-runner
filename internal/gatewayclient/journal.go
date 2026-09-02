@@ -48,6 +48,7 @@ type journalState struct {
 }
 
 type journalCredentialRotation struct {
+	RunnerID        string    `json:"runnerId,omitempty"`
 	RotationID      string    `json:"rotationId"`
 	Fingerprint     []byte    `json:"fingerprint"`
 	IssuedAt        time.Time `json:"issuedAt"`
@@ -109,7 +110,8 @@ func validateJournalState(state journalState) error {
 		return fmt.Errorf("schemaVersion must be %q", journalSchemaVersion)
 	}
 	if rotation := state.CredentialRotation; rotation != nil {
-		if validateUUID("credential rotationId", rotation.RotationID) != nil || rotation.RotationID != strings.ToLower(rotation.RotationID) || len(rotation.Fingerprint) != sha256.Size ||
+		if (rotation.RunnerID != "" && (validateUUID("credential rotation runnerId", rotation.RunnerID) != nil || rotation.RunnerID != strings.ToLower(rotation.RunnerID))) ||
+			validateUUID("credential rotationId", rotation.RotationID) != nil || rotation.RotationID != strings.ToLower(rotation.RotationID) || len(rotation.Fingerprint) != sha256.Size ||
 			rotation.IssuedAt.IsZero() || !rotation.ExpiresAt.After(rotation.IssuedAt) || rotation.ExpiresAt.Sub(rotation.IssuedAt) > time.Hour ||
 			!rotation.ReconnectBefore.After(rotation.IssuedAt) || !rotation.ReconnectBefore.Before(rotation.ExpiresAt) || rotation.ReconnectBefore.Sub(rotation.IssuedAt) > 5*time.Minute ||
 			(!rotation.PersistedAt.IsZero() && rotation.PersistedAt.Before(rotation.IssuedAt.Add(-maximumClockSkew))) {
@@ -125,7 +127,7 @@ func validateJournalState(state journalState) error {
 			return errors.New("committed credential state is invalid")
 		}
 		if rotation := state.CredentialRotation; rotation != nil && !rotation.PersistedAt.IsZero() &&
-			(committed.RotationID != rotation.RotationID || !bytes.Equal(committed.Fingerprint, rotation.Fingerprint) || !committed.IssuedAt.Equal(rotation.IssuedAt) || !committed.ExpiresAt.Equal(rotation.ExpiresAt) || !committed.PersistedAt.Equal(rotation.PersistedAt)) {
+			(committed.RunnerID != rotation.RunnerID || committed.RotationID != rotation.RotationID || !bytes.Equal(committed.Fingerprint, rotation.Fingerprint) || !committed.IssuedAt.Equal(rotation.IssuedAt) || !committed.ExpiresAt.Equal(rotation.ExpiresAt) || !committed.PersistedAt.Equal(rotation.PersistedAt)) {
 			return errors.New("committed credential conflicts with active rotation")
 		}
 	}
@@ -279,11 +281,18 @@ func credentialMatchesCommittedRotation(path, runnerID string, credential []byte
 		return false
 	}
 	state := journal.snapshot()
+	if rotation := state.CredentialRotation; rotation != nil && rotation.PersistedAt.IsZero() {
+		if state.CommittedCredential != nil || rotation.RunnerID != runnerID || !now.Before(rotation.ExpiresAt) {
+			return false
+		}
+		digest := sha256.Sum256(credential)
+		return subtle.ConstantTimeCompare(digest[:], rotation.Fingerprint) == 1
+	}
 	committed := state.CommittedCredential
 	if committed == nil || committed.RunnerID != runnerID || !now.Before(committed.ExpiresAt) {
 		return false
 	}
-	if rotation := state.CredentialRotation; rotation != nil && (rotation.PersistedAt.IsZero() || rotation.RotationID != committed.RotationID || !bytes.Equal(rotation.Fingerprint, committed.Fingerprint)) {
+	if rotation := state.CredentialRotation; rotation != nil && (rotation.RunnerID != runnerID || rotation.RotationID != committed.RotationID || !bytes.Equal(rotation.Fingerprint, committed.Fingerprint)) {
 		return false
 	}
 	digest := sha256.Sum256(credential)

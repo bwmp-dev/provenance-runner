@@ -166,6 +166,15 @@ func TestLoadConfigRejectsPendingConflictingStaleAndWrongRunnerRotationBindings(
 		{name: "pending", mutate: func(state *journalState) {
 			state.CredentialRotation = &journalCredentialRotation{RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute)}
 		}},
+		{name: "pending wrong runner", mutate: func(state *journalState) {
+			state.CredentialRotation = &journalCredentialRotation{RunnerID: otherRunner, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute)}
+		}},
+		{name: "pending wrong fingerprint", mutate: func(state *journalState) {
+			state.CredentialRotation = &journalCredentialRotation{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(otherFingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute)}
+		}},
+		{name: "pending expired", mutate: func(state *journalState) {
+			state.CredentialRotation = &journalCredentialRotation{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now.Add(-16 * time.Minute), ExpiresAt: now.Add(-time.Minute), ReconnectBefore: now.Add(-14 * time.Minute)}
+		}},
 		{name: "conflicting pending", mutate: func(state *journalState) {
 			state.CommittedCredential = &journalCommittedCredential{RunnerID: testRunnerID, RotationID: rotationID, Fingerprint: bytes.Clone(fingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), PersistedAt: now}
 			state.CredentialRotation = &journalCredentialRotation{RotationID: "60000000-0000-4000-8000-000000000074", Fingerprint: bytes.Clone(otherFingerprint[:]), IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), ReconnectBefore: now.Add(2 * time.Minute)}
