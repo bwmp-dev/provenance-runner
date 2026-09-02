@@ -27,6 +27,7 @@ type clientSession struct {
 	seenOrder                     []string
 	pendingHeartbeat              *runnerv1.RunnerMessage
 	rootContext                   context.Context
+	cancelSession                 context.CancelFunc
 	reconciled                    bool
 	settledEvents                 map[string]settledRunnerEvent
 	settledEventOrder             []string
@@ -112,7 +113,7 @@ func (s *clientSession) handleGatewayMessage(message *runnerv1.GatewayMessage, n
 	case message.GetPolicyUpdate() != nil:
 		return permanent("policy updates are not supported by this runner alpha")
 	case message.GetCredentialRotation() != nil:
-		return permanent("credential rotation is not supported by this runner alpha")
+		return s.handleCredentialRotation(message.GetCredentialRotation(), now)
 	default:
 		return permanent("gateway message payload is missing or unsupported")
 	}

@@ -60,9 +60,10 @@ type Config struct {
 	ExpectedScope  ExpectedScope `json:"expectedScope"`
 	Resources      Resources     `json:"resources"`
 
-	RunnerVersion string `json:"-"`
-	credential    []byte
-	journalFile   string
+	RunnerVersion   string `json:"-"`
+	credential      []byte
+	journalFile     string
+	credentialStore durableCredentialStore
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {
