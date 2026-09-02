@@ -14,10 +14,16 @@ pid_result_contract='
   first_sequence(.kind=="SERVER_READY" and .payload.requirementsSatisfied==true) as $server_ready |
   first_sequence(.kind=="CLEAN_SHUTDOWN_REQUESTED") as $shutdown_requested |
   first_sequence(.kind=="SERVER_STOPPED" and .payload.shutdownRequested==true) as $server_stopped |
+  (.structuredEvents | length)==21 and
+  ([.structuredEvents[].sequence] == [range(1;22)]) and
+  ([.structuredEvents[].kind] == ["METADATA_INSPECTION","METADATA_INSPECTION","TEST_PLAN","PLUGIN_STATE","PLUGIN_STATE","PROBE_LOADED","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","SERVER_LOADED","PLUGIN_STATE","PLUGIN_STATE","STABILIZATION_STARTED","TARGET_REQUIREMENT","STABILIZATION_COMPLETED","SERVER_READY","CLEAN_SHUTDOWN_REQUESTED","PLUGIN_STATE","PLUGIN_STATE","SERVER_STOPPED"]) and
   .classification=="passed" and
   .phase=="completed" and
   (.failure // null)==null and
   .execution.exitCode==0 and
+  .completeLog.state=="complete" and
+  .completeLog.truncated==false and
+  .cleanup.succeeded==true and
   ($target_enabled < $server_loaded) and
   ($server_loaded < $stabilization_started) and
   ($stabilization_started < $target_requirement) and
@@ -27,16 +33,20 @@ pid_result_contract='
   ($shutdown_requested < $server_stopped)
 '
 pid_resource_contract='
+  def memory_event($name):
+    (.memoryEvents | capture("(^|;)"+$name+" (?<count>[0-9]+);").count | tonumber);
   length > 0 and
   all(.[]; .pidsMax=="48") and
   ([.[].pidsCurrent | tonumber] | max) == 48 and
   ([.[].sandboxPIDsCurrent // 0] | max) > 0 and
   ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
   all(.[]; (.pidsCurrent | tonumber) >= 0 and (.pidsCurrent | tonumber) <= 48 and (.sandboxPIDsCurrent // 0) <= 48) and
-  ([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0
+  ([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0 and
+  all(.[]; memory_event("max")==0 and memory_event("oom")==0 and memory_event("oom_kill")==0)
 '
 pid_saturation_contract='
   def at_ceiling: ((.pidsCurrent | tonumber) == 48);
+  def pid_denials: (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber);
   def longest_saturation:
     reduce .[] as $sample
       ({start: null, longest: 0};
@@ -47,8 +57,15 @@ pid_saturation_contract='
          .start = null
        end) |
     .longest;
+  ([to_entries[] | select(.value | at_ceiling) | .key] | max) as $last_ceiling_index |
+  .[$last_ceiling_index+1:] as $headroom |
   ([.[] | select(at_ceiling)] | length) >= 20 and
-  longest_saturation >= 1000000000
+  longest_saturation >= 1000000000 and
+  ($headroom | length) >= 20 and
+  (($headroom[-1].timestampNanoseconds - $headroom[0].timestampNanoseconds) >= 1000000000) and
+  all($headroom[]; (.pidsCurrent | tonumber) < 48) and
+  ($headroom[0] | pid_denials) > 0 and
+  ([$headroom[] | pid_denials] | unique | length)==1
 '
 pid_repetitions_contract='
   [.[] | select(.fixture=="fork-pid-bomb")] as $runs |
@@ -68,7 +85,7 @@ fixture_case_identity() {
 }
 
 run_contract_tests() {
-  for command_name in grep jq mktemp; do
+  for command_name in awk grep head jq mktemp seq; do
     command -v "$command_name" >/dev/null || {
       printf '%s is required for Plan 03 contract tests\n' "$command_name" >&2
       return 2
@@ -81,28 +98,53 @@ run_contract_tests() {
   good_samples="$test_root/good-samples.ndjson"
   good_summary="$test_root/good-summary.ndjson"
 
-  jq -n '{classification:"passed",phase:"completed",failure:null,execution:{exitCode:0},structuredEvents:[
+  jq -n '{classification:"passed",phase:"completed",failure:null,execution:{exitCode:0},completeLog:{state:"complete",truncated:false},cleanup:{succeeded:true},structuredEvents:[
+    {sequence:1,kind:"METADATA_INSPECTION",payload:{}},
+    {sequence:2,kind:"METADATA_INSPECTION",payload:{}},
+    {sequence:3,kind:"TEST_PLAN",payload:{}},
+    {sequence:4,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:5,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:6,kind:"PROBE_LOADED",payload:{}},
+    {sequence:7,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:8,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:9,kind:"PLUGIN_STATE",payload:{}},
     {sequence:10,kind:"PLUGIN_STATE",payload:{name:"ProvenanceForkPidBomb",loaded:true,enabled:true}},
     {sequence:11,kind:"SERVER_LOADED",payload:{}},
-    {sequence:12,kind:"STABILIZATION_STARTED",payload:{durationMillis:30000}},
-    {sequence:13,kind:"TARGET_REQUIREMENT",payload:{role:"TARGET",name:"ProvenanceForkPidBomb",configured:true,loaded:true,enabled:true}},
-    {sequence:14,kind:"STABILIZATION_COMPLETED",payload:{durationMillis:30000}},
-    {sequence:15,kind:"SERVER_READY",payload:{requirementsSatisfied:true}},
-    {sequence:16,kind:"CLEAN_SHUTDOWN_REQUESTED",payload:{}},
-    {sequence:17,kind:"SERVER_STOPPED",payload:{shutdownRequested:true}}
+    {sequence:12,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:13,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:14,kind:"STABILIZATION_STARTED",payload:{durationMillis:30000}},
+    {sequence:15,kind:"TARGET_REQUIREMENT",payload:{role:"TARGET",name:"ProvenanceForkPidBomb",configured:true,loaded:true,enabled:true}},
+    {sequence:16,kind:"STABILIZATION_COMPLETED",payload:{durationMillis:30000}},
+    {sequence:17,kind:"SERVER_READY",payload:{requirementsSatisfied:true}},
+    {sequence:18,kind:"CLEAN_SHUTDOWN_REQUESTED",payload:{}},
+    {sequence:19,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:20,kind:"PLUGIN_STATE",payload:{}},
+    {sequence:21,kind:"SERVER_STOPPED",payload:{shutdownRequested:true}}
   ]}' > "$good_result"
   jq -e "$pid_result_contract" "$good_result" >/dev/null
   if jq -e "$pid_result_contract" >/dev/null 2>&1 <<< '{"classification":"passed","phase":"completed","execution":{"exitCode":0},"rawLog":"all lifecycle markers present","structuredEvents":null}'; then
     printf 'PID lifecycle contract accepted raw markers without structured events\n' >&2
     return 1
   fi
-  if jq '.structuredEvents[1].sequence=9' "$good_result" | jq -e "$pid_result_contract" >/dev/null; then
+  if jq '.structuredEvents[10].sequence=9' "$good_result" | jq -e "$pid_result_contract" >/dev/null; then
     printf 'PID lifecycle contract accepted out-of-order structured events\n' >&2
     return 1
   fi
+  if jq '.structuredEvents[0].kind="RAW_LOG_MARKER"' "$good_result" | jq -e "$pid_result_contract" >/dev/null; then
+    printf 'PID lifecycle contract accepted an untrusted event inventory\n' >&2
+    return 1
+  fi
 
-  for sample in $(seq 0 20); do
-    jq -cn --argjson timestamp "$((sample * 50000000))" '{timestampNanoseconds:$timestamp,pidsMax:"48",pidsCurrent:"48",pidsEvents:"max 2;",sandboxPIDsCurrent:48}' >> "$good_samples"
+  for sample in $(seq 0 41); do
+    pids_current=48
+    sandbox_pids=47
+    [[ "$sample" -gt 20 ]] && pids_current=30 && sandbox_pids=29
+    jq -cn \
+      --argjson timestamp "$((sample * 50000000))" \
+      --arg pidsCurrent "$pids_current" \
+      --argjson sandboxPIDsCurrent "$sandbox_pids" \
+      '{timestampNanoseconds:$timestamp,pidsMax:"48",pidsCurrent:$pidsCurrent,pidsEvents:"max 2;",memoryEvents:"low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0;",sandboxPIDsCurrent:$sandboxPIDsCurrent}' \
+      >> "$good_samples"
   done
   jq -es "$pid_resource_contract" "$good_samples" >/dev/null
   jq -es "$pid_saturation_contract" "$good_samples" >/dev/null
@@ -114,8 +156,29 @@ run_contract_tests() {
     printf 'PID resource contract accepted zero kernel denials\n' >&2
     return 1
   fi
-  if jq -c '.timestampNanoseconds=(.timestampNanoseconds/10|floor)' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract accepted an unsustained ceiling\n' >&2
+  for memory_failure in \
+    'low 0;high 0;max 1;oom 0;oom_kill 0;oom_group_kill 0;' \
+    'low 0;high 0;max 0;oom 1;oom_kill 0;oom_group_kill 0;' \
+    'low 0;high 0;max 0;oom 0;oom_kill 1;oom_group_kill 0;'; do
+    if jq -c --arg memoryEvents "$memory_failure" '.memoryEvents=$memoryEvents' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+      printf 'PID resource contract accepted a memory pressure event: %s\n' "$memory_failure" >&2
+      return 1
+    fi
+  done
+  if jq -c 'if (.pidsCurrent|tonumber)==48 then .timestampNanoseconds=(.timestampNanoseconds/10|floor) else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+    printf 'PID saturation contract accepted a short ceiling\n' >&2
+    return 1
+  fi
+  if head -n 21 "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+    printf 'PID saturation contract accepted missing post-ceiling headroom\n' >&2
+    return 1
+  fi
+  if jq -c 'if (.pidsCurrent|tonumber)<48 then .timestampNanoseconds=(1050000000+((.timestampNanoseconds-1050000000)/10|floor)) else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+    printf 'PID saturation contract accepted short post-ceiling headroom\n' >&2
+    return 1
+  fi
+  if jq -c 'if .timestampNanoseconds==2050000000 then .pidsEvents="max 3;" else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+    printf 'PID saturation contract accepted renewed post-release denial\n' >&2
     return 1
   fi
 
@@ -128,9 +191,9 @@ run_contract_tests() {
     return 1
   fi
 
-  [[ $(awk -F '\t' '$1=="fork-pid-bomb" && $2=="de54c5cc5a4bc8f1f75236d0f25b1f6b0c18ed9c5e8c24ab62af7b52e05f5c6a" && $3==5386 {count++} END {print count+0}' "$fixture_manifest") -eq 1 ]]
-  grep -Fq 'PLAN03_TOOLKIT_SHA: 7cfa97f5bf3ae778e09681fa56ce3a03a43bf2f8' "$repository_root/.github/workflows/plan03-acceptance.yml"
-  [[ $(grep -Fc 'ref: 7cfa97f5bf3ae778e09681fa56ce3a03a43bf2f8' "$repository_root/.github/workflows/plan03-acceptance.yml") -eq 1 ]]
+  [[ $(awk -F '\t' '$1=="fork-pid-bomb" && $2=="2283293d4dc52423c4d25c1c4f36e43174c05c58793ff0e91b1d097d2d0a3ab2" && $3==7648 {count++} END {print count+0}' "$fixture_manifest") -eq 1 ]]
+  grep -Fq 'PLAN03_TOOLKIT_SHA: a6efef52ec65bdcf31b246909336b5f9a1e24ef5' "$repository_root/.github/workflows/plan03-acceptance.yml"
+  [[ $(grep -Fc 'ref: a6efef52ec65bdcf31b246909336b5f9a1e24ef5' "$repository_root/.github/workflows/plan03-acceptance.yml") -eq 1 ]]
   [[ $(fixture_repetitions fork-pid-bomb) == 3 ]]
   [[ $(fixture_case_identity fork-pid-bomb 1) == fork-pid-bomb-run-1 ]]
   [[ $(fixture_case_identity fork-pid-bomb 2) == fork-pid-bomb-run-2 ]]
@@ -518,6 +581,8 @@ write_pid_verification() {
     '
       def pids_event_max:
         [$samples[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max;
+      def pid_denials: (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber);
+      def memory_event($name): (.memoryEvents | capture("(^|;)"+$name+" (?<count>[0-9]+);").count | tonumber);
       def at_ceiling: ((.pidsCurrent | tonumber) == 48);
       def longest_saturation:
         reduce $samples[] as $sample
@@ -528,6 +593,8 @@ write_pid_verification() {
            else .start=null end) |
         .longest;
       def sequence($kind): first($result[0].structuredEvents[] | select(.kind==$kind) | .sequence);
+      ([$samples | to_entries[] | select(.value | at_ceiling) | .key] | max) as $lastCeilingIndex |
+      $samples[$lastCeilingIndex+1:] as $headroom |
       {
         fixture:$fixture,
         caseIdentity:$caseIdentity,
@@ -535,10 +602,11 @@ write_pid_verification() {
         toolkitSourceSHA:$toolkitSHA,
         runnerHeadSHA:$runnerHeadSHA,
         accepted:true,
-        pids:{configuredMax:48,observedCgroupMax:([$samples[].pidsCurrent|tonumber]|max),observedSandboxMax:([$samples[].sandboxPIDsCurrent//0]|max),kernelMaxEvents:pids_event_max,positiveKernelDenial:(pids_event_max>0),noObservationAboveLimit:(all($samples[]; (.pidsCurrent|tonumber)<=48 and (.sandboxPIDsCurrent//0)<=48)),ceilingSamples:([$samples[]|select(at_ceiling)]|length),sustainedCeilingNanoseconds:longest_saturation},
+        pids:{configuredMax:48,observedCgroupMax:([$samples[].pidsCurrent|tonumber]|max),observedSandboxMax:([$samples[].sandboxPIDsCurrent//0]|max),kernelMaxEvents:pids_event_max,positiveKernelDenial:(pids_event_max>0),noObservationAboveLimit:(all($samples[]; (.pidsCurrent|tonumber)<=48 and (.sandboxPIDsCurrent//0)<=48)),ceilingSamples:([$samples[]|select(at_ceiling)]|length),sustainedCeilingNanoseconds:longest_saturation,headroomSamples:($headroom|length),sustainedHeadroomNanoseconds:($headroom[-1].timestampNanoseconds-$headroom[0].timestampNanoseconds),headroomCgroupPeak:([$headroom[].pidsCurrent|tonumber]|max),headroomSandboxPeak:([$headroom[].sandboxPIDsCurrent//0]|max),denialsAtStableHeadroomStart:($headroom[0]|pid_denials),positiveDenialAtStableHeadroomStart:(($headroom[0]|pid_denials)>0),denialsAtExit:($headroom[-1]|pid_denials),noDenialIncreaseAfterStableHeadroom:(([$headroom[]|pid_denials]|unique|length)==1)},
+        memory:{maxEvents:([$samples[]|memory_event("max")]|max),oomEvents:([$samples[]|memory_event("oom")]|max),oomKillEvents:([$samples[]|memory_event("oom_kill")]|max),noMemoryPressureEvents:(all($samples[]; memory_event("max")==0 and memory_event("oom")==0 and memory_event("oom_kill")==0))},
         completeLog:{state:$result[0].completeLog.state,truncated:$result[0].completeLog.truncated,sha256:$result[0].completeLog.sha256,compressedBytes:$result[0].completeLog.compressedBytes,uncompressedBytes:$result[0].completeLog.uncompressedBytes},
-        lifecycle:{ordered:true,targetEnabledSequence:first($result[0].structuredEvents[]|select(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.loaded==true and .payload.enabled==true)|.sequence),serverLoadedSequence:sequence("SERVER_LOADED"),stabilizationStartedSequence:sequence("STABILIZATION_STARTED"),stabilizationCompletedSequence:sequence("STABILIZATION_COMPLETED"),serverReadySequence:sequence("SERVER_READY"),shutdownRequestedSequence:sequence("CLEAN_SHUTDOWN_REQUESTED"),serverStoppedSequence:sequence("SERVER_STOPPED")},
-        cleanup:{reportedSucceeded:$result[0].cleanup.succeeded,residueAbsent:true}
+        lifecycle:{eventCount:($result[0].structuredEvents|length),ordered:true,continuousSequence:([$result[0].structuredEvents[].sequence]==[range(1;22)]),trustedInventory:([$result[0].structuredEvents[].kind]==["METADATA_INSPECTION","METADATA_INSPECTION","TEST_PLAN","PLUGIN_STATE","PLUGIN_STATE","PROBE_LOADED","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","SERVER_LOADED","PLUGIN_STATE","PLUGIN_STATE","STABILIZATION_STARTED","TARGET_REQUIREMENT","STABILIZATION_COMPLETED","SERVER_READY","CLEAN_SHUTDOWN_REQUESTED","PLUGIN_STATE","PLUGIN_STATE","SERVER_STOPPED"]),targetEnabledSequence:first($result[0].structuredEvents[]|select(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.loaded==true and .payload.enabled==true)|.sequence),serverLoadedSequence:sequence("SERVER_LOADED"),stabilizationStartedSequence:sequence("STABILIZATION_STARTED"),stabilizationCompletedSequence:sequence("STABILIZATION_COMPLETED"),serverReadySequence:sequence("SERVER_READY"),shutdownRequestedSequence:sequence("CLEAN_SHUTDOWN_REQUESTED"),serverStoppedSequence:sequence("SERVER_STOPPED")},
+        cleanup:{reportedSucceeded:$result[0].cleanup.succeeded,residueAbsent:true,jobCgroupAbsent:true,bundleDirectoryAbsent:true,runscStateAbsent:true,writableWorkspaceDirectoryAbsent:true,processAndMountResidueAbsent:true}
       }
     ' > "$destination"
 }
