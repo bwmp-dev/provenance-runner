@@ -94,6 +94,42 @@ pid_repetitions_contract='
   ($runs|map(.repetition)|sort)==[1,2,3] and
   all($runs[]; .accepted==true and .cliExit==0 and .classification=="passed" and .phase=="completed" and .failureCode==null and .completeLog.state=="complete" and .completeLog.truncated==false)
 '
+disk_fill_result_contract='
+  def first_sequence(condition):
+    first(.structuredEvents[] | select(condition) | .sequence);
+  first_sequence(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceDiskFill" and .payload.loaded==true and .payload.enabled==true) as $target_enabled |
+  first_sequence(.kind=="SERVER_LOADED") as $server_loaded |
+  first_sequence(.kind=="STABILIZATION_STARTED" and .payload.durationMillis==2000) as $stabilization_started |
+  first_sequence(.kind=="TARGET_REQUIREMENT" and .payload.role=="TARGET" and .payload.name=="ProvenanceDiskFill" and .payload.configured==true and .payload.loaded==true and .payload.enabled==true) as $target_requirement |
+  first_sequence(.kind=="STABILIZATION_COMPLETED" and .payload.durationMillis==2000) as $stabilization_completed |
+  first_sequence(.kind=="SERVER_READY" and .payload.requirementsSatisfied==true) as $server_ready |
+  first_sequence(.kind=="CLEAN_SHUTDOWN_REQUESTED") as $shutdown_requested |
+  first_sequence(.kind=="SERVER_STOPPED" and .payload.shutdownRequested==true) as $server_stopped |
+  (.structuredEvents | length)==21 and
+  ([.structuredEvents[].sequence] == [range(1;22)]) and
+  ([.structuredEvents[].kind] == ["METADATA_INSPECTION","METADATA_INSPECTION","TEST_PLAN","PLUGIN_STATE","PLUGIN_STATE","PROBE_LOADED","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","SERVER_LOADED","PLUGIN_STATE","PLUGIN_STATE","STABILIZATION_STARTED","TARGET_REQUIREMENT","STABILIZATION_COMPLETED","SERVER_READY","CLEAN_SHUTDOWN_REQUESTED","PLUGIN_STATE","PLUGIN_STATE","SERVER_STOPPED"]) and
+  .classification=="passed" and
+  .phase=="completed" and
+  (.failure // null)==null and
+  .execution.exitCode==0 and
+  .completeLog.state=="complete" and
+  .completeLog.truncated==false and
+  .cleanup.succeeded==true and
+  ($target_enabled < $server_loaded) and
+  ($server_loaded < $stabilization_started) and
+  ($stabilization_started < $target_requirement) and
+  ($target_requirement < $stabilization_completed) and
+  ($stabilization_completed < $server_ready) and
+  ($server_ready < $shutdown_requested) and
+  ($shutdown_requested < $server_stopped)
+'
+disk_fill_marker='No space left on device'
+
+validate_disk_fill_contract() {
+  local result=$1 complete_log=$2
+  jq -e "$disk_fill_result_contract" "$result" >/dev/null &&
+    grep -Fq "$disk_fill_marker" "$complete_log"
+}
 
 fixture_repetitions() {
   [[ $1 == fork-pid-bomb ]] && printf '3\n' || printf '1\n'
@@ -111,12 +147,14 @@ run_contract_tests() {
       return 2
     }
   done
-  local test_root good_result good_samples good_summary rejection_status
+  local test_root good_result good_samples good_summary good_disk_result good_disk_log rejection_status
   test_root=$(mktemp -d "${TMPDIR:-/tmp}/plan03-contract-test.XXXXXX")
   trap 'rm --recursive --force -- "$test_root"' RETURN
   good_result="$test_root/good-result.json"
   good_samples="$test_root/good-samples.ndjson"
   good_summary="$test_root/good-summary.ndjson"
+  good_disk_result="$test_root/good-disk-result.json"
+  good_disk_log="$test_root/good-disk.log"
 
   jq -n '{classification:"passed",phase:"completed",failure:null,execution:{exitCode:0},completeLog:{state:"complete",truncated:false},cleanup:{succeeded:true},structuredEvents:[
     {sequence:1,kind:"METADATA_INSPECTION",payload:{}},
@@ -152,6 +190,25 @@ run_contract_tests() {
   fi
   if jq '.structuredEvents[0].kind="RAW_LOG_MARKER"' "$good_result" | jq -e "$pid_result_contract" >/dev/null; then
     printf 'PID lifecycle contract accepted an untrusted event inventory\n' >&2
+    return 1
+  fi
+
+  jq '
+    .structuredEvents[9].payload.name="ProvenanceDiskFill" |
+    .structuredEvents[13].payload.durationMillis=2000 |
+    .structuredEvents[14].payload.name="ProvenanceDiskFill" |
+    .structuredEvents[15].payload.durationMillis=2000
+  ' "$good_result" > "$good_disk_result"
+  printf 'fixture observed: %s\n' "$disk_fill_marker" > "$good_disk_log"
+  validate_disk_fill_contract "$good_disk_result" "$good_disk_log"
+  if jq '.classification="timed_out" | .phase="execution" | .failure={code:"job_timeout"} | .execution.exitCode=-1' "$good_disk_result" > "$test_root/wrong-disk-result.json" &&
+    validate_disk_fill_contract "$test_root/wrong-disk-result.json" "$good_disk_log"; then
+    printf 'disk-fill contract accepted the old timeout classification\n' >&2
+    return 1
+  fi
+  printf 'fixture completed without saturation evidence\n' > "$test_root/missing-disk-marker.log"
+  if validate_disk_fill_contract "$good_disk_result" "$test_root/missing-disk-marker.log"; then
+    printf 'disk-fill contract accepted success without ENOSPC evidence\n' >&2
     return 1
   fi
 
@@ -614,7 +671,7 @@ validate_result() {
   jq -e --arg memory "$expected_memory" --arg pids "$expected_outer_pids" 'select(.memoryMax==$memory and .cpuMax=="100000 100000" and .pidsMax==$pids)' "$samples" >/dev/null
   grep -Eq 'nr_throttled [1-9][0-9]*' "$samples"
 
-  if [[ "$fixture" == enable-hang || "$fixture" == disk-fill ]]; then
+  if [[ "$fixture" == enable-hang ]]; then
     jq -e --argjson timeout "$timeout" '.usage.wallTimeMilliseconds >= $timeout' "$result" >/dev/null
   fi
   case "$fixture" in
@@ -630,7 +687,7 @@ validate_result() {
       jq -es "$pid_saturation_contract" "$samples" >/dev/null
       ;;
     disk-fill)
-      grep -Fq 'No space left on device' "$decompressed"
+      validate_disk_fill_contract "$result" "$decompressed"
       ;;
     network-scan|metadata-endpoint)
       jq -e --arg plugin "$(jq -r '.environment.testPlan.targetPlugin' "$PLAN03_EVIDENCE_ROOT/jobs/$case_identity.json")" '.structuredEvents[] | select(.kind=="PLUGIN_STATE" and .payload.name==$plugin and .payload.enabled==true)' "$result" >/dev/null
