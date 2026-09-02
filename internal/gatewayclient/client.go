@@ -314,14 +314,16 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	if err := send(capabilities); err != nil {
 		return true, err
 	}
+	jobCorrelationV1 := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
 	session := &clientSession{
-		client:        c,
-		authenticated: authenticated,
-		send:          send,
-		seen:          make(map[string][sha256.Size]byte),
-		rootContext:   ctx,
-		cancelSession: cancel,
-		generation:    generation,
+		client:           c,
+		authenticated:    authenticated,
+		send:             send,
+		jobCorrelationV1: jobCorrelationV1,
+		seen:             make(map[string][sha256.Size]byte),
+		rootContext:      ctx,
+		cancelSession:    cancel,
+		generation:       generation,
 	}
 	if err := session.rememberGatewayMessage(first); err != nil {
 		return true, err
@@ -434,11 +436,15 @@ func (c *Client) authenticateMessage() (*runnerv1.RunnerMessage, error) {
 }
 
 func (c *Client) capabilitiesMessage() (*runnerv1.RunnerMessage, error) {
+	capabilities := c.capabilities()
+	if err := validateAdvertisedFeatures(capabilities.GetFeatures()); err != nil {
+		return nil, err
+	}
 	message, err := c.runnerMessage()
 	if err != nil {
 		return nil, err
 	}
-	message.Payload = &runnerv1.RunnerMessage_Capabilities{Capabilities: c.capabilities()}
+	message.Payload = &runnerv1.RunnerMessage_Capabilities{Capabilities: capabilities}
 	return message, nil
 }
 
@@ -480,6 +486,7 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	if c.config.credentialStore != nil {
 		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION)
 	}
+	features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,
 		ProtocolVersions: []string{ProtocolVersion},

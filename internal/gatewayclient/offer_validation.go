@@ -44,14 +44,14 @@ func (r *OfferRejection) Error() string {
 
 // validateOffer keeps hostile job validation separate from state transitions so
 // no offer is persisted or acknowledged before every bounded check succeeds.
-func (c *Client) validateOffer(offer *runnerv1.LeaseOffer, now time.Time, leaseDuration time.Duration) *OfferRejection {
+func (c *Client) validateOffer(offer *runnerv1.LeaseOffer, now time.Time, leaseDuration time.Duration, jobCorrelationV1 bool) *OfferRejection {
 	if c == nil {
 		return rejectUnsupported("invalid_offer", "lease offer cannot be validated")
 	}
-	return validateOffer(offer, c.config, now, leaseDuration)
+	return validateOffer(offer, c.config, now, leaseDuration, jobCorrelationV1)
 }
 
-func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration) *OfferRejection {
+func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, jobCorrelationV1 bool) *OfferRejection {
 	if offer == nil || offer.GetJob() == nil {
 		return rejectUnsupported("invalid_offer", "lease offer job is required")
 	}
@@ -78,6 +78,9 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 		return rejection
 	}
 	if rejection := validateOfferScope(job.GetOrganizationScope(), config.ExpectedScope); rejection != nil {
+		return rejection
+	}
+	if rejection := validateOfferJobCorrelation(job, config.ExpectedScope, jobCorrelationV1); rejection != nil {
 		return rejection
 	}
 	if rejection := validateOfferHashes(job.GetHashes()); rejection != nil {

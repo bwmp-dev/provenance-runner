@@ -10,7 +10,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-func TestReleasedAlpha6ContractFieldNumbersAndFeatures(t *testing.T) {
+func TestReleasedAlpha7ContractFieldNumbersAndFeatures(t *testing.T) {
 	fields := []struct {
 		message protoreflect.MessageDescriptor
 		name    protoreflect.Name
@@ -19,6 +19,7 @@ func TestReleasedAlpha6ContractFieldNumbersAndFeatures(t *testing.T) {
 		{(&runnerv1.Capabilities{}).ProtoReflect().Descriptor(), "features", 16},
 		{(&runnerv1.DependencyInput{}).ProtoReflect().Descriptor(), "plugin_name", 10},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "target_plugin_name", 20},
+		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "job_correlation", 21},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "event_acknowledgement", 30},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "heartbeat_acknowledgement", 31},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "credential_rotation", 15},
@@ -38,10 +39,13 @@ func TestReleasedAlpha6ContractFieldNumbersAndFeatures(t *testing.T) {
 	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION.Number() != 2 {
 		t.Fatalf("credential rotation feature = %d, want 2", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION.Number())
 	}
+	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1.Number() != 3 {
+		t.Fatalf("job correlation feature = %d, want 3", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1.Number())
+	}
 }
 
-func TestReleasedAlpha6ProtocolModuleAuthority(t *testing.T) {
-	const authority = "v0.0.0-20260902013028-c8d3cc0f92b6"
+func TestReleasedAlpha7ProtocolModuleAuthority(t *testing.T) {
+	const authority = "v0.0.0-20260902143734-85f89efbed00"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)

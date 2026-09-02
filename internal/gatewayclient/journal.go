@@ -29,6 +29,7 @@ type journalJob struct {
 	Specification        []byte            `json:"specification"`
 	OfferMessageID       string            `json:"offerMessageId"`
 	OfferDigest          []byte            `json:"offerDigest"`
+	JobCorrelationV1     bool              `json:"jobCorrelationV1,omitempty"`
 	Phase                runnerv1.JobPhase `json:"phase"`
 	ExpiresAt            time.Time         `json:"expiresAt"`
 	CancellationID       string            `json:"cancellationId,omitempty"`
@@ -174,6 +175,9 @@ func validateJournalState(state journalState) error {
 	}
 	if specification.GetAttempt().GetAttemptNumber() == 0 || specification.GetAttempt().GetAttemptNumber() > maximumAttemptNumber || !pluginname.ValidPaper(specification.GetTargetPluginName()) {
 		return errors.New("active specification attempt or target plugin identity is invalid")
+	}
+	if rejection := validateOfferJobCorrelation(specification, ExpectedScope{}, state.Active.JobCorrelationV1); rejection != nil {
+		return errors.New("active specification job correlation negotiation is invalid")
 	}
 	for _, dependency := range specification.GetDependencies() {
 		if dependency == nil || !pluginname.ValidPaper(dependency.GetPluginName()) {
