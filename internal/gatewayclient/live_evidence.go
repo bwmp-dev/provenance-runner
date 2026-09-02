@@ -22,6 +22,7 @@ type workerEvidenceEvent struct {
 	attempt    *runnerv1.AttemptIdentity
 	logBatch   *runnerv1.LogBatch
 	usage      *runnerv1.UsageReport
+	terminal   bool
 }
 
 type liveExecutionObserver struct {
@@ -129,7 +130,11 @@ func (observer *liveExecutionObserver) finalUsageEvent(measured execution.Resour
 	observer.mu.Lock()
 	defer observer.mu.Unlock()
 	mergeResourceUsage(&observer.usage, measured)
-	return observer.nextUsageEventLocked()
+	event := observer.nextUsageEventLocked()
+	if event != nil {
+		event.terminal = true
+	}
+	return event
 }
 
 func (observer *liveExecutionObserver) nextUsageEventLocked() *workerEvidenceEvent {
@@ -153,8 +158,23 @@ func (s *clientSession) sendWorkerEvidence(event *workerEvidenceEvent) error {
 		return nil
 	}
 	state := s.client.journal.snapshot()
-	if state.Active == nil || state.Active.CancellationID != "" || !state.Active.ExpiresAt.After(s.client.now().UTC()) || !activeMatchesIdentity(state.Active, event.lease, event.attempt) {
+	if state.Active == nil || !state.Active.ExpiresAt.After(s.client.now().UTC()) || !activeMatchesIdentity(state.Active, event.lease, event.attempt) {
 		return nil
+	}
+	if state.Active.CancellationID != "" {
+		// Live evidence remains non-durable and is rejected after cancellation.
+		// The sole exception is the worker's final cumulative UsageReport for
+		// the exact active lease/attempt in this stream generation. Send it at
+		// most once in this session before the durable JobCancelled event; it is
+		// never replayed across a reconnect.
+		if !event.terminal || event.usage == nil {
+			return nil
+		}
+		if sameLeaseAttempt(s.cancellationFinalUsageLease, s.cancellationFinalUsageAttempt, event.lease, event.attempt) {
+			return nil
+		}
+		s.cancellationFinalUsageLease = proto.Clone(event.lease).(*runnerv1.LeaseIdentity)
+		s.cancellationFinalUsageAttempt = proto.Clone(event.attempt).(*runnerv1.AttemptIdentity)
 	}
 	message := &runnerv1.RunnerMessage{SentAt: timestamppb.New(s.client.now().UTC())}
 	sequence := s.client.ephemeralSequence.Add(1)

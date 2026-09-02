@@ -20,20 +20,22 @@ import (
 const maximumRememberedGatewayMessageIDs = 4096
 
 type clientSession struct {
-	client                 *Client
-	authenticated          *runnerv1.Authenticated
-	send                   func(*runnerv1.RunnerMessage) error
-	seen                   map[string][sha256.Size]byte
-	seenOrder              []string
-	pendingHeartbeat       *runnerv1.RunnerMessage
-	rootContext            context.Context
-	reconciled             bool
-	settledEvents          map[string]settledRunnerEvent
-	settledEventOrder      []string
-	acknowledgedHeartbeats map[string]*runnerv1.RunnerMessage
-	acknowledgedHBOrder    []string
-	heartbeatDeferred      bool
-	generation             uint64
+	client                        *Client
+	authenticated                 *runnerv1.Authenticated
+	send                          func(*runnerv1.RunnerMessage) error
+	seen                          map[string][sha256.Size]byte
+	seenOrder                     []string
+	pendingHeartbeat              *runnerv1.RunnerMessage
+	rootContext                   context.Context
+	reconciled                    bool
+	settledEvents                 map[string]settledRunnerEvent
+	settledEventOrder             []string
+	acknowledgedHeartbeats        map[string]*runnerv1.RunnerMessage
+	acknowledgedHBOrder           []string
+	heartbeatDeferred             bool
+	generation                    uint64
+	cancellationFinalUsageLease   *runnerv1.LeaseIdentity
+	cancellationFinalUsageAttempt *runnerv1.AttemptIdentity
 }
 
 type settledRunnerEvent struct {
@@ -1056,6 +1058,10 @@ func (s *clientSession) queueResult(result execution.Result) error {
 	if err != nil {
 		return err
 	}
+	startedAt, completedAt, err := normalizedTerminalTimes(result.StartedAt, result.CompletedAt)
+	if err != nil {
+		return err
+	}
 	var completeLog *runnerv1.LogObject
 	usage := resultResourceUsage(result)
 	if target := s.client.completeLogTarget(lease, attempt); target != nil {
@@ -1070,7 +1076,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		}
 		if err != nil {
 			failed := &runnerv1.JobFailed{
-				Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(result.CompletedAt),
+				Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(completedAt),
 				Usage: usage,
 				Failure: &runnerv1.FailureDetail{
 					Category:  runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE,
@@ -1088,7 +1094,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		if result.Passed() {
 			outcome = runnerv1.ResultOutcome_RESULT_OUTCOME_PASSED
 		}
-		structured := &runnerv1.StructuredResult{Outcome: outcome, Usage: usage, CompleteLog: completeLog, StartedAt: timestamppb.New(result.StartedAt), CompletedAt: timestamppb.New(result.CompletedAt)}
+		structured := &runnerv1.StructuredResult{Outcome: outcome, Usage: usage, CompleteLog: completeLog, StartedAt: timestamppb.New(startedAt), CompletedAt: timestamppb.New(completedAt)}
 		if result.Execution != nil && result.Execution.ExitCode != nil {
 			value := int32(*result.Execution.ExitCode)
 			structured.ProcessExitCode = &value
@@ -1097,8 +1103,24 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		return s.queueDurable(&runnerv1.RunnerMessage_Completed{Completed: completed}, nil)
 	}
 	failure := resultFailure(result)
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, Usage: usage, CompleteLog: completeLog, FailedAt: timestamppb.New(result.CompletedAt)}
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, Usage: usage, CompleteLog: completeLog, FailedAt: timestamppb.New(completedAt)}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+}
+
+func normalizedTerminalTimes(startedAt, completedAt time.Time) (time.Time, time.Time, error) {
+	if startedAt.IsZero() || completedAt.IsZero() {
+		return time.Time{}, time.Time{}, errors.New("terminal result timestamps are required")
+	}
+	if completedAt.Before(startedAt) {
+		return time.Time{}, time.Time{}, errors.New("terminal result completedAt precedes startedAt")
+	}
+	startedAt = normalizedTerminalTime(startedAt)
+	completedAt = normalizedTerminalTime(completedAt)
+	return startedAt, completedAt, nil
+}
+
+func normalizedTerminalTime(value time.Time) time.Time {
+	return value.UTC().Truncate(time.Microsecond)
 }
 
 func resultResourceUsage(result execution.Result) *runnerv1.ResourceUsage {
@@ -1123,7 +1145,7 @@ func (s *clientSession) queueCancellation(now time.Time, result *execution.Resul
 		return err
 	}
 	cleanupCompleted := result == nil || (result.Cleanup != nil && result.Cleanup.Succeeded)
-	cancelled := &runnerv1.JobCancelled{Lease: lease, Attempt: attempt, CancellationId: state.Active.CancellationID, CancelledAt: timestamppb.New(now), CleanupCompleted: cleanupCompleted}
+	cancelled := &runnerv1.JobCancelled{Lease: lease, Attempt: attempt, CancellationId: state.Active.CancellationID, CancelledAt: timestamppb.New(normalizedTerminalTime(now)), CleanupCompleted: cleanupCompleted}
 	if result != nil && result.Cleanup != nil && !result.Cleanup.Succeeded {
 		cancelled.CleanupFailure = &runnerv1.FailureDetail{Category: runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE, Stage: runnerv1.FailureStage_FAILURE_STAGE_CLEANUP, Code: "cleanup_failed", Summary: boundedSummary(result.Cleanup.Error), Retryable: true}
 	}
@@ -1135,7 +1157,7 @@ func (s *clientSession) queueLeaseExpired(now time.Time) error {
 	if err != nil {
 		return err
 	}
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(now), Failure: &runnerv1.FailureDetail{Category: runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE, Stage: runnerv1.FailureStage_FAILURE_STAGE_LEASE, Code: "lease_expired", Summary: "authoritative runner lease expired", Retryable: true}}
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(normalizedTerminalTime(now)), Failure: &runnerv1.FailureDetail{Category: runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE, Stage: runnerv1.FailureStage_FAILURE_STAGE_LEASE, Code: "lease_expired", Summary: "authoritative runner lease expired", Retryable: true}}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
 }
 
@@ -1144,7 +1166,7 @@ func (s *clientSession) queueRestartFailure(now time.Time) error {
 	if err != nil {
 		return err
 	}
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(now), Failure: &runnerv1.FailureDetail{Category: runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE, Stage: runnerv1.FailureStage_FAILURE_STAGE_EXECUTION, Code: "runner_restarted", Summary: "runner restarted with an authoritative lease whose execution outcome is uncertain", Retryable: true}}
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(normalizedTerminalTime(now)), Failure: &runnerv1.FailureDetail{Category: runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE, Stage: runnerv1.FailureStage_FAILURE_STAGE_EXECUTION, Code: "runner_restarted", Summary: "runner restarted with an authoritative lease whose execution outcome is uncertain", Retryable: true}}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
 }
 

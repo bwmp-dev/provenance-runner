@@ -3,12 +3,15 @@ package gatewayclient
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestLiveObserverBoundsSequencesDropsAndDoesNotBlock(t *testing.T) {
@@ -117,5 +120,115 @@ func TestStaleSessionEvidenceIsDiscarded(t *testing.T) {
 	}
 	if called {
 		t.Fatal("stale session evidence was sent")
+	}
+}
+
+func TestCancellationSendsOnlyOneIdentitySafeFinalUsageBeforeTerminal(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 123456789, time.UTC)
+	client, offer := activeEvidenceClient(t, now)
+	client.clearCompleteLogTarget()
+	client.sessionGeneration.Store(7)
+	if err := client.journal.update(func(state *journalState) error {
+		state.Active.CancellationID = "cancellation-1"
+		state.Active.CancellationDigest = bytes.Repeat([]byte{1}, sha256.Size)
+		state.Active.CancellationDeadline = now.Add(time.Minute)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	observer := newLiveExecutionObserver(client, offer.GetJob())
+	usage := execution.ResourceUsage{CPUTime: 2 * time.Second, PeakMemoryBytes: 32, DiskReadBytes: 11, DiskWriteBytes: 13}
+	final := observer.finalUsageEvent(usage)
+	var sent []*runnerv1.RunnerMessage
+	session := &clientSession{client: client, generation: 7, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+		sent = append(sent, proto.Clone(message).(*runnerv1.RunnerMessage))
+		return nil
+	}}
+
+	periodic := *final
+	periodic.terminal = false
+	if err := session.sendWorkerEvidence(&periodic); err != nil {
+		t.Fatal(err)
+	}
+	staleGeneration := *final
+	staleGeneration.generation = 6
+	if err := session.sendWorkerEvidence(&staleGeneration); err != nil {
+		t.Fatal(err)
+	}
+	staleIdentity := *final
+	staleIdentity.lease = proto.Clone(final.lease).(*runnerv1.LeaseIdentity)
+	staleIdentity.lease.LeaseId = "00000000-0000-4000-8000-000000000099"
+	if err := session.sendWorkerEvidence(&staleIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("non-final or stale cancellation evidence was sent: %#v", sent)
+	}
+
+	result := execution.Result{
+		SchemaVersion:  execution.ResultSchemaVersion,
+		JobID:          offer.GetJob().GetLease().GetJobId(),
+		Status:         "failed",
+		Classification: execution.ClassificationCancelled,
+		Phase:          execution.PhaseCleanup,
+		StartedAt:      now,
+		CompletedAt:    now.Add(time.Second),
+		Cleanup:        &execution.CleanupResult{Attempted: true, Succeeded: true},
+		Usage:          execution.UsageResult{MeasuredResources: &usage},
+	}
+	if err := session.handleWorkerEvent(workerEvent{result: &result, finalUsage: final}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0].GetUsage() == nil || sent[1].GetCancelled() == nil {
+		t.Fatalf("cancellation ordering = %#v", sent)
+	}
+	if cumulative := sent[0].GetUsage().GetCumulative(); cumulative.GetDiskReadBytes() != 11 || cumulative.GetDiskWriteBytes() != 13 {
+		t.Fatalf("final cancellation usage = %#v", cumulative)
+	}
+	if err := session.sendWorkerEvidence(final); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("duplicate final cancellation usage was sent: %#v", sent)
+	}
+
+	reconnected := &clientSession{client: client, generation: 8, send: func(message *runnerv1.RunnerMessage) error {
+		sent = append(sent, message)
+		return nil
+	}}
+	if err := reconnected.sendWorkerEvidence(final); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 {
+		t.Fatal("final cancellation usage was replayed after reconnect")
+	}
+}
+
+func TestCancellationFinalUsageIsNotRetriedAfterAmbiguousSendFailure(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	client, offer := activeEvidenceClient(t, now)
+	client.sessionGeneration.Store(4)
+	if err := client.journal.update(func(state *journalState) error {
+		state.Active.CancellationID = "cancellation-1"
+		state.Active.CancellationDigest = bytes.Repeat([]byte{1}, sha256.Size)
+		state.Active.CancellationDeadline = now.Add(time.Minute)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	event := newLiveExecutionObserver(client, offer.GetJob()).finalUsageEvent(execution.ResourceUsage{CPUTime: time.Second})
+	attempts := 0
+	session := &clientSession{client: client, generation: 4, send: func(*runnerv1.RunnerMessage) error {
+		attempts++
+		return errors.New("ambiguous stream failure")
+	}}
+	if err := session.sendWorkerEvidence(event); err == nil {
+		t.Fatal("initial send failure = nil")
+	}
+	if err := session.sendWorkerEvidence(event); err != nil {
+		t.Fatalf("suppressed retry error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("send attempts = %d, want 1", attempts)
 	}
 }

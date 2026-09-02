@@ -34,6 +34,32 @@ func TestReadCgroupUsageUsesMeasuredCumulativeCounters(t *testing.T) {
 	}
 }
 
+func TestReadCgroupUsageFallsBackToCurrentMemory(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  uint64
+	}{
+		{name: "peak preferred", files: map[string]string{"memory.peak": "90\n", "memory.current": "70\n"}, want: 90},
+		{name: "current when peak missing", files: map[string]string{"memory.current": "70\n"}, want: 70},
+		{name: "current when peak invalid", files: map[string]string{"memory.peak": "max\n", "memory.current": "70\n"}, want: 70},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, content := range test.files {
+				if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			usage, ok := readCgroupUsageRoot(root)
+			if !ok || usage.PeakMemoryBytes != test.want {
+				t.Fatalf("usage = %#v available=%v, want memory %d", usage, ok, test.want)
+			}
+		})
+	}
+}
+
 func TestMergeMeasuredUsageNeverMovesCumulativeCountersBackward(t *testing.T) {
 	current := execution.ResourceUsage{CPUTime: 2 * time.Second, PeakMemoryBytes: 20, DiskReadBytes: 30, DiskWriteBytes: 40}
 	if mergeMeasuredUsage(&current, execution.ResourceUsage{CPUTime: time.Second, PeakMemoryBytes: 10, DiskReadBytes: 50}) != true {

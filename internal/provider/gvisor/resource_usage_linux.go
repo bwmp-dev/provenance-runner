@@ -101,11 +101,15 @@ func readCgroupUsageRoot(root string) (execution.ResourceUsage, bool) {
 			}
 		}
 	}
-	if content, ok := readSmallFile(filepath.Join(root, "memory.peak")); ok {
-		if value, err := strconv.ParseUint(strings.TrimSpace(content), 10, 64); err == nil {
-			usage.PeakMemoryBytes = value
-			found = true
-		}
+	if value, ok := readCgroupUint(root, "memory.peak"); ok {
+		usage.PeakMemoryBytes = value
+		found = true
+	} else if value, ok := readCgroupUint(root, "memory.current"); ok {
+		// Some delegated cgroup v2 environments do not expose memory.peak.
+		// memory.current is a real (though not historical-peak) measurement and
+		// the sampler's monotonic merge retains the largest observed value.
+		usage.PeakMemoryBytes = value
+		found = true
 	}
 	if content, ok := readSmallFile(filepath.Join(root, "io.stat")); ok {
 		for _, line := range strings.Split(content, "\n") {
@@ -135,6 +139,15 @@ func readCgroupUsageRoot(root string) (execution.ResourceUsage, bool) {
 	// Hosted v1 enforces network=none. Zero network counters are therefore an
 	// observed policy outcome; no traffic values are derived from host activity.
 	return usage, found
+}
+
+func readCgroupUint(root, name string) (uint64, bool) {
+	content, ok := readSmallFile(filepath.Join(root, name))
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(content), 10, 64)
+	return value, err == nil
 }
 
 func saturatingUsageAdd(left, right uint64) uint64 {
