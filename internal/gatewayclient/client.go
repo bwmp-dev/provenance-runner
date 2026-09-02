@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -125,8 +126,17 @@ func newClient(config Config, connector streamConnector) *Client {
 }
 
 func newClientWithWorker(config Config, connector streamConnector, worker RemoteWorker) (*Client, error) {
+	if config.credentialStore == nil && filepath.IsAbs(config.CredentialFile) {
+		// Existing configurations retain legacy connectivity when the host lacks
+		// the required Linux durability primitives. The feature is advertised
+		// only when this anchored owner-only store opens successfully.
+		config.credentialStore, _ = openDurableCredentialStore(config.CredentialFile)
+	}
 	journal, err := openJournal(config.journalFile)
 	if err != nil {
+		if config.credentialStore != nil {
+			_ = config.credentialStore.Close()
+		}
 		return nil, err
 	}
 	client := &Client{
@@ -145,10 +155,20 @@ func newClientWithWorker(config Config, connector streamConnector, worker Remote
 }
 
 func (c *Client) Close() error {
-	if c == nil || c.close == nil {
+	if c == nil {
 		return nil
 	}
-	return c.close()
+	var result error
+	if c.close != nil {
+		result = c.close()
+		c.close = nil
+	}
+	if c.config.credentialStore != nil {
+		result = errors.Join(result, c.config.credentialStore.Close())
+		c.config.credentialStore = nil
+	}
+	clear(c.config.credential)
+	return result
 }
 
 func (c *Client) Drain() {
@@ -177,6 +197,10 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if !transient(err) {
 			return sanitizeStreamError(err)
+		}
+		if errors.Is(err, errCredentialRotationReconnect) {
+			delay = initialReconnectDelay
+			continue
 		}
 		if established {
 			delay = initialReconnectDelay
@@ -228,8 +252,10 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	if err != nil {
 		return false, err
 	}
-	if err := send(authenticate); err != nil {
-		return false, err
+	sendErr := send(authenticate)
+	clear(authenticate.GetAuthenticate().ConnectionCredential)
+	if sendErr != nil {
+		return false, sendErr
 	}
 	type received struct {
 		message *runnerv1.GatewayMessage
@@ -276,6 +302,9 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	if err != nil {
 		return false, err
 	}
+	if err := c.reconcileCredentialRotationAfterAuthentication(); err != nil {
+		return true, permanent("credential rotation reconnect state failed")
+	}
 	established = true
 	generation := c.sessionGeneration.Add(1)
 	capabilities, err := c.capabilitiesMessage()
@@ -291,6 +320,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		send:          send,
 		seen:          make(map[string][sha256.Size]byte),
 		rootContext:   ctx,
+		cancelSession: cancel,
 		generation:    generation,
 	}
 	if err := session.rememberGatewayMessage(first); err != nil {
@@ -446,6 +476,10 @@ func (c *Client) runnerMessage() (*runnerv1.RunnerMessage, error) {
 
 func (c *Client) capabilities() *runnerv1.Capabilities {
 	resources := c.config.Resources
+	features := []runnerv1.ProtocolFeature{runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS}
+	if c.config.credentialStore != nil {
+		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION)
+	}
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,
 		ProtocolVersions: []string{ProtocolVersion},
@@ -460,7 +494,7 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 			MaximumResourcesPerJob: &runnerv1.ResourceLimits{CpuMillis: resources.CPUMillis, MemoryBytes: resources.MemoryBytes, DiskBytes: resources.DiskBytes, ProcessCount: resources.ProcessCount},
 			MaximumConcurrentJobs:  1,
 		},
-		Features: []runnerv1.ProtocolFeature{runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS},
+		Features: features,
 	}
 }
 
@@ -590,6 +624,9 @@ func validateDuration(field string, value *durationpb.Duration, minimum, maximum
 func transient(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, errCredentialRotationReconnect) {
+		return true
 	}
 	var permanentFailure *permanentError
 	if errors.As(err, &permanentFailure) {

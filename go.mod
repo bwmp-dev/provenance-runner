@@ -3,7 +3,7 @@ module github.com/bwmp-dev/provenance-runner
 go 1.25.13
 
 require (
-	github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260831234649-98d5f07f173a
+	github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260902013028-c8d3cc0f92b6
 	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12

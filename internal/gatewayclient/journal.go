@@ -36,12 +36,22 @@ type journalJob struct {
 }
 
 type journalState struct {
-	SchemaVersion     string      `json:"schemaVersion"`
-	MessageSequence   uint64      `json:"messageSequence"`
-	HeartbeatSequence uint64      `json:"heartbeatSequence"`
-	Active            *journalJob `json:"active,omitempty"`
-	PendingMessage    []byte      `json:"pendingMessage,omitempty"`
-	PendingHeartbeat  []byte      `json:"pendingHeartbeat,omitempty"`
+	SchemaVersion      string                     `json:"schemaVersion"`
+	MessageSequence    uint64                     `json:"messageSequence"`
+	HeartbeatSequence  uint64                     `json:"heartbeatSequence"`
+	Active             *journalJob                `json:"active,omitempty"`
+	PendingMessage     []byte                     `json:"pendingMessage,omitempty"`
+	PendingHeartbeat   []byte                     `json:"pendingHeartbeat,omitempty"`
+	CredentialRotation *journalCredentialRotation `json:"credentialRotation,omitempty"`
+}
+
+type journalCredentialRotation struct {
+	RotationID      string    `json:"rotationId"`
+	Fingerprint     []byte    `json:"fingerprint"`
+	IssuedAt        time.Time `json:"issuedAt"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+	ReconnectBefore time.Time `json:"reconnectBefore"`
+	PersistedAt     time.Time `json:"persistedAt,omitempty"`
 }
 
 type journal struct {
@@ -86,6 +96,14 @@ func openJournal(path string) (*journal, error) {
 func validateJournalState(state journalState) error {
 	if state.SchemaVersion != journalSchemaVersion {
 		return fmt.Errorf("schemaVersion must be %q", journalSchemaVersion)
+	}
+	if rotation := state.CredentialRotation; rotation != nil {
+		if validateUUID("credential rotationId", rotation.RotationID) != nil || rotation.RotationID != strings.ToLower(rotation.RotationID) || len(rotation.Fingerprint) != sha256.Size ||
+			rotation.IssuedAt.IsZero() || !rotation.ExpiresAt.After(rotation.IssuedAt) || rotation.ExpiresAt.Sub(rotation.IssuedAt) > time.Hour ||
+			!rotation.ReconnectBefore.After(rotation.IssuedAt) || !rotation.ReconnectBefore.Before(rotation.ExpiresAt) || rotation.ReconnectBefore.Sub(rotation.IssuedAt) > 5*time.Minute ||
+			(!rotation.PersistedAt.IsZero() && rotation.PersistedAt.Before(rotation.IssuedAt.Add(-maximumClockSkew))) {
+			return errors.New("credential rotation state is invalid")
+		}
 	}
 	if len(state.PendingHeartbeat) != 0 {
 		heartbeatMessage := new(runnerv1.RunnerMessage)
@@ -205,6 +223,11 @@ func cloneJournalState(state journalState) journalState {
 	cloned := state
 	cloned.PendingMessage = bytes.Clone(state.PendingMessage)
 	cloned.PendingHeartbeat = bytes.Clone(state.PendingHeartbeat)
+	if state.CredentialRotation != nil {
+		rotation := *state.CredentialRotation
+		rotation.Fingerprint = bytes.Clone(state.CredentialRotation.Fingerprint)
+		cloned.CredentialRotation = &rotation
+	}
 	if state.Active != nil {
 		active := *state.Active
 		active.Specification = bytes.Clone(state.Active.Specification)

@@ -1,13 +1,16 @@
 package gatewayclient
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-func TestAlpha3ContractFieldNumbersAndFeature(t *testing.T) {
+func TestReleasedAlpha6ContractFieldNumbersAndFeatures(t *testing.T) {
 	fields := []struct {
 		message protoreflect.MessageDescriptor
 		name    protoreflect.Name
@@ -18,6 +21,10 @@ func TestAlpha3ContractFieldNumbersAndFeature(t *testing.T) {
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "target_plugin_name", 20},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "event_acknowledgement", 30},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "heartbeat_acknowledgement", 31},
+		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "credential_rotation", 15},
+		{(&runnerv1.RunnerMessage{}).ProtoReflect().Descriptor(), "credential_rotation_acknowledgement", 30},
+		{(&runnerv1.RotateCredential{}).ProtoReflect().Descriptor(), "issued_at", 10},
+		{(&runnerv1.RotateCredential{}).ProtoReflect().Descriptor(), "credential_fingerprint", 11},
 	}
 	for _, field := range fields {
 		descriptor := field.message.Fields().ByName(field.name)
@@ -28,4 +35,29 @@ func TestAlpha3ContractFieldNumbersAndFeature(t *testing.T) {
 	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS.Number() != 1 {
 		t.Fatalf("durable acknowledgement feature = %d, want 1", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS.Number())
 	}
+	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION.Number() != 2 {
+		t.Fatalf("credential rotation feature = %d, want 2", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION.Number())
+	}
+}
+
+func TestReleasedAlpha6ProtocolModuleAuthority(t *testing.T) {
+	const authority = "v0.0.0-20260902013028-c8d3cc0f92b6"
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve module root: %v", err)
+	}
+	contents, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	fields := strings.Fields(string(contents))
+	for index, field := range fields {
+		if field == "github.com/bwmp-dev/provenance/gen/proto" && index+1 < len(fields) {
+			if fields[index+1] != authority {
+				t.Fatalf("protocol module = %s, want %s", fields[index+1], authority)
+			}
+			return
+		}
+	}
+	t.Fatal("released protocol module is absent from go.mod")
 }
