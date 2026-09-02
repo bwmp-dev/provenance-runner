@@ -216,7 +216,7 @@ chmod 0700 "$PLAN03_EVIDENCE_ROOT" "$PLAN03_WORK_ROOT"
 secret=PROVENANCE_TEST_SECRET_03
 # Raw workload console text is forgeable and cannot satisfy the trusted probe
 # contract. Keep the retained lifecycle-failure shape as a mandatory negative.
-if jq -e "$pid_result_contract" >/dev/null <<< '{"classification":"workload_failure","phase":"execution","failure":{"code":"gvisor_process_exit_nonzero"},"execution":{"exitCode":2},"structuredEvents":null}'; then
+if jq -e "$pid_result_contract" >/dev/null 2>&1 <<< '{"classification":"workload_failure","phase":"execution","failure":{"code":"gvisor_process_exit_nonzero"},"execution":{"exitCode":2},"structuredEvents":null}'; then
   printf 'fork PID result contract accepted an untrusted lifecycle failure\n' >&2
   exit 2
 fi
@@ -388,7 +388,7 @@ assert_no_residue() {
     printf '%s left a job cgroup\n' "$fixture" >&2
     return 1
   fi
-  if find "$PLAN03_WORK_ROOT/bundles" -mindepth 1 -print -quit | grep -q .; then
+  if find "$PLAN03_WORK_ROOT/bundles" -mindepth 1 -type d -print -quit | grep -q .; then
     printf '%s left a bundle\n' "$fixture" >&2
     return 1
   fi
@@ -396,7 +396,7 @@ assert_no_residue() {
     printf '%s left runsc state\n' "$fixture" >&2
     return 1
   fi
-  if find "$PLAN03_WORK_ROOT/workspaces" -mindepth 1 -print -quit | grep -q .; then
+  if find "$PLAN03_WORK_ROOT/workspaces" -mindepth 1 -type d -print -quit | grep -q .; then
     printf '%s left a writable workspace\n' "$fixture" >&2
     return 1
   fi
