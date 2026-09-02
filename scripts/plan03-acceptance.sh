@@ -3,6 +3,151 @@ set -euo pipefail
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 fixture_manifest="$repository_root/testdata/plan03/fixtures.tsv"
+pid_result_contract='
+  def first_sequence(condition):
+    first(.structuredEvents[] | select(condition) | .sequence);
+  first_sequence(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.loaded==true and .payload.enabled==true) as $target_enabled |
+  first_sequence(.kind=="SERVER_LOADED") as $server_loaded |
+  first_sequence(.kind=="STABILIZATION_STARTED" and .payload.durationMillis==30000) as $stabilization_started |
+  first_sequence(.kind=="TARGET_REQUIREMENT" and .payload.role=="TARGET" and .payload.name=="ProvenanceForkPidBomb" and .payload.configured==true and .payload.loaded==true and .payload.enabled==true) as $target_requirement |
+  first_sequence(.kind=="STABILIZATION_COMPLETED" and .payload.durationMillis==30000) as $stabilization_completed |
+  first_sequence(.kind=="SERVER_READY" and .payload.requirementsSatisfied==true) as $server_ready |
+  first_sequence(.kind=="CLEAN_SHUTDOWN_REQUESTED") as $shutdown_requested |
+  first_sequence(.kind=="SERVER_STOPPED" and .payload.shutdownRequested==true) as $server_stopped |
+  .classification=="passed" and
+  .phase=="completed" and
+  (.failure // null)==null and
+  .execution.exitCode==0 and
+  ($target_enabled < $server_loaded) and
+  ($server_loaded < $stabilization_started) and
+  ($stabilization_started < $target_requirement) and
+  ($target_requirement < $stabilization_completed) and
+  ($stabilization_completed < $server_ready) and
+  ($server_ready < $shutdown_requested) and
+  ($shutdown_requested < $server_stopped)
+'
+pid_resource_contract='
+  length > 0 and
+  all(.[]; .pidsMax=="48") and
+  ([.[].pidsCurrent | tonumber] | max) == 48 and
+  ([.[].sandboxPIDsCurrent // 0] | max) > 0 and
+  ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
+  all(.[]; (.pidsCurrent | tonumber) >= 0 and (.pidsCurrent | tonumber) <= 48 and (.sandboxPIDsCurrent // 0) <= 48) and
+  ([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0
+'
+pid_saturation_contract='
+  def at_ceiling: ((.pidsCurrent | tonumber) == 48);
+  def longest_saturation:
+    reduce .[] as $sample
+      ({start: null, longest: 0};
+       if ($sample | at_ceiling) then
+         .start = (.start // $sample.timestampNanoseconds) |
+         .longest = ([.longest, ($sample.timestampNanoseconds - .start)] | max)
+       else
+         .start = null
+       end) |
+    .longest;
+  ([.[] | select(at_ceiling)] | length) >= 20 and
+  longest_saturation >= 1000000000
+'
+pid_repetitions_contract='
+  [.[] | select(.fixture=="fork-pid-bomb")] as $runs |
+  ($runs|length)==3 and
+  ($runs|map(.caseIdentity)|unique|length)==3 and
+  ($runs|map(.repetition)|sort)==[1,2,3] and
+  all($runs[]; .accepted==true and .cliExit==0 and .classification=="passed" and .phase=="completed" and .failureCode==null and .completeLog.state=="complete" and .completeLog.truncated==false)
+'
+
+fixture_repetitions() {
+  [[ $1 == fork-pid-bomb ]] && printf '3\n' || printf '1\n'
+}
+
+fixture_case_identity() {
+  local fixture=$1 repetition=$2
+  [[ "$fixture" == fork-pid-bomb ]] && printf '%s-run-%s\n' "$fixture" "$repetition" || printf '%s\n' "$fixture"
+}
+
+run_contract_tests() {
+  for command_name in grep jq mktemp; do
+    command -v "$command_name" >/dev/null || {
+      printf '%s is required for Plan 03 contract tests\n' "$command_name" >&2
+      return 2
+    }
+  done
+  local test_root good_result good_samples good_summary
+  test_root=$(mktemp -d "${TMPDIR:-/tmp}/plan03-contract-test.XXXXXX")
+  trap 'rm --recursive --force -- "$test_root"' RETURN
+  good_result="$test_root/good-result.json"
+  good_samples="$test_root/good-samples.ndjson"
+  good_summary="$test_root/good-summary.ndjson"
+
+  jq -n '{classification:"passed",phase:"completed",failure:null,execution:{exitCode:0},structuredEvents:[
+    {sequence:10,kind:"PLUGIN_STATE",payload:{name:"ProvenanceForkPidBomb",loaded:true,enabled:true}},
+    {sequence:11,kind:"SERVER_LOADED",payload:{}},
+    {sequence:12,kind:"STABILIZATION_STARTED",payload:{durationMillis:30000}},
+    {sequence:13,kind:"TARGET_REQUIREMENT",payload:{role:"TARGET",name:"ProvenanceForkPidBomb",configured:true,loaded:true,enabled:true}},
+    {sequence:14,kind:"STABILIZATION_COMPLETED",payload:{durationMillis:30000}},
+    {sequence:15,kind:"SERVER_READY",payload:{requirementsSatisfied:true}},
+    {sequence:16,kind:"CLEAN_SHUTDOWN_REQUESTED",payload:{}},
+    {sequence:17,kind:"SERVER_STOPPED",payload:{shutdownRequested:true}}
+  ]}' > "$good_result"
+  jq -e "$pid_result_contract" "$good_result" >/dev/null
+  if jq -e "$pid_result_contract" >/dev/null 2>&1 <<< '{"classification":"passed","phase":"completed","execution":{"exitCode":0},"rawLog":"all lifecycle markers present","structuredEvents":null}'; then
+    printf 'PID lifecycle contract accepted raw markers without structured events\n' >&2
+    return 1
+  fi
+  if jq '.structuredEvents[1].sequence=9' "$good_result" | jq -e "$pid_result_contract" >/dev/null; then
+    printf 'PID lifecycle contract accepted out-of-order structured events\n' >&2
+    return 1
+  fi
+
+  for sample in $(seq 0 20); do
+    jq -cn --argjson timestamp "$((sample * 50000000))" '{timestampNanoseconds:$timestamp,pidsMax:"48",pidsCurrent:"48",pidsEvents:"max 2;",sandboxPIDsCurrent:48}' >> "$good_samples"
+  done
+  jq -es "$pid_resource_contract" "$good_samples" >/dev/null
+  jq -es "$pid_saturation_contract" "$good_samples" >/dev/null
+  if jq -c '.pidsCurrent="49"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+    printf 'PID resource contract accepted an observation above 48\n' >&2
+    return 1
+  fi
+  if jq -c '.pidsEvents="max 0;"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+    printf 'PID resource contract accepted zero kernel denials\n' >&2
+    return 1
+  fi
+  if jq -c '.timestampNanoseconds=(.timestampNanoseconds/10|floor)' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+    printf 'PID saturation contract accepted an unsustained ceiling\n' >&2
+    return 1
+  fi
+
+  for repetition in 1 2 3; do
+    jq -cn --argjson repetition "$repetition" '{fixture:"fork-pid-bomb",caseIdentity:("fork-pid-bomb-run-"+($repetition|tostring)),repetition:$repetition,accepted:true,cliExit:0,classification:"passed",phase:"completed",failureCode:null,completeLog:{state:"complete",truncated:false}}' >> "$good_summary"
+  done
+  jq -es "$pid_repetitions_contract" "$good_summary" >/dev/null
+  if jq -c 'if .repetition==2 then .accepted=false else . end' "$good_summary" | jq -es "$pid_repetitions_contract" >/dev/null; then
+    printf 'PID repetition contract accepted one failed repetition\n' >&2
+    return 1
+  fi
+
+  [[ $(awk -F '\t' '$1=="fork-pid-bomb" && $2=="de54c5cc5a4bc8f1f75236d0f25b1f6b0c18ed9c5e8c24ab62af7b52e05f5c6a" && $3==5386 {count++} END {print count+0}' "$fixture_manifest") -eq 1 ]]
+  grep -Fq 'PLAN03_TOOLKIT_SHA: 7cfa97f5bf3ae778e09681fa56ce3a03a43bf2f8' "$repository_root/.github/workflows/plan03-acceptance.yml"
+  [[ $(grep -Fc 'ref: 7cfa97f5bf3ae778e09681fa56ce3a03a43bf2f8' "$repository_root/.github/workflows/plan03-acceptance.yml") -eq 1 ]]
+  [[ $(fixture_repetitions fork-pid-bomb) == 3 ]]
+  [[ $(fixture_case_identity fork-pid-bomb 1) == fork-pid-bomb-run-1 ]]
+  [[ $(fixture_case_identity fork-pid-bomb 2) == fork-pid-bomb-run-2 ]]
+  [[ $(fixture_case_identity fork-pid-bomb 3) == fork-pid-bomb-run-3 ]]
+  grep -Fq 'assert_no_residue "$case_identity" "$samples"' "$repository_root/scripts/plan03-acceptance.sh"
+  grep -Fq 'write_pid_verification "$case_identity" "$repetition"' "$repository_root/scripts/plan03-acceptance.sh"
+  printf 'Plan 03 PID acceptance contracts passed\n'
+}
+
+if [[ ${1:-} == --contract-test ]]; then
+  [[ $# -eq 1 ]] || { printf 'unexpected contract-test arguments\n' >&2; exit 2; }
+  run_contract_tests
+  exit
+elif [[ $# -ne 0 ]]; then
+  printf 'Plan 03 acceptance takes no arguments\n' >&2
+  exit 2
+fi
 
 required_environment=(
   PLAN03_ASSET_ROOT
@@ -10,6 +155,7 @@ required_environment=(
   PLAN03_EVIDENCE_ROOT
   PLAN03_RUNNER
   PLAN03_RUNSC_BINARY
+  PLAN03_TOOLKIT_SHA
   PLAN03_WORK_ROOT
   PROVENANCE_ROOTFS
   PROVENANCE_ROOTFS_IDENTITY
@@ -68,18 +214,6 @@ mkdir -p \
 chmod 0700 "$PLAN03_EVIDENCE_ROOT" "$PLAN03_WORK_ROOT"
 
 secret=PROVENANCE_TEST_SECRET_03
-pid_result_contract='
-  def trusted_pid_lifecycle:
-    (.structuredEvents // []) as $events |
-    any($events[]; .kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.enabled==true) and
-    any($events[]; .kind=="SERVER_READY") and
-    any($events[]; .kind=="CLEAN_SHUTDOWN_REQUESTED") and
-    any($events[]; .kind=="SERVER_STOPPED");
-  (
-    (.classification=="passed" and .phase=="completed" and (.failure // null)==null and .execution.exitCode==0) or
-    (.classification=="workload_failure" and .phase=="execution" and .failure.code=="gvisor_process_exit_nonzero" and .execution.exitCode==2)
-  ) and trusted_pid_lifecycle
-'
 # Raw workload console text is forgeable and cannot satisfy the trusted probe
 # contract. Keep the retained lifecycle-failure shape as a mandatory negative.
 if jq -e "$pid_result_contract" >/dev/null <<< '{"classification":"workload_failure","phase":"execution","failure":{"code":"gvisor_process_exit_nonzero"},"execution":{"exitCode":2},"structuredEvents":null}'; then
@@ -138,7 +272,7 @@ generate_test_plan() {
 }
 
 generate_job() {
-  local fixture=$1 sha=$2 size=$3 plugin=$4 timeout=$5 output_limit=$6
+  local fixture=$1 case_identity=$2 sha=$3 size=$4 plugin=$5 timeout=$6 output_limit=$7
   local test_plan memory_bytes=2147483648 pids=128
   if [[ "$fixture" == memory-bomb ]]; then
     memory_bytes=1610612736
@@ -149,6 +283,7 @@ generate_job() {
   test_plan=$(generate_test_plan "$fixture" "$plugin")
   jq -n \
     --arg fixture "$fixture" \
+    --arg caseIdentity "$case_identity" \
     --arg sha "$sha" \
     --arg filename "$fixture-1.0.0.jar" \
     --arg plugin "$plugin" \
@@ -159,7 +294,7 @@ generate_job() {
     --argjson memoryBytes "$memory_bytes" \
     --argjson pids "$pids" \
     --argjson testPlan "$test_plan" \
-    '{schemaVersion:"provenance.local-job/v1alpha1",id:("plan03-"+$fixture),provider:"paper",preparationTimeoutMilliseconds:120000,timeoutMilliseconds:$timeout,gracefulShutdownTimeoutMilliseconds:20000,maxOutputBytes:$outputLimit,environment:{artifactKind:"minecraft-plugin",environmentId:"paper-1.21.8-60-linux-amd64-temurin-21.0.8+9",target:{uri:("https://fixtures.example.com/"+$filename),sha256:$sha,filename:$filename,sizeBytes:$size},testPlan:$testPlan,memoryBytes:$memoryBytes,cpuMillis:1000,pids:$pids,diskBytes:1073741824,maxLineBytes:4096,redactSecrets:[$secret]}}'
+    '{schemaVersion:"provenance.local-job/v1alpha1",id:("plan03-"+$caseIdentity),provider:"paper",preparationTimeoutMilliseconds:120000,timeoutMilliseconds:$timeout,gracefulShutdownTimeoutMilliseconds:20000,maxOutputBytes:$outputLimit,environment:{artifactKind:"minecraft-plugin",environmentId:"paper-1.21.8-60-linux-amd64-temurin-21.0.8+9",target:{uri:("https://fixtures.example.com/"+$filename),sha256:$sha,filename:$filename,sizeBytes:$size},testPlan:$testPlan,memoryBytes:$memoryBytes,cpuMillis:1000,pids:$pids,diskBytes:1073741824,maxLineBytes:4096,redactSecrets:[$secret]}}'
 }
 
 fixture_selected() {
@@ -172,7 +307,11 @@ while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classificat
   fixture_selected "$fixture" || continue
   source="$PLAN03_ASSET_ROOT/fixtures/$fixture-1.0.0.jar"
   seed_cache "$source" "$sha" "$size"
-  generate_job "$fixture" "$sha" "$size" "$plugin" "$timeout" "$output_limit" > "$PLAN03_EVIDENCE_ROOT/jobs/$fixture.json"
+  repetitions=$(fixture_repetitions "$fixture")
+  for repetition in $(seq 1 "$repetitions"); do
+    case_identity=$(fixture_case_identity "$fixture" "$repetition")
+    generate_job "$fixture" "$case_identity" "$sha" "$size" "$plugin" "$timeout" "$output_limit" > "$PLAN03_EVIDENCE_ROOT/jobs/$case_identity.json"
+  done
 done < "$fixture_manifest"
 
 export PROVENANCE_PAPER_PROBE_URI=https://artifacts.example.com/paper-probe.jar
@@ -249,7 +388,7 @@ assert_no_residue() {
     printf '%s left a job cgroup\n' "$fixture" >&2
     return 1
   fi
-  if find "$PLAN03_WORK_ROOT/bundles" -mindepth 1 -type d -print -quit | grep -q .; then
+  if find "$PLAN03_WORK_ROOT/bundles" -mindepth 1 -print -quit | grep -q .; then
     printf '%s left a bundle\n' "$fixture" >&2
     return 1
   fi
@@ -257,7 +396,7 @@ assert_no_residue() {
     printf '%s left runsc state\n' "$fixture" >&2
     return 1
   fi
-  if find "$PLAN03_WORK_ROOT/workspaces" -mindepth 1 -type d -print -quit | grep -q .; then
+  if find "$PLAN03_WORK_ROOT/workspaces" -mindepth 1 -print -quit | grep -q .; then
     printf '%s left a writable workspace\n' "$fixture" >&2
     return 1
   fi
@@ -278,11 +417,11 @@ assert_no_residue() {
 }
 
 validate_result() {
-  local fixture=$1 expected_classification=$2 expected_phase=$3 expected_code=$4 expected_exit=$5 timeout=$6 samples=$7
-  local result="$PLAN03_EVIDENCE_ROOT/results/$fixture.json"
-  local complete_log="$PLAN03_EVIDENCE_ROOT/results/$fixture.log.gz"
-  local stderr_file="$PLAN03_EVIDENCE_ROOT/results/$fixture.stderr"
-  local decompressed="$PLAN03_WORK_ROOT/$fixture.complete.log"
+  local fixture=$1 case_identity=$2 expected_classification=$3 expected_phase=$4 expected_code=$5 expected_exit=$6 timeout=$7 samples=$8
+  local result="$PLAN03_EVIDENCE_ROOT/results/$case_identity.json"
+  local complete_log="$PLAN03_EVIDENCE_ROOT/results/$case_identity.log.gz"
+  local stderr_file="$PLAN03_EVIDENCE_ROOT/results/$case_identity.stderr"
+  local decompressed="$PLAN03_WORK_ROOT/$case_identity.complete.log"
   local expected_memory=2147483648 expected_pids=128
   if [[ "$fixture" == memory-bomb ]]; then
     expected_memory=1610612736
@@ -342,48 +481,14 @@ validate_result() {
       grep -Fq 'Enabling ProvenanceMemoryBomb' "$decompressed"
       ;;
     fork-pid-bomb)
-      jq -es '
-        ([.[].sandboxPIDsCurrent // 0] | max) > 0 and
-        ([.[].sandboxPIDsCurrent // 0] | max) <= 48 and
-        all(.[]; (.pidsCurrent | tonumber) <= (.pidsMax | tonumber))
-      ' "$samples" >/dev/null
-      if jq -e '.classification=="workload_failure"' "$result" >/dev/null; then
-        # A JVM exit caused by PID denial is acceptable only after the actual
-        # target plugin completed the trusted probe lifecycle. Raw log markers
-        # are supplemental, and the outcome remains bound to a kernel denial.
-        grep -Fq '[ProvenanceForkPidBomb] Enabling ProvenanceForkPidBomb' "$decompressed"
-        grep -Fq 'Done (' "$decompressed"
-        grep -Fq 'Stopping server' "$decompressed"
-        jq -es '([.[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max) > 0' "$samples" >/dev/null
-      else
-        jq -e '
-          any(.structuredEvents[]; .kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.enabled==true) and
-          any(.structuredEvents[]; .kind=="SERVER_READY") and
-          any(.structuredEvents[]; .kind=="CLEAN_SHUTDOWN_REQUESTED") and
-          any(.structuredEvents[]; .kind=="SERVER_STOPPED")
-        ' "$result" >/dev/null
-        jq -es '
-          def at_ceiling: ((.pidsCurrent | tonumber) == (.pidsMax | tonumber));
-          def longest_saturation:
-            reduce .[] as $sample
-              ({start: null, longest: 0};
-               if ($sample | at_ceiling) then
-                 .start = (.start // $sample.timestampNanoseconds) |
-                 .longest = ([.longest, ($sample.timestampNanoseconds - .start)] | max)
-               else
-                 .start = null
-               end) |
-            .longest;
-          ([.[] | select(at_ceiling)] | length) >= 20 and
-          longest_saturation >= 1000000000
-        ' "$samples" >/dev/null
-      fi
+      jq -es "$pid_resource_contract" "$samples" >/dev/null
+      jq -es "$pid_saturation_contract" "$samples" >/dev/null
       ;;
     disk-fill)
       grep -Fq 'No space left on device' "$decompressed"
       ;;
     network-scan|metadata-endpoint)
-      jq -e --arg plugin "$(jq -r '.environment.testPlan.targetPlugin' "$PLAN03_EVIDENCE_ROOT/jobs/$fixture.json")" '.structuredEvents[] | select(.kind=="PLUGIN_STATE" and .payload.name==$plugin and .payload.enabled==true)' "$result" >/dev/null
+      jq -e --arg plugin "$(jq -r '.environment.testPlan.targetPlugin' "$PLAN03_EVIDENCE_ROOT/jobs/$case_identity.json")" '.structuredEvents[] | select(.kind=="PLUGIN_STATE" and .payload.name==$plugin and .payload.enabled==true)' "$result" >/dev/null
       jq -es 'any(.[]; (.sandboxNetworkInterfaces|length)>0) and all(.[]; all(.sandboxNetworkInterfaces[]?; .Name=="lo"))' "$samples" >/dev/null
       ;;
     log-flood)
@@ -396,6 +501,46 @@ validate_result() {
       ;;
   esac
   rm -- "$decompressed"
+}
+
+write_pid_verification() {
+  local case_identity=$1 repetition=$2 samples=$3 result=$4 destination=$5
+  local runner_head
+  runner_head=$(< "$PLAN03_EVIDENCE_ROOT/runner-head.txt")
+  jq -n \
+    --arg fixture fork-pid-bomb \
+    --arg caseIdentity "$case_identity" \
+    --argjson repetition "$repetition" \
+    --arg toolkitSHA "$PLAN03_TOOLKIT_SHA" \
+    --arg runnerHeadSHA "$runner_head" \
+    --slurpfile samples "$samples" \
+    --slurpfile result "$result" \
+    '
+      def pids_event_max:
+        [$samples[] | (.pidsEvents | capture("max (?<count>[0-9]+);").count | tonumber)] | max;
+      def at_ceiling: ((.pidsCurrent | tonumber) == 48);
+      def longest_saturation:
+        reduce $samples[] as $sample
+          ({start:null,longest:0};
+           if ($sample | at_ceiling) then
+             .start=(.start // $sample.timestampNanoseconds) |
+             .longest=([.longest,($sample.timestampNanoseconds-.start)]|max)
+           else .start=null end) |
+        .longest;
+      def sequence($kind): first($result[0].structuredEvents[] | select(.kind==$kind) | .sequence);
+      {
+        fixture:$fixture,
+        caseIdentity:$caseIdentity,
+        repetition:$repetition,
+        toolkitSourceSHA:$toolkitSHA,
+        runnerHeadSHA:$runnerHeadSHA,
+        accepted:true,
+        pids:{configuredMax:48,observedCgroupMax:([$samples[].pidsCurrent|tonumber]|max),observedSandboxMax:([$samples[].sandboxPIDsCurrent//0]|max),kernelMaxEvents:pids_event_max,positiveKernelDenial:(pids_event_max>0),noObservationAboveLimit:(all($samples[]; (.pidsCurrent|tonumber)<=48 and (.sandboxPIDsCurrent//0)<=48)),ceilingSamples:([$samples[]|select(at_ceiling)]|length),sustainedCeilingNanoseconds:longest_saturation},
+        completeLog:{state:$result[0].completeLog.state,truncated:$result[0].completeLog.truncated,sha256:$result[0].completeLog.sha256,compressedBytes:$result[0].completeLog.compressedBytes,uncompressedBytes:$result[0].completeLog.uncompressedBytes},
+        lifecycle:{ordered:true,targetEnabledSequence:first($result[0].structuredEvents[]|select(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.loaded==true and .payload.enabled==true)|.sequence),serverLoadedSequence:sequence("SERVER_LOADED"),stabilizationStartedSequence:sequence("STABILIZATION_STARTED"),stabilizationCompletedSequence:sequence("STABILIZATION_COMPLETED"),serverReadySequence:sequence("SERVER_READY"),shutdownRequestedSequence:sequence("CLEAN_SHUTDOWN_REQUESTED"),serverStoppedSequence:sequence("SERVER_STOPPED")},
+        cleanup:{reportedSucceeded:$result[0].cleanup.succeeded,residueAbsent:true}
+      }
+    ' > "$destination"
 }
 
 run_complete_log_boundary() {
@@ -565,6 +710,7 @@ run_paper_restart_recovery() {
 }
 
 printf '%s\n' "$(git -c safe.directory="$repository_root" -C "$repository_root" rev-parse HEAD)" > "$PLAN03_EVIDENCE_ROOT/runner-head.txt"
+printf '%s\n' "$PLAN03_TOOLKIT_SHA" > "$PLAN03_EVIDENCE_ROOT/toolkit-source-head.txt"
 cp "$fixture_manifest" "$PLAN03_EVIDENCE_ROOT/fixtures.tsv"
 {
   uname -a
@@ -579,53 +725,62 @@ run_paper_restart_recovery
 while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classification phase failure_code exit_code; do
   [[ -z "$fixture" || "$fixture" == \#* ]] && continue
   fixture_selected "$fixture" || continue
-  result="$PLAN03_EVIDENCE_ROOT/results/$fixture.json"
-  stderr_file="$PLAN03_EVIDENCE_ROOT/results/$fixture.stderr"
-  complete_log="$PLAN03_EVIDENCE_ROOT/results/$fixture.log.gz"
-  samples="$PLAN03_EVIDENCE_ROOT/resources/$fixture.ndjson"
-  : > "$samples"
+  repetitions=$(fixture_repetitions "$fixture")
+  for repetition in $(seq 1 "$repetitions"); do
+    case_identity=$(fixture_case_identity "$fixture" "$repetition")
+    result="$PLAN03_EVIDENCE_ROOT/results/$case_identity.json"
+    stderr_file="$PLAN03_EVIDENCE_ROOT/results/$case_identity.stderr"
+    complete_log="$PLAN03_EVIDENCE_ROOT/results/$case_identity.log.gz"
+    samples="$PLAN03_EVIDENCE_ROOT/resources/$case_identity.ndjson"
+    : > "$samples"
 
-  bash -c 'kill -STOP $$; exec "$@"' bash \
-    "$PLAN03_RUNNER" execute "$PLAN03_EVIDENCE_ROOT/jobs/$fixture.json" --complete-log "$complete_log" \
-    > "$result" 2> "$stderr_file" &
-  runner_pid=$!
-  for _ in {1..100}; do
-    state=$(awk '/^State:/{print $2}' "/proc/$runner_pid/status" 2>/dev/null || true)
-    [[ "$state" == T ]] && break
-    sleep 0.01
+    bash -c 'kill -STOP $$; exec "$@"' bash \
+      "$PLAN03_RUNNER" execute "$PLAN03_EVIDENCE_ROOT/jobs/$case_identity.json" --complete-log "$complete_log" \
+      > "$result" 2> "$stderr_file" &
+    runner_pid=$!
+    state=""
+    for _ in {1..100}; do
+      state=$(awk '/^State:/{print $2}' "/proc/$runner_pid/status" 2>/dev/null || true)
+      [[ "$state" == T ]] && break
+      sleep 0.01
+    done
+    [[ "$state" == T ]] || { printf '%s did not reach the launch gate\n' "$case_identity" >&2; exit 1; }
+    printf '%s\n' "$runner_pid" > "$PLAN03_CGROUP_PARENT/runner/cgroup.procs"
+    kill -CONT "$runner_pid"
+    sample_resources "$case_identity" "$runner_pid" "$samples" &
+    monitor_pid=$!
+    set +e
+    wait "$runner_pid"
+    status=$?
+    set -e
+    wait "$monitor_pid"
+
+    expected_status=1
+    [[ "$classification" == passed ]] && expected_status=0
+    if [[ "$status" -ne "$expected_status" ]]; then
+      printf '%s exit status=%s, want %s\n' "$case_identity" "$status" "$expected_status" >&2
+      exit 1
+    fi
+    [[ -s "$samples" ]] || { printf '%s produced no cgroup samples\n' "$case_identity" >&2; exit 1; }
+    validate_result "$fixture" "$case_identity" "$classification" "$phase" "$failure_code" "$exit_code" "$timeout" "$samples"
+    assert_no_residue "$case_identity" "$samples"
+    if [[ "$fixture" == fork-pid-bomb ]]; then
+      verification="$PLAN03_EVIDENCE_ROOT/results/$case_identity-verification.json"
+      write_pid_verification "$case_identity" "$repetition" "$samples" "$result" "$verification"
+    fi
+    jq -cn \
+      --arg fixture "$fixture" \
+      --arg caseIdentity "$case_identity" \
+      --argjson repetition "$repetition" \
+      --argjson cliExit "$status" \
+      --slurpfile result "$result" \
+      '{fixture:$fixture,caseIdentity:$caseIdentity,repetition:$repetition,accepted:true,cliExit:$cliExit,classification:$result[0].classification,phase:$result[0].phase,failureCode:($result[0].failure.code // null),wallTimeMilliseconds:$result[0].usage.wallTimeMilliseconds,usage:$result[0].usage,completeLog:$result[0].completeLog}' \
+      >> "$PLAN03_EVIDENCE_ROOT/summary.ndjson"
+    printf 'accepted %s\n' "$case_identity"
   done
-  [[ "${state:-}" == T ]] || { printf '%s did not reach the launch gate\n' "$fixture" >&2; exit 1; }
-  printf '%s\n' "$runner_pid" > "$PLAN03_CGROUP_PARENT/runner/cgroup.procs"
-  kill -CONT "$runner_pid"
-  sample_resources "$fixture" "$runner_pid" "$samples" &
-  monitor_pid=$!
-  set +e
-  wait "$runner_pid"
-  status=$?
-  set -e
-  wait "$monitor_pid"
-
-  expected_status=1
-  [[ "$classification" == passed ]] && expected_status=0
-  if [[ "$fixture" == fork-pid-bomb && "$status" -eq 0 ]]; then
-    jq -e '.classification=="passed"' "$result" >/dev/null
-  elif [[ "$fixture" == fork-pid-bomb && "$status" -eq 1 ]]; then
-    jq -e '.classification=="workload_failure"' "$result" >/dev/null
-  elif [[ "$status" -ne "$expected_status" ]]; then
-    printf '%s exit status=%s, want %s\n' "$fixture" "$status" "$expected_status" >&2
-    exit 1
-  fi
-  [[ -s "$samples" ]] || { printf '%s produced no cgroup samples\n' "$fixture" >&2; exit 1; }
-  validate_result "$fixture" "$classification" "$phase" "$failure_code" "$exit_code" "$timeout" "$samples"
-  assert_no_residue "$fixture" "$samples"
-  jq -cn \
-    --arg fixture "$fixture" \
-    --argjson cliExit "$status" \
-    --slurpfile result "$result" \
-    '{fixture:$fixture,cliExit:$cliExit,classification:$result[0].classification,phase:$result[0].phase,failureCode:($result[0].failure.code // null),wallTimeMilliseconds:$result[0].usage.wallTimeMilliseconds,usage:$result[0].usage,completeLog:$result[0].completeLog}' \
-    >> "$PLAN03_EVIDENCE_ROOT/summary.ndjson"
-  printf 'accepted %s\n' "$fixture"
 done < "$fixture_manifest"
+
+jq -es "$pid_repetitions_contract" "$PLAN03_EVIDENCE_ROOT/summary.ndjson" >/dev/null
 
 (
   cd "$PLAN03_EVIDENCE_ROOT"
