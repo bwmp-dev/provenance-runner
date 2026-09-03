@@ -22,6 +22,7 @@ type gatedWorker struct {
 	preparing chan struct{}
 	executed  chan struct{}
 	now       time.Time
+	received  chan *runnerv1.JobSpecification
 }
 
 type cancellingWorker struct {
@@ -36,7 +37,10 @@ func (w *cancellingWorker) Execute(ctx context.Context, _ *runnerv1.JobSpecifica
 	return execution.Result{SchemaVersion: execution.ResultSchemaVersion, JobID: "job", Status: "failed", Classification: execution.ClassificationCancelled, Phase: execution.PhaseCleanup, Failure: execution.NewFailure(execution.ClassificationCancelled, "job_cancelled", ctx.Err().Error()), Cleanup: &execution.CleanupResult{Attempted: true, Succeeded: true}, StartedAt: w.started, CompletedAt: w.started}
 }
 
-func (w *gatedWorker) Execute(ctx context.Context, _ *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error) execution.Result {
+func (w *gatedWorker) Execute(ctx context.Context, specification *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error) execution.Result {
+	if w.received != nil {
+		w.received <- proto.Clone(specification).(*runnerv1.JobSpecification)
+	}
 	close(w.preparing)
 	if err := beforeExecute(ctx, execution.ExecutionStart{JobID: "job", Provider: "paper", EnvironmentIdentity: "paper"}); err != nil {
 		return execution.FailedResult("job", execution.PhaseExecution, execution.ClassificationInfrastructureFailure, "before_execute_failed", err)
@@ -47,8 +51,9 @@ func (w *gatedWorker) Execute(ctx context.Context, _ *runnerv1.JobSpecification,
 
 func TestDurableOfferLifecycleDoesNotExecuteBeforeJobStartedAcknowledgement(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	worker := &gatedWorker{preparing: make(chan struct{}), executed: make(chan struct{}), now: now}
+	worker := &gatedWorker{preparing: make(chan struct{}), executed: make(chan struct{}), now: now, received: make(chan *runnerv1.JobSpecification, 1)}
 	offer := validLeaseOffer(now)
+	offer.Job.JobCorrelation = validJobCorrelation(offer)
 	serverResult := make(chan error, 1)
 	server := &testGateway{connect: func(stream grpc.BidiStreamingServer[runnerv1.RunnerMessage, runnerv1.GatewayMessage]) (result error) {
 		defer func() { serverResult <- result }()
@@ -64,6 +69,10 @@ func TestDurableOfferLifecycleDoesNotExecuteBeforeJobStartedAcknowledgement(t *t
 		capabilities, err := stream.Recv()
 		if err != nil || capabilities.GetCapabilities() == nil {
 			return errors.New("capabilities were not second")
+		}
+		features := capabilities.GetCapabilities().GetFeatures()
+		if !advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1) || validateAdvertisedFeatures(features) != nil {
+			return fmt.Errorf("job correlation capability was not advertised exactly once: %v", features)
 		}
 		heartbeat, err := stream.Recv()
 		if err != nil || heartbeat.GetHeartbeat() == nil {
@@ -98,6 +107,14 @@ func TestDurableOfferLifecycleDoesNotExecuteBeforeJobStartedAcknowledgement(t *t
 		case <-worker.preparing:
 		case <-time.After(time.Second):
 			return errors.New("worker did not begin preparation")
+		}
+		select {
+		case specification := <-worker.received:
+			if !proto.Equal(specification.GetJobCorrelation(), offer.GetJob().GetJobCorrelation()) {
+				return errors.New("worker did not receive the immutable job correlation")
+			}
+		default:
+			return errors.New("worker specification was not captured")
 		}
 		started, err := stream.Recv()
 		if err != nil || started.GetJobStarted() == nil {
@@ -1194,6 +1211,7 @@ func TestRenewalAcknowledgementExtendsAuthoritativeLeaseAndExpiryFailsRetryably(
 func TestCancellationWaitsForCleanupAndEmitsJobCancelled(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	offer := validLeaseOffer(now)
+	offer.Job.JobCorrelation = validJobCorrelation(offer)
 	worker := &cancellingWorker{started: now}
 	server := &testGateway{connect: func(stream grpc.BidiStreamingServer[runnerv1.RunnerMessage, runnerv1.GatewayMessage]) error {
 		if _, err := stream.Recv(); err != nil {

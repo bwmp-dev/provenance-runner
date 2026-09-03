@@ -18,6 +18,7 @@ func (c *generatedConnector) connect(ctx context.Context) (gatewayStream, error)
 		ctx,
 		grpc.MaxCallRecvMsgSize(MaximumMessageBytes),
 		grpc.MaxCallSendMsgSize(MaximumMessageBytes),
+		grpc.ForceCodec(strictProtocolCodec{}),
 	)
 }
 

@@ -18,7 +18,7 @@ func TestValidateOfferAcceptsBoundedPaperOfferWithoutMutation(t *testing.T) {
 	offer := validLeaseOffer(now)
 	original := proto.Clone(offer)
 
-	if rejection := client.validateOffer(offer, now, 10*time.Minute); rejection != nil {
+	if rejection := client.validateOffer(offer, now, 10*time.Minute, false); rejection != nil {
 		t.Fatalf("validateOffer() rejection = %#v", rejection)
 	}
 	if !proto.Equal(offer, original) {
@@ -110,8 +110,8 @@ func TestValidateOfferReturnsStableBoundedRejections(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			offer := validLeaseOffer(now)
 			test.mutate(offer)
-			first := validateOffer(offer, config, now, 10*time.Minute)
-			second := validateOffer(offer, config, now, 10*time.Minute)
+			first := validateOffer(offer, config, now, 10*time.Minute, false)
+			second := validateOffer(offer, config, now, 10*time.Minute, false)
 			if first == nil || second == nil {
 				t.Fatalf("validateOffer() = %#v / %#v", first, second)
 			}
@@ -133,7 +133,7 @@ func TestValidateOfferAcceptsBoundedCompleteLogUploadWithoutMutation(t *testing.
 	offer := validLeaseOffer(now)
 	offer.Job.CompleteLogUpload = validCompleteLogUpload(now)
 	original := proto.Clone(offer)
-	if rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute); rejection != nil {
+	if rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, false); rejection != nil {
 		t.Fatalf("validateOffer() rejection = %#v", rejection)
 	}
 	if !proto.Equal(offer, original) {
@@ -155,13 +155,13 @@ func TestValidateOfferBoundsMessageAndDependenciesBeforeAllocation(t *testing.T)
 
 	oversized := validLeaseOffer(now)
 	oversized.Job.NormalizedConfigurationJson = make([]byte, MaximumMessageBytes+1)
-	if rejection := validateOffer(oversized, config, now, 10*time.Minute); rejection == nil || rejection.Code != "offer_too_large" {
+	if rejection := validateOffer(oversized, config, now, 10*time.Minute, false); rejection == nil || rejection.Code != "offer_too_large" {
 		t.Fatalf("oversized rejection = %#v", rejection)
 	}
 
 	tooMany := validLeaseOffer(now)
 	tooMany.Job.Hashes.Dependencies = make([]*runnerv1.DependencyDigest, maximumOfferDependencies+1)
-	if rejection := validateOffer(tooMany, config, now, 10*time.Minute); rejection == nil || rejection.Code != "too_many_dependencies" {
+	if rejection := validateOffer(tooMany, config, now, 10*time.Minute, false); rejection == nil || rejection.Code != "too_many_dependencies" {
 		t.Fatalf("dependency bound rejection = %#v", rejection)
 	}
 
@@ -185,7 +185,7 @@ func TestValidateOfferBoundsMessageAndDependenciesBeforeAllocation(t *testing.T)
 			},
 		})
 	}
-	if rejection := validateOffer(boundary, config, now, 10*time.Minute); rejection != nil {
+	if rejection := validateOffer(boundary, config, now, 10*time.Minute, false); rejection != nil {
 		t.Fatalf("dependency boundary rejected: %#v", rejection)
 	}
 }
@@ -196,11 +196,11 @@ func TestValidateOfferEnforcesExactOrganizationScope(t *testing.T) {
 	config.ExpectedScope = ExpectedScope{Kind: ScopeOrganization, OrganizationID: "40000000-0000-0000-0000-000000000001"}
 	offer := validLeaseOffer(now)
 	offer.Job.OrganizationScope = organizationScope(config.ExpectedScope.OrganizationID)
-	if rejection := validateOffer(offer, config, now, 10*time.Minute); rejection != nil {
+	if rejection := validateOffer(offer, config, now, 10*time.Minute, false); rejection != nil {
 		t.Fatalf("matching organization rejected: %#v", rejection)
 	}
 	offer.Job.OrganizationScope = platformScope()
-	if rejection := validateOffer(offer, config, now, 10*time.Minute); rejection == nil || rejection.Code != "scope_mismatch" {
+	if rejection := validateOffer(offer, config, now, 10*time.Minute, false); rejection == nil || rejection.Code != "scope_mismatch" {
 		t.Fatalf("platform scope rejection = %#v", rejection)
 	}
 }
@@ -292,6 +292,15 @@ func validLeaseOffer(now time.Time) *runnerv1.LeaseOffer {
 			}},
 			NormalizedConfigurationJson: configuration,
 		},
+	}
+}
+
+func validJobCorrelation(offer *runnerv1.LeaseOffer) *runnerv1.JobCorrelation {
+	return &runnerv1.JobCorrelation{
+		Traceparent:    "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		OrganizationId: "60000000-0000-4000-8000-000000000001",
+		ProjectId:      "70000000-0000-4000-8000-000000000001",
+		WorkflowId:     jobCorrelationWorkflowPrefix + offer.GetJob().GetAttempt().GetReleaseCandidateId(),
 	}
 }
 

@@ -23,6 +23,7 @@ type clientSession struct {
 	client                        *Client
 	authenticated                 *runnerv1.Authenticated
 	send                          func(*runnerv1.RunnerMessage) error
+	jobCorrelationV1              bool
 	seen                          map[string][sha256.Size]byte
 	seenOrder                     []string
 	pendingHeartbeat              *runnerv1.RunnerMessage
@@ -131,6 +132,15 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 		if state.Active == nil {
 			return s.rejectOffer(offer, runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_AT_CAPACITY, "at_capacity: prior lease cleanup is still running")
 		}
+		if activeMatchesIdentity(state.Active, offer.GetJob().GetLease(), offer.GetJob().GetAttempt()) {
+			persisted := new(runnerv1.JobSpecification)
+			if err := proto.Unmarshal(state.Active.Specification, persisted); err != nil {
+				return permanent("decode active job specification: %v", err)
+			}
+			if !proto.Equal(persisted.GetJobCorrelation(), offer.GetJob().GetJobCorrelation()) {
+				return permanent("job correlation changed for an active durable job identity")
+			}
+		}
 		if state.Active.OfferMessageID == envelope.GetMessageId() && bytes.Equal(state.Active.OfferDigest, offerDigest[:]) {
 			return s.replayPending()
 		}
@@ -145,7 +155,7 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 	if s.client.worker == nil {
 		return s.rejectOffer(offer, runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED, "worker_unavailable: remote execution is unavailable")
 	}
-	if rejection := s.client.validateOffer(offer, now, s.authenticated.GetLeaseDuration().AsDuration()); rejection != nil {
+	if rejection := s.client.validateOffer(offer, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1); rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}
 	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime())
@@ -168,11 +178,12 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 			return errors.New("runner became busy while accepting the lease")
 		}
 		state.Active = &journalJob{
-			Specification:  specification,
-			OfferMessageID: envelope.GetMessageId(),
-			OfferDigest:    bytes.Clone(offerDigest[:]),
-			Phase:          runnerv1.JobPhase_JOB_PHASE_ACCEPTED,
-			ExpiresAt:      offer.GetJob().GetLease().GetExpiresAt().AsTime(),
+			Specification:    specification,
+			OfferMessageID:   envelope.GetMessageId(),
+			OfferDigest:      bytes.Clone(offerDigest[:]),
+			JobCorrelationV1: s.jobCorrelationV1,
+			Phase:            runnerv1.JobPhase_JOB_PHASE_ACCEPTED,
+			ExpiresAt:        offer.GetJob().GetLease().GetExpiresAt().AsTime(),
 		}
 		return nil
 	})
