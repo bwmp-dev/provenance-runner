@@ -60,22 +60,28 @@ type pinnedSourcePolicy struct {
 }
 
 func newPinnedSourcePolicy(catalog Catalog) (sourcePolicy, error) {
-	initial := make(map[string]struct{}, 4)
+	return newPinnedSourcePolicies([]Catalog{catalog})
+}
+
+func newPinnedSourcePolicies(catalogs []Catalog) (sourcePolicy, error) {
+	initial := make(map[string]struct{}, len(catalogs)*4)
 	redirects := map[string]struct{}{
 		"release-assets.githubusercontent.com": {},
 		"objects.githubusercontent.com":        {},
 	}
-	for _, raw := range []string{catalog.Paper.Artifact.URI, catalog.Java.Artifact.URI, catalog.Probe.URI, catalog.PreparedRuntime.Artifact.URI} {
-		uri, err := url.ParseRequestURI(raw)
-		if err != nil {
-			return nil, errors.New("invalid pinned artifact URL")
+	for _, catalog := range catalogs {
+		for _, raw := range []string{catalog.Paper.Artifact.URI, catalog.Java.Artifact.URI, catalog.Probe.URI, catalog.PreparedRuntime.Artifact.URI} {
+			uri, err := url.ParseRequestURI(raw)
+			if err != nil {
+				return nil, errors.New("invalid pinned artifact URL")
+			}
+			host, err := validateHTTPSURLValue(uri)
+			if err != nil {
+				return nil, err
+			}
+			initial[uri.String()] = struct{}{}
+			redirects[host] = struct{}{}
 		}
-		host, err := validateHTTPSURLValue(uri)
-		if err != nil {
-			return nil, err
-		}
-		initial[uri.String()] = struct{}{}
-		redirects[host] = struct{}{}
 	}
 	return &pinnedSourcePolicy{initial: initial, redirects: redirects}, nil
 }

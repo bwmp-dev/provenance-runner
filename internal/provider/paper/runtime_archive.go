@@ -39,6 +39,13 @@ type preparedRuntimeEntry struct {
 }
 
 func WritePreparedRuntimeArchive(ctx context.Context, sourceRoot string, destination io.Writer) (PreparedRuntimeMetadata, error) {
+	return WritePreparedRuntimeArchiveForVersion(ctx, sourceRoot, destination, AlphaCatalog().Paper.GameVersion)
+}
+
+// WritePreparedRuntimeArchiveForVersion creates a deterministic offline
+// runtime for one exact Paper game version. Callers must select the version
+// from the immutable catalog before invoking this function.
+func WritePreparedRuntimeArchiveForVersion(ctx context.Context, sourceRoot string, destination io.Writer, gameVersion string) (PreparedRuntimeMetadata, error) {
 	if err := ctx.Err(); err != nil {
 		return PreparedRuntimeMetadata{}, fmt.Errorf("build prepared Paper runtime: %w", err)
 	}
@@ -49,7 +56,7 @@ func WritePreparedRuntimeArchive(ctx context.Context, sourceRoot string, destina
 	if err != nil {
 		return PreparedRuntimeMetadata{}, fmt.Errorf("build prepared Paper runtime: resolve source root: %w", err)
 	}
-	entries, expanded, err := collectPreparedRuntime(ctx, absoluteRoot)
+	entries, expanded, err := collectPreparedRuntime(ctx, absoluteRoot, gameVersion)
 	if err != nil {
 		return PreparedRuntimeMetadata{}, err
 	}
@@ -76,7 +83,12 @@ func WritePreparedRuntimeArchive(ctx context.Context, sourceRoot string, destina
 	}, nil
 }
 
-func collectPreparedRuntime(ctx context.Context, root string) ([]preparedRuntimeEntry, int64, error) {
+func collectPreparedRuntime(ctx context.Context, root, gameVersion string) ([]preparedRuntimeEntry, int64, error) {
+	if gameVersion == "" || strings.ContainsAny(gameVersion, "\\/\x00") || gameVersion == "." || gameVersion == ".." {
+		return nil, 0, errors.New("build prepared Paper runtime: game version is invalid")
+	}
+	mojangServerPath := "cache/mojang_" + gameVersion + ".jar"
+	patchedPaperPath := "versions/" + gameVersion + "/paper-" + gameVersion + ".jar"
 	entries := make([]preparedRuntimeEntry, 0)
 	found := make(map[string]bool)
 	libraryFiles := 0
@@ -137,11 +149,11 @@ func collectPreparedRuntime(ctx context.Context, root string) ([]preparedRuntime
 			return nil, 0, fmt.Errorf("build prepared Paper runtime: inspect %s: %w", name, err)
 		}
 	}
-	if !found[alphaMojangServerPath] {
-		return nil, 0, fmt.Errorf("build prepared Paper runtime: %s is missing", alphaMojangServerPath)
+	if !found[mojangServerPath] {
+		return nil, 0, fmt.Errorf("build prepared Paper runtime: %s is missing", mojangServerPath)
 	}
-	if !found[alphaPatchedPaperPath] {
-		return nil, 0, fmt.Errorf("build prepared Paper runtime: %s is missing", alphaPatchedPaperPath)
+	if !found[patchedPaperPath] {
+		return nil, 0, fmt.Errorf("build prepared Paper runtime: %s is missing", patchedPaperPath)
 	}
 	if libraryFiles == 0 {
 		return nil, 0, errors.New("build prepared Paper runtime: libraries contains no regular files")

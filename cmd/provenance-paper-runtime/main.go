@@ -24,20 +24,32 @@ func main() {
 }
 
 func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
-	return runWithPaperclip(ctx, arguments, stdout, stderr, paper.AlphaCatalog().Paper.Artifact, preparePaperclip)
+	return runWithCatalogSelection(ctx, arguments, stdout, stderr, preparePaperclip)
 }
 
 type paperclipPreparer func(context.Context, string, string, string, io.Writer) error
 
 func runWithPaperclip(ctx context.Context, arguments []string, stdout, stderr io.Writer, pin paper.ArtifactPin, prepare paperclipPreparer) error {
+	catalog := paper.AlphaCatalog()
+	catalog.Paper.Artifact = pin
+	return runWithSelectedCatalog(ctx, arguments, stdout, stderr, catalog, prepare, false)
+}
+
+func runWithCatalogSelection(ctx context.Context, arguments []string, stdout, stderr io.Writer, prepare paperclipPreparer) error {
+	return runWithSelectedCatalog(ctx, arguments, stdout, stderr, paper.Catalog{}, prepare, true)
+}
+
+func runWithSelectedCatalog(ctx context.Context, arguments []string, stdout, stderr io.Writer, selected paper.Catalog, prepare paperclipPreparer, selectCatalog bool) error {
 	flags := flag.NewFlagSet("provenance-paper-runtime", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var paperPath string
 	var javaPath string
 	var outputPath string
+	var environmentID string
 	flags.StringVar(&paperPath, "paper", "", "path to the pinned Paper alpha JAR")
 	flags.StringVar(&javaPath, "java", "java", "path to a Java 21 or newer executable")
 	flags.StringVar(&outputPath, "output", "paper-prepared-runtime.tar.gz", "new archive path")
+	flags.StringVar(&environmentID, "environment", paper.AlphaEnvironmentID, "exact alpha Paper environment ID")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -46,6 +58,15 @@ func runWithPaperclip(ctx context.Context, arguments []string, stdout, stderr io
 	}
 	if paperPath == "" {
 		return errors.New("-paper is required")
+	}
+	if selectCatalog {
+		var exists bool
+		selected, exists = paper.CatalogForEnvironmentID(environmentID)
+		if !exists {
+			return fmt.Errorf("-environment must be one of the immutable alpha catalog entries")
+		}
+	} else if environmentID != paper.AlphaEnvironmentID {
+		return errors.New("test Paper pin supports only the default alpha environment")
 	}
 	absoluteOutput, err := filepath.Abs(outputPath)
 	if err != nil {
@@ -62,7 +83,7 @@ func runWithPaperclip(ctx context.Context, arguments []string, stdout, stderr io
 	}
 	defer os.RemoveAll(stage)
 	stagedPaper := filepath.Join(stage, "paper.jar")
-	if err := stageVerifiedPaper(ctx, paperPath, stagedPaper, pin); err != nil {
+	if err := stageVerifiedPaper(ctx, paperPath, stagedPaper, selected.Paper.Artifact); err != nil {
 		return err
 	}
 	if prepare == nil {
@@ -78,7 +99,7 @@ func runWithPaperclip(ctx context.Context, arguments []string, stdout, stderr io
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	metadata, buildErr := paper.WritePreparedRuntimeArchive(ctx, stage, temporary)
+	metadata, buildErr := paper.WritePreparedRuntimeArchiveForVersion(ctx, stage, temporary, selected.Paper.GameVersion)
 	syncErr := temporary.Sync()
 	closeErr := temporary.Close()
 	if err := errors.Join(buildErr, syncErr, closeErr); err != nil {

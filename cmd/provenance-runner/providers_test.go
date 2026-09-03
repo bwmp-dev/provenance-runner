@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/instancelock"
+	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 )
 
 func TestPaperRegistryFailsBeforeExecutionWhenOperatorPinsAreMissing(t *testing.T) {
@@ -62,6 +64,123 @@ func TestOperatorCatalogRejectsAWellFormedButUnpinnedProbe(t *testing.T) {
 	if _, err := operatorCatalog(func(name string) string { return values[name] }); err == nil || !strings.Contains(err.Error(), "must be probe 0.1.0") {
 		t.Fatalf("operatorCatalog() error = %v", err)
 	}
+}
+
+func TestOperatorCatalogsConfiguresExactPreparedRuntimeMatrix(t *testing.T) {
+	values, runtimes := paperMatrixEnvironment(t)
+	catalogs, err := operatorCatalogs(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatalf("operatorCatalogs() error = %v", err)
+	}
+	if len(catalogs) != 3 {
+		t.Fatalf("operatorCatalogs() length = %d, want 3", len(catalogs))
+	}
+	for index, catalog := range catalogs {
+		if catalog.EnvironmentID != runtimes[index].EnvironmentID || catalog.PreparedRuntime.Artifact.URI != runtimes[index].URI || catalog.PreparedRuntime.Artifact.SHA256 != runtimes[index].SHA256 || catalog.PreparedRuntime.Artifact.SizeBytes != runtimes[index].SizeBytes || catalog.PreparedRuntime.MaximumExpandedBytes != runtimes[index].MaximumExpandedBytes {
+			t.Errorf("catalog[%d] prepared runtime = %#v, want %#v", index, catalog.PreparedRuntime, runtimes[index])
+		}
+		if catalog.Probe.SHA256 != paper.AlphaProbeSHA256 || catalog.Probe.SizeBytes != paper.AlphaProbeSizeBytes {
+			t.Errorf("catalog[%d] probe pin = %#v", index, catalog.Probe)
+		}
+	}
+}
+
+func TestOperatorCatalogsRejectsInvalidOrAmbiguousRuntimeMatrices(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]string, []preparedRuntimeConfiguration){
+		"missing environment": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			setPreparedRuntimes(t, values, runtimes[:2])
+		},
+		"duplicate environment": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[2].EnvironmentID = runtimes[1].EnvironmentID
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"unrecognized environment": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[2].EnvironmentID = "paper-latest"
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"duplicate digest": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[2].SHA256 = runtimes[1].SHA256
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"non HTTPS URI": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[0].URI = "http://artifacts.example.com/runtime.tar.gz"
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"URI credentials": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[0].URI = "https://secret-user:secret-password@artifacts.example.com/runtime.tar.gz"
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"invalid digest": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[0].SHA256 = "not-a-digest"
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"zero size": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[0].SizeBytes = 0
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"zero expanded bound": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[0].MaximumExpandedBytes = 0
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"excessive expanded bound": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
+			runtimes[0].MaximumExpandedBytes = 1<<30 + 1
+			setPreparedRuntimes(t, values, runtimes)
+		},
+		"legacy variables present": func(values map[string]string, _ []preparedRuntimeConfiguration) {
+			values["PROVENANCE_PAPER_PREPARED_RUNTIME_URI"] = "https://artifacts.example.com/legacy.tar.gz"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			values, runtimes := paperMatrixEnvironment(t)
+			mutate(values, runtimes)
+			_, err := operatorCatalogs(func(name string) string { return values[name] })
+			if err == nil {
+				t.Fatal("operatorCatalogs() error = nil")
+			}
+			if strings.Contains(err.Error(), "secret-user") || strings.Contains(err.Error(), "secret-password") {
+				t.Fatalf("operatorCatalogs() leaked URI credentials: %v", err)
+			}
+		})
+	}
+
+	values, _ := paperMatrixEnvironment(t)
+	values[preparedRuntimesEnvironment] = `[{"environmentId":"x","unknown":"value"}]`
+	if _, err := operatorCatalogs(func(name string) string { return values[name] }); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown field error = %v", err)
+	}
+	values[preparedRuntimesEnvironment] = `not-json`
+	if _, err := operatorCatalogs(func(name string) string { return values[name] }); err == nil {
+		t.Fatal("malformed JSON error = nil")
+	}
+}
+
+func paperMatrixEnvironment(t *testing.T) (map[string]string, []preparedRuntimeConfiguration) {
+	t.Helper()
+	values := paperEnvironment(t)
+	for _, name := range []string{
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_URI",
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256",
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_SIZE_BYTES",
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_MAX_EXPANDED_BYTES",
+	} {
+		delete(values, name)
+	}
+	runtimes := []preparedRuntimeConfiguration{
+		{EnvironmentID: paper.Paper1206EnvironmentID, URI: "https://artifacts.example.com/runtime-1206.tar.gz", SHA256: strings.Repeat("a", 64), SizeBytes: 101, MaximumExpandedBytes: 201},
+		{EnvironmentID: paper.Paper1214EnvironmentID, URI: "https://artifacts.example.com/runtime-1214.tar.gz", SHA256: strings.Repeat("b", 64), SizeBytes: 102, MaximumExpandedBytes: 202},
+		{EnvironmentID: paper.AlphaEnvironmentID, URI: "https://artifacts.example.com/runtime-1218.tar.gz", SHA256: strings.Repeat("c", 64), SizeBytes: 103, MaximumExpandedBytes: 203},
+	}
+	setPreparedRuntimes(t, values, runtimes)
+	return values, runtimes
+}
+
+func setPreparedRuntimes(t *testing.T, values map[string]string, runtimes []preparedRuntimeConfiguration) {
+	t.Helper()
+	encoded, err := json.Marshal(runtimes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values[preparedRuntimesEnvironment] = string(encoded)
 }
 
 func TestLocalHostileFixtureOptInIsStrict(t *testing.T) {

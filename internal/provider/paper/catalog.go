@@ -1,6 +1,10 @@
 package paper
 
+import "strconv"
+
 const (
+	Paper1206EnvironmentID = "paper-1.20.6-151-linux-amd64-temurin-21.0.8+9"
+	Paper1214EnvironmentID = "paper-1.21.4-232-linux-amd64-temurin-21.0.8+9"
 	AlphaEnvironmentID     = "paper-1.21.8-60-linux-amd64-temurin-21.0.8+9"
 	AlphaProbeVersion      = "0.1.0"
 	AlphaProbeSourceCommit = "98d5f07f173a9e3f1b365add24b81c934d7e3c61"
@@ -48,16 +52,60 @@ type Catalog struct {
 }
 
 func AlphaCatalog() Catalog {
+	return catalog(
+		AlphaEnvironmentID,
+		"1.21.8",
+		60,
+		"8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e",
+		52_811_717,
+	)
+}
+
+// AlphaCatalogs returns the complete, bounded Paper environment matrix used by
+// the alpha control plane. PreparedRuntime remains operator-supplied for every
+// entry and must be populated before a catalog can construct a Provider.
+func AlphaCatalogs() []Catalog {
+	return []Catalog{
+		catalog(
+			Paper1206EnvironmentID,
+			"1.20.6",
+			151,
+			"4b011f5adb5f6c72007686a223174fce82f31aeb4b34faf4652abc840b47e640",
+			45_826_876,
+		),
+		catalog(
+			Paper1214EnvironmentID,
+			"1.21.4",
+			232,
+			"5ee4f542f628a14c644410b08c94ea42e772ef4d29fe92973636b6813d4eaffc",
+			51_437_498,
+		),
+		AlphaCatalog(),
+	}
+}
+
+// CatalogForEnvironmentID returns one of the immutable alpha entries. The
+// returned value does not contain an operator prepared-runtime pin.
+func CatalogForEnvironmentID(environmentID string) (Catalog, bool) {
+	for _, entry := range AlphaCatalogs() {
+		if entry.EnvironmentID == environmentID {
+			return entry, true
+		}
+	}
+	return Catalog{}, false
+}
+
+func catalog(environmentID, gameVersion string, build uint32, paperSHA256 string, paperSize int64) Catalog {
 	return Catalog{
-		EnvironmentID: AlphaEnvironmentID,
+		EnvironmentID: environmentID,
 		Paper: PaperPin{
-			GameVersion: "1.21.8",
-			Build:       60,
+			GameVersion: gameVersion,
+			Build:       build,
 			Artifact: ArtifactPin{
-				URI:       "https://fill-data.papermc.io/v1/objects/8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e/paper-1.21.8-60.jar",
-				SHA256:    "8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e",
-				Filename:  "paper-1.21.8-60.jar",
-				SizeBytes: 52_811_717,
+				URI:       "https://fill-data.papermc.io/v1/objects/" + paperSHA256 + "/paper-" + gameVersion + "-" + strconv.FormatUint(uint64(build), 10) + ".jar",
+				SHA256:    paperSHA256,
+				Filename:  "paper-" + gameVersion + "-" + strconv.FormatUint(uint64(build), 10) + ".jar",
+				SizeBytes: paperSize,
 			},
 		},
 		Java: JavaPin{

@@ -47,12 +47,43 @@ PROVENANCE_GVISOR_STATE_ROOT
 PROVENANCE_GVISOR_BUNDLE_ROOT
 ```
 
+The four singular `PROVENANCE_PAPER_PREPARED_RUNTIME_*` variables are the
+backward-compatible configuration for only
+`paper-1.21.8-60-linux-amd64-temurin-21.0.8+9`. To enable the complete alpha
+matrix, omit all four singular variables and set
+`PROVENANCE_PAPER_PREPARED_RUNTIMES_JSON` to a strict array containing exactly
+one independently built runtime for each of these environment IDs:
+
+```text
+paper-1.20.6-151-linux-amd64-temurin-21.0.8+9
+paper-1.21.4-232-linux-amd64-temurin-21.0.8+9
+paper-1.21.8-60-linux-amd64-temurin-21.0.8+9
+```
+
+Every array entry has `environmentId`, `uri`, `sha256`, `sizeBytes`, and
+`maximumExpandedBytes`. URIs must be HTTPS without credentials or fragments;
+digests must be distinct 64-character SHA-256 values; sizes and expanded bounds
+must be positive, with the expanded bound no greater than 1 GiB. Missing,
+duplicate, unknown, extra, malformed, or mixed legacy/matrix configuration is
+rejected during runner initialization. The runner never substitutes one
+environment's prepared runtime for another.
+
 `PROVENANCE_ARTIFACT_HOSTS` is a comma-separated exact DNS-host allowlist for job-provided target and dependency downloads. The probe and prepared runtime use their exact operator URI, SHA-256, and byte-size pins. The prepared-runtime archive contains offline Paperclip cache, library, and patched-runtime output; it must omit the paths where the runner overlays `paper.jar`, plugins, the EULA, minimal server properties, and the test plan.
 
 Build that archive from the pinned Paper JAR in a trusted networked preparation environment. The command verifies the alpha Paper byte-size and SHA-256, runs Paperclip in patch-only mode, includes only `cache`, `libraries`, and `versions`, normalizes all archive metadata, refuses to overwrite an existing output, and prints the three operator pin values as JSON:
 
 ```sh
 go run ./cmd/provenance-paper-runtime -paper /path/to/paper-1.21.8-60.jar -output paper-prepared-runtime.tar.gz
+```
+
+For the other immutable entries, pass the exact environment ID as well, for
+example:
+
+```sh
+go run ./cmd/provenance-paper-runtime \
+  -environment paper-1.20.6-151-linux-amd64-temurin-21.0.8+9 \
+  -paper /path/to/paper-1.20.6-151.jar \
+  -output paper-1.20.6-151-prepared-runtime.tar.gz
 ```
 
 The alpha Paper provider accepts only probe `0.1.0` built from Provenance commit `98d5f07f173a9e3f1b365add24b81c934d7e3c61`: SHA-256 `abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43`, 478837 bytes. The JAR is reproducible from that commit, but the current public Provenance release does not publish probe bytes, so the operator must host those exact bytes and supply their HTTPS URI.
@@ -63,7 +94,8 @@ Only one Paper CLI process may use a gVisor bundle root at a time. The runner ho
 
 ## Paper local-job input
 
-The `paper` environment uses the pinned environment ID `paper-1.21.8-60-linux-amd64-temurin-21.0.8+9`. It requires:
+The `paper` environment uses one of the three pinned environment IDs listed
+above. It requires:
 
 - `artifactKind: "minecraft-plugin"`;
 - `target` with an HTTPS `uri`, lowercase hexadecimal `sha256`, plain JAR `filename`, and authoritative positive `sizeBytes`;

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"path/filepath"
 	"runtime"
@@ -76,7 +79,7 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 	if err := validatePaperPlatform(runtime.GOOS, runtime.GOARCH); err != nil {
 		return nil, nil, err
 	}
-	catalog, err := operatorCatalog(lookup)
+	catalogs, err := operatorCatalogs(lookup)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,7 +195,7 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 		RuntimeCache:            sharedCache,
 		Workspaces:              manager,
 		Sandbox:                 sandbox,
-		Catalog:                 catalog,
+		Catalogs:                catalogs,
 		ArtifactHosts:           artifactHosts,
 		MaximumArtifactBytes:    maximumArtifactBytes,
 		MaximumDependencyBytes:  maximumDependencyBytes,
@@ -245,6 +248,99 @@ func operatorCatalog(lookup environmentLookup) (paper.Catalog, error) {
 	return catalog, nil
 }
 
+const preparedRuntimesEnvironment = "PROVENANCE_PAPER_PREPARED_RUNTIMES_JSON"
+
+type preparedRuntimeConfiguration struct {
+	EnvironmentID        string `json:"environmentId"`
+	URI                  string `json:"uri"`
+	SHA256               string `json:"sha256"`
+	SizeBytes            int64  `json:"sizeBytes"`
+	MaximumExpandedBytes int64  `json:"maximumExpandedBytes"`
+}
+
+func operatorCatalogs(lookup environmentLookup) ([]paper.Catalog, error) {
+	raw := strings.TrimSpace(lookup(preparedRuntimesEnvironment))
+	if raw == "" {
+		catalog, err := operatorCatalog(lookup)
+		if err != nil {
+			return nil, err
+		}
+		return []paper.Catalog{catalog}, nil
+	}
+	for _, name := range []string{
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_URI",
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256",
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_SIZE_BYTES",
+		"PROVENANCE_PAPER_PREPARED_RUNTIME_MAX_EXPANDED_BYTES",
+	} {
+		if strings.TrimSpace(lookup(name)) != "" {
+			return nil, fmt.Errorf("%s cannot be combined with legacy PROVENANCE_PAPER_PREPARED_RUNTIME_* variables", preparedRuntimesEnvironment)
+		}
+	}
+	if len(raw) > 64<<10 {
+		return nil, fmt.Errorf("%s exceeds 65536 bytes", preparedRuntimesEnvironment)
+	}
+	decoder := json.NewDecoder(bytes.NewBufferString(raw))
+	decoder.DisallowUnknownFields()
+	var configured []preparedRuntimeConfiguration
+	if err := decoder.Decode(&configured); err != nil {
+		return nil, fmt.Errorf("%s must be a strict JSON array: %w", preparedRuntimesEnvironment, err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s must contain exactly one JSON value", preparedRuntimesEnvironment)
+	}
+	baseCatalogs := paper.AlphaCatalogs()
+	if len(configured) != len(baseCatalogs) {
+		return nil, fmt.Errorf("%s must configure exactly %d alpha environments", preparedRuntimesEnvironment, len(baseCatalogs))
+	}
+	probe, err := operatorArtifactPin(lookup, "PROVENANCE_PAPER_PROBE", "paper-probe.jar")
+	if err != nil {
+		return nil, err
+	}
+	alpha := paper.AlphaCatalog()
+	if probe.SHA256 != alpha.Probe.SHA256 || probe.SizeBytes != alpha.Probe.SizeBytes {
+		return nil, fmt.Errorf("PROVENANCE_PAPER_PROBE must be probe %s from %s with SHA-256 %s and size %d", alpha.ProbeVersion, alpha.ProbeSourceCommit, alpha.Probe.SHA256, alpha.Probe.SizeBytes)
+	}
+	byID := make(map[string]preparedRuntimeConfiguration, len(configured))
+	digests := make(map[string]string, len(configured))
+	for _, runtime := range configured {
+		if _, exists := byID[runtime.EnvironmentID]; exists {
+			return nil, fmt.Errorf("%s contains duplicate environmentId %q", preparedRuntimesEnvironment, runtime.EnvironmentID)
+		}
+		if _, exists := paper.CatalogForEnvironmentID(runtime.EnvironmentID); !exists {
+			return nil, fmt.Errorf("%s contains unrecognized environmentId %q", preparedRuntimesEnvironment, runtime.EnvironmentID)
+		}
+		pin, err := operatorArtifactPinValues(preparedRuntimesEnvironment, runtime.URI, runtime.SHA256, runtime.EnvironmentID+"-prepared-runtime.tar.gz", runtime.SizeBytes)
+		if err != nil {
+			return nil, err
+		}
+		if runtime.MaximumExpandedBytes <= 0 || runtime.MaximumExpandedBytes > 1<<30 {
+			return nil, fmt.Errorf("%s maximumExpandedBytes must be between 1 and 1073741824", preparedRuntimesEnvironment)
+		}
+		if existing, exists := digests[pin.SHA256]; exists {
+			return nil, fmt.Errorf("%s environments %q and %q cannot share a prepared-runtime digest", preparedRuntimesEnvironment, existing, runtime.EnvironmentID)
+		}
+		digests[pin.SHA256] = runtime.EnvironmentID
+		byID[runtime.EnvironmentID] = runtime
+	}
+	result := make([]paper.Catalog, 0, len(baseCatalogs))
+	for _, catalog := range baseCatalogs {
+		runtime, exists := byID[catalog.EnvironmentID]
+		if !exists {
+			return nil, fmt.Errorf("%s is missing environmentId %q", preparedRuntimesEnvironment, catalog.EnvironmentID)
+		}
+		pin, err := operatorArtifactPinValues(preparedRuntimesEnvironment, runtime.URI, runtime.SHA256, catalog.EnvironmentID+"-prepared-runtime.tar.gz", runtime.SizeBytes)
+		if err != nil {
+			return nil, err
+		}
+		catalog.Probe = probe
+		catalog.PreparedRuntime = paper.ArchivePin{Artifact: pin, MaximumExpandedBytes: runtime.MaximumExpandedBytes}
+		result = append(result, catalog)
+	}
+	return result, nil
+}
+
 func operatorArtifactPin(lookup environmentLookup, prefix, filename string) (paper.ArtifactPin, error) {
 	uri, err := requiredEnvironment(lookup, prefix+"_URI")
 	if err != nil {
@@ -264,6 +360,20 @@ func operatorArtifactPin(lookup environmentLookup, prefix, filename string) (pap
 	size, err := requiredPositiveInt64(lookup, prefix+"_SIZE_BYTES")
 	if err != nil {
 		return paper.ArtifactPin{}, err
+	}
+	return paper.ArtifactPin{URI: uri, SHA256: digest, Filename: filename, SizeBytes: size}, nil
+}
+
+func operatorArtifactPinValues(name, uri, digest, filename string, size int64) (paper.ArtifactPin, error) {
+	if _, err := artifact.ParseSHA256(digest); err != nil {
+		return paper.ArtifactPin{}, fmt.Errorf("%s SHA-256 is invalid: %w", name, err)
+	}
+	parsedURI, err := url.ParseRequestURI(uri)
+	if err != nil || parsedURI.Scheme != "https" || parsedURI.Host == "" || parsedURI.User != nil || parsedURI.Fragment != "" {
+		return paper.ArtifactPin{}, fmt.Errorf("%s URI must be an HTTPS URL without credentials or a fragment", name)
+	}
+	if size <= 0 {
+		return paper.ArtifactPin{}, fmt.Errorf("%s sizeBytes must be positive", name)
 	}
 	return paper.ArtifactPin{URI: uri, SHA256: digest, Filename: filename, SizeBytes: size}, nil
 }
