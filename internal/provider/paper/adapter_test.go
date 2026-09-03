@@ -2,6 +2,7 @@ package paper
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -80,6 +81,115 @@ func TestAdaptJobAcceptsMatchingHyphenatedTargetPluginName(t *testing.T) {
 	}
 	if config.TestPlan.TargetPlugin != "Success-Fixture" {
 		t.Fatalf("test plan target plugin = %q, want %q", config.TestPlan.TargetPlugin, "Success-Fixture")
+	}
+}
+
+func TestRemoteCatalogSelectionAcceptsOnlyExactAlphaMatrix(t *testing.T) {
+	provider := &Provider{catalogs: resolvedAlphaCatalogs(t)}
+	for _, catalog := range paperCatalogValues(provider.catalogs) {
+		environment := exactRemoteEnvironment(t, catalog)
+		selected, err := provider.catalogForRemoteEnvironment(environment)
+		if err != nil {
+			t.Errorf("catalogForRemoteEnvironment(%q) error = %v", catalog.EnvironmentID, err)
+			continue
+		}
+		if selected.EnvironmentID != catalog.EnvironmentID {
+			t.Errorf("catalogForRemoteEnvironment(%q) selected %q", catalog.EnvironmentID, selected.EnvironmentID)
+		}
+	}
+
+	alpha := provider.catalogs[AlphaEnvironmentID]
+	tests := map[string]func(*runnerv1.ResolvedEnvironment){
+		"provider": func(value *runnerv1.ResolvedEnvironment) {
+			value.Provider = runnerv1.ServerProvider_SERVER_PROVIDER_UNSPECIFIED
+		},
+		"game version":      func(value *runnerv1.ResolvedEnvironment) { value.GameVersion = "1.21.7" },
+		"server version":    func(value *runnerv1.ResolvedEnvironment) { value.ServerVersion = "1.21.7" },
+		"build":             func(value *runnerv1.ResolvedEnvironment) { value.ServerBuild++ },
+		"Java distribution": func(value *runnerv1.ResolvedEnvironment) { value.JavaDistribution = "openjdk" },
+		"Java version":      func(value *runnerv1.ResolvedEnvironment) { value.JavaVersion = "21.0.8+8" },
+		"operating system": func(value *runnerv1.ResolvedEnvironment) {
+			value.OperatingSystem = runnerv1.OperatingSystem_OPERATING_SYSTEM_UNSPECIFIED
+		},
+		"architecture": func(value *runnerv1.ResolvedEnvironment) {
+			value.Architecture = runnerv1.Architecture_ARCHITECTURE_ARM64
+		},
+		"server binary":         func(value *runnerv1.ResolvedEnvironment) { value.ServerBinary = protoDigest([]byte("other Paper")) },
+		"missing server binary": func(value *runnerv1.ResolvedEnvironment) { value.ServerBinary = nil },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			environment := exactRemoteEnvironment(t, alpha)
+			mutate(environment)
+			if _, err := provider.catalogForRemoteEnvironment(environment); err == nil {
+				t.Fatal("catalogForRemoteEnvironment() error = nil")
+			}
+		})
+	}
+}
+
+func TestAdaptJobMaterializesSelectedAlphaEnvironmentID(t *testing.T) {
+	provider, server, payloads := validationTestProvider(t)
+	provider.catalogs = resolvedAlphaCatalogs(t)
+	for _, catalog := range paperCatalogValues(provider.catalogs) {
+		specification := validRemoteSpecification(t, server.URL, payloads)
+		specification.Environment = exactRemoteEnvironment(t, catalog)
+		job, err := provider.AdaptJob(specification)
+		if err != nil {
+			t.Errorf("AdaptJob(%q) error = %v", catalog.EnvironmentID, err)
+			continue
+		}
+		var configuration configuration
+		if err := json.Unmarshal(job.Environment, &configuration); err != nil {
+			t.Fatal(err)
+		}
+		if configuration.EnvironmentID != catalog.EnvironmentID {
+			t.Errorf("AdaptJob(%q) environmentId = %q", catalog.EnvironmentID, configuration.EnvironmentID)
+		}
+	}
+}
+
+func resolvedAlphaCatalogs(t *testing.T) map[string]resolvedCatalog {
+	t.Helper()
+	result := make(map[string]resolvedCatalog)
+	for index, catalog := range AlphaCatalogs() {
+		catalog.Probe.URI = "https://artifacts.example.com/probe.jar"
+		catalog.PreparedRuntime = ArchivePin{Artifact: ArtifactPin{
+			URI: "https://artifacts.example.com/runtime-" + catalog.EnvironmentID + ".tar.gz", SHA256: strings.Repeat(string(rune('a'+index)), 64), Filename: "runtime-" + catalog.EnvironmentID + ".tar.gz", SizeBytes: int64(index + 1),
+		}, MaximumExpandedBytes: int64(index + 1)}
+		resolved, err := validateCatalog(catalog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[resolved.EnvironmentID] = resolved
+	}
+	return result
+}
+
+func paperCatalogValues(catalogs map[string]resolvedCatalog) []resolvedCatalog {
+	result := make([]resolvedCatalog, 0, len(catalogs))
+	for _, environmentID := range []string{Paper1206EnvironmentID, Paper1214EnvironmentID, AlphaEnvironmentID} {
+		result = append(result, catalogs[environmentID])
+	}
+	return result
+}
+
+func exactRemoteEnvironment(t *testing.T, catalog resolvedCatalog) *runnerv1.ResolvedEnvironment {
+	t.Helper()
+	digest, err := hex.DecodeString(catalog.Paper.Artifact.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &runnerv1.ResolvedEnvironment{
+		Provider:         runnerv1.ServerProvider_SERVER_PROVIDER_PAPER,
+		GameVersion:      catalog.Paper.GameVersion,
+		ServerVersion:    catalog.Paper.GameVersion,
+		ServerBuild:      catalog.Paper.Build,
+		JavaDistribution: catalog.Java.Distribution,
+		JavaVersion:      catalog.Java.Version,
+		OperatingSystem:  runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX,
+		Architecture:     runnerv1.Architecture_ARCHITECTURE_AMD64,
+		ServerBinary:     &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest},
 	}
 }
 
@@ -274,8 +384,9 @@ func validRemoteSpecification(t *testing.T, baseURL string, payloads map[string]
 			Dependencies:  []*runnerv1.DependencyDigest{{DependencyId: "dependencyfixture", Filename: "dependency.jar", Digest: dependencyDigest}},
 		},
 		Environment: &runnerv1.ResolvedEnvironment{
-			Provider: runnerv1.ServerProvider_SERVER_PROVIDER_PAPER, GameVersion: "1.21.8", ServerBuild: 60,
+			Provider: runnerv1.ServerProvider_SERVER_PROVIDER_PAPER, GameVersion: "1.21.8", ServerVersion: "1.21.8", ServerBuild: 60,
 			JavaDistribution: "eclipse-temurin", JavaVersion: "21.0.8+9", OperatingSystem: runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX, Architecture: runnerv1.Architecture_ARCHITECTURE_AMD64,
+			ServerBinary: protoDigest(payloads["/paper"]),
 		},
 		EffectivePolicy: &runnerv1.EffectivePolicy{
 			Sandbox:                 runnerv1.SandboxKind_SANDBOX_KIND_GVISOR,

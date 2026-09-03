@@ -111,16 +111,33 @@ func TestPreparedRuntimeArchiveRequiresCompletePaperclipOutput(t *testing.T) {
 	}
 }
 
+func TestPreparedRuntimeArchiveRequiresSelectedVersionOutput(t *testing.T) {
+	root := preparedRuntimeFixtureForVersion(t, "1.20.6")
+	if _, err := WritePreparedRuntimeArchiveForVersion(context.Background(), root, &bytes.Buffer{}, "1.20.6"); err != nil {
+		t.Fatalf("WritePreparedRuntimeArchiveForVersion(1.20.6) error = %v", err)
+	}
+	if _, err := WritePreparedRuntimeArchiveForVersion(context.Background(), root, &bytes.Buffer{}, "1.21.4"); err == nil {
+		t.Fatal("1.20.6 Paperclip output was accepted as a 1.21.4 runtime")
+	}
+	if _, err := WritePreparedRuntimeArchiveForVersion(context.Background(), root, &bytes.Buffer{}, "../1.20.6"); err == nil {
+		t.Fatal("invalid game version was accepted")
+	}
+}
+
 func preparedRuntimeFixture(t *testing.T) string {
+	return preparedRuntimeFixtureForVersion(t, "1.21.8")
+}
+
+func preparedRuntimeFixtureForVersion(t *testing.T, gameVersion string) string {
 	t.Helper()
 	root := t.TempDir()
 	files := map[string]string{
-		alphaMojangServerPath:           "mojang",
-		"libraries/example/library.jar": "library",
-		alphaPatchedPaperPath:           "patched",
-		"plugins/untrusted.jar":         "must not be archived",
-		"paper.jar":                     "must not be archived",
-		"provenance-test-plan.json":     "must not be archived",
+		"cache/mojang_" + gameVersion + ".jar":                       "mojang",
+		"libraries/example/library.jar":                              "library",
+		"versions/" + gameVersion + "/paper-" + gameVersion + ".jar": "patched",
+		"plugins/untrusted.jar":                                      "must not be archived",
+		"paper.jar":                                                  "must not be archived",
+		"provenance-test-plan.json":                                  "must not be archived",
 	}
 	for _, name := range preparedRuntimeRoots {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {

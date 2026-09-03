@@ -46,6 +46,7 @@ type Config struct {
 	Workspaces              *workspace.Manager
 	Sandbox                 execution.IsolatedWorkloadProvider
 	Catalog                 Catalog
+	Catalogs                []Catalog
 	HTTPClient              *http.Client
 	ArtifactHosts           []string
 	MaximumArtifactBytes    int64
@@ -60,7 +61,7 @@ type Config struct {
 
 type Provider struct {
 	config         Config
-	catalog        resolvedCatalog
+	catalogs       map[string]resolvedCatalog
 	inputPolicy    sourcePolicy
 	pinPolicy      sourcePolicy
 	sourceResolver addressResolver
@@ -75,6 +76,10 @@ type resolvedCatalog struct {
 	javaDigest    artifact.Digest
 	probeDigest   artifact.Digest
 	runtimeDigest artifact.Digest
+}
+
+func catalogRemoteIdentity(catalog Catalog) string {
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s", catalog.Paper.GameVersion, catalog.Paper.Build, catalog.Java.Distribution, catalog.Java.Version, catalog.Java.OS, catalog.Java.Architecture)
 }
 
 func New(config Config) (*Provider, error) {
@@ -102,18 +107,39 @@ func New(config Config) (*Provider, error) {
 	if config.MaximumPreparationBytes > 64<<30 || config.MaximumArtifactBytes > config.MaximumPreparationBytes || config.MaximumDependencyBytes > config.MaximumPreparationBytes {
 		return nil, errors.New("create Paper provider: preparation limits exceed the supported aggregate boundary")
 	}
-	if config.Catalog.EnvironmentID == "" {
-		config.Catalog = AlphaCatalog()
+	if config.Catalog.EnvironmentID != "" && len(config.Catalogs) != 0 {
+		return nil, errors.New("create Paper provider: Catalog and Catalogs cannot both be configured")
 	}
-	resolved, err := validateCatalog(config.Catalog)
-	if err != nil {
-		return nil, fmt.Errorf("create Paper provider: %w", err)
-	}
-	for _, pin := range []ArtifactPin{resolved.Paper.Artifact, resolved.Java.Artifact, resolved.Probe, resolved.PreparedRuntime.Artifact} {
-		if pin.SizeBytes > config.MaximumArtifactBytes {
-			return nil, fmt.Errorf("create Paper provider: pinned artifact %q exceeds the per-artifact limit", pin.Filename)
+	configuredCatalogs := config.Catalogs
+	if len(configuredCatalogs) == 0 {
+		if config.Catalog.EnvironmentID == "" {
+			config.Catalog = AlphaCatalog()
 		}
+		configuredCatalogs = []Catalog{config.Catalog}
 	}
+	resolvedCatalogs := make(map[string]resolvedCatalog, len(configuredCatalogs))
+	remoteIdentities := make(map[string]string, len(configuredCatalogs))
+	for _, configured := range configuredCatalogs {
+		resolved, err := validateCatalog(configured)
+		if err != nil {
+			return nil, fmt.Errorf("create Paper provider: %w", err)
+		}
+		if _, exists := resolvedCatalogs[resolved.EnvironmentID]; exists {
+			return nil, fmt.Errorf("create Paper provider: duplicate catalog environmentId %q", resolved.EnvironmentID)
+		}
+		remoteIdentity := catalogRemoteIdentity(resolved.Catalog)
+		if existing, exists := remoteIdentities[remoteIdentity]; exists {
+			return nil, fmt.Errorf("create Paper provider: catalogs %q and %q have the same resolved environment", existing, resolved.EnvironmentID)
+		}
+		remoteIdentities[remoteIdentity] = resolved.EnvironmentID
+		for _, pin := range []ArtifactPin{resolved.Paper.Artifact, resolved.Java.Artifact, resolved.Probe, resolved.PreparedRuntime.Artifact} {
+			if pin.SizeBytes > config.MaximumArtifactBytes {
+				return nil, fmt.Errorf("create Paper provider: pinned artifact %q exceeds the per-artifact limit", pin.Filename)
+			}
+		}
+		resolvedCatalogs[resolved.EnvironmentID] = resolved
+	}
+	var err error
 	inputPolicy := config.inputPolicy
 	if inputPolicy == nil {
 		inputPolicy, err = newHTTPSAllowlist(config.ArtifactHosts)
@@ -123,12 +149,13 @@ func New(config Config) (*Provider, error) {
 	}
 	pinPolicy := config.pinPolicy
 	if pinPolicy == nil {
-		pinPolicy, err = newPinnedSourcePolicy(config.Catalog)
+		pinPolicy, err = newPinnedSourcePolicies(configuredCatalogs)
 		if err != nil {
 			return nil, fmt.Errorf("create Paper provider: pinned source policy: %w", err)
 		}
 	}
-	return &Provider{config: config, catalog: resolved, inputPolicy: inputPolicy, pinPolicy: pinPolicy, sourceResolver: config.sourceResolver, sourceDialer: config.sourceDialer}, nil
+	config.Catalogs = append([]Catalog(nil), configuredCatalogs...)
+	return &Provider{config: config, catalogs: resolvedCatalogs, inputPolicy: inputPolicy, pinPolicy: pinPolicy, sourceResolver: config.sourceResolver, sourceDialer: config.sourceDialer}, nil
 }
 
 func (*Provider) Name() string {
@@ -218,7 +245,11 @@ func (p *Provider) Resolve(ctx context.Context, request execution.Request) (exec
 		}
 		return nil, invalidEnvironment(fmt.Errorf("decode trailing environment data: %w", err))
 	}
-	resolved, err := resolveConfiguration(config, p.catalog, p.inputPolicy, preparationLimits{
+	catalog, exists := p.catalogs[config.EnvironmentID]
+	if !exists {
+		return nil, invalidEnvironment(errors.New("environmentId does not match a configured Paper catalog entry"))
+	}
+	resolved, err := resolveConfiguration(config, catalog, p.inputPolicy, preparationLimits{
 		maximumArtifactBytes:    p.config.MaximumArtifactBytes,
 		maximumDependencyBytes:  p.config.MaximumDependencyBytes,
 		maximumPreparationBytes: p.config.MaximumPreparationBytes,
@@ -226,7 +257,7 @@ func (p *Provider) Resolve(ctx context.Context, request execution.Request) (exec
 	if err != nil {
 		return nil, invalidEnvironment(err)
 	}
-	return &environment{provider: p, request: request, config: resolved}, nil
+	return &environment{provider: p, catalog: catalog, request: request, config: resolved}, nil
 }
 
 func invalidEnvironment(err error) error {
@@ -366,12 +397,13 @@ func validatePreparationBudget(config resolvedConfiguration, catalog resolvedCat
 
 type environment struct {
 	provider *Provider
+	catalog  resolvedCatalog
 	request  execution.Request
 	config   resolvedConfiguration
 }
 
 func (e *environment) Identity() string {
-	return fmt.Sprintf("paper/%s/build-%d/paper-sha256:%s/%s/%s/java-sha256:%s/probe/%s/source-commit:%s/probe-sha256:%s/runtime-sha256:%s/delegate:%s", e.provider.catalog.Paper.GameVersion, e.provider.catalog.Paper.Build, e.provider.catalog.paperDigest, e.provider.catalog.Java.Distribution, e.provider.catalog.Java.Version, e.provider.catalog.javaDigest, e.provider.catalog.ProbeVersion, e.provider.catalog.ProbeSourceCommit, e.provider.catalog.probeDigest, e.provider.catalog.runtimeDigest, e.provider.config.Sandbox.Identity())
+	return fmt.Sprintf("paper/%s/build-%d/paper-sha256:%s/%s/%s/java-sha256:%s/probe/%s/source-commit:%s/probe-sha256:%s/runtime-sha256:%s/delegate:%s", e.catalog.Paper.GameVersion, e.catalog.Paper.Build, e.catalog.paperDigest, e.catalog.Java.Distribution, e.catalog.Java.Version, e.catalog.javaDigest, e.catalog.ProbeVersion, e.catalog.ProbeSourceCommit, e.catalog.probeDigest, e.catalog.runtimeDigest, e.provider.config.Sandbox.Identity())
 }
 
 func (e *environment) ResourceClass() execution.ResourceClass {
@@ -428,19 +460,19 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 }
 
 func (e *environment) acquire(ctx context.Context) (acquiredArtifacts, error) {
-	paperEntry, err := e.acquirePin(ctx, e.provider.config.PaperCache, e.provider.catalog.Paper.Artifact, e.provider.catalog.paperDigest)
+	paperEntry, err := e.acquirePin(ctx, e.provider.config.PaperCache, e.catalog.Paper.Artifact, e.catalog.paperDigest)
 	if err != nil {
 		return acquiredArtifacts{}, fmt.Errorf("acquire Paper server: %w", err)
 	}
-	javaEntry, err := e.acquirePin(ctx, e.provider.config.JavaCache, e.provider.catalog.Java.Artifact, e.provider.catalog.javaDigest)
+	javaEntry, err := e.acquirePin(ctx, e.provider.config.JavaCache, e.catalog.Java.Artifact, e.catalog.javaDigest)
 	if err != nil {
 		return acquiredArtifacts{}, fmt.Errorf("acquire Java runtime: %w", err)
 	}
-	probeEntry, err := e.acquirePin(ctx, e.provider.config.ProbeCache, e.provider.catalog.Probe, e.provider.catalog.probeDigest)
+	probeEntry, err := e.acquirePin(ctx, e.provider.config.ProbeCache, e.catalog.Probe, e.catalog.probeDigest)
 	if err != nil {
 		return acquiredArtifacts{}, fmt.Errorf("acquire trusted Paper probe: %w", err)
 	}
-	runtimeEntry, err := e.acquirePin(ctx, e.provider.config.RuntimeCache, e.provider.catalog.PreparedRuntime.Artifact, e.provider.catalog.runtimeDigest)
+	runtimeEntry, err := e.acquirePin(ctx, e.provider.config.RuntimeCache, e.catalog.PreparedRuntime.Artifact, e.catalog.runtimeDigest)
 	if err != nil {
 		return acquiredArtifacts{}, fmt.Errorf("acquire prepared Paper runtime: %w", err)
 	}
@@ -505,17 +537,17 @@ func (p *Provider) source(uri string, sizeBytes int64, policy sourcePolicy) (art
 }
 
 func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.Workspace, acquired acquiredArtifacts) (execution.IsolatedWorkload, error) {
-	javaRoot, err := jobWorkspace.ExtractTarGzipBounded(ctx, "runtime", acquired.java, e.provider.catalog.Java.MaximumExpandedBytes)
+	javaRoot, err := jobWorkspace.ExtractTarGzipBounded(ctx, "runtime", acquired.java, e.catalog.Java.MaximumExpandedBytes)
 	if err != nil {
 		return execution.IsolatedWorkload{}, fmt.Errorf("extract Java runtime: %w", err)
 	}
-	javaHome := filepath.Join(javaRoot, filepath.FromSlash(e.provider.catalog.Java.ArchiveRoot))
+	javaHome := filepath.Join(javaRoot, filepath.FromSlash(e.catalog.Java.ArchiveRoot))
 	javaExecutable := filepath.Join(javaHome, "bin", "java")
 	info, err := os.Stat(javaExecutable)
 	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		return execution.IsolatedWorkload{}, errors.New("extracted Java runtime does not contain an executable bin/java")
 	}
-	if _, err := jobWorkspace.ExtractTarGzipBounded(ctx, "server", acquired.preparedRuntime, e.provider.catalog.PreparedRuntime.MaximumExpandedBytes); err != nil {
+	if _, err := jobWorkspace.ExtractTarGzipBounded(ctx, "server", acquired.preparedRuntime, e.catalog.PreparedRuntime.MaximumExpandedBytes); err != nil {
 		return execution.IsolatedWorkload{}, fmt.Errorf("extract prepared Paper runtime: %w", err)
 	}
 	if _, err := jobWorkspace.Materialize(ctx, "server/paper.jar", acquired.paper); err != nil {

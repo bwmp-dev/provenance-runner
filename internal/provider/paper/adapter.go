@@ -74,7 +74,8 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if !pluginname.ValidPaper(targetPluginName) {
 		return localjob.Job{}, errors.New("adapt Paper job: target_plugin_name is missing or invalid")
 	}
-	if err := p.validateRemoteEnvironment(specification.GetEnvironment()); err != nil {
+	catalog, err := p.catalogForRemoteEnvironment(specification.GetEnvironment())
+	if err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
 
@@ -200,7 +201,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 
 	configuration := configuration{
 		ArtifactKind:  ArtifactKindMinecraftPlugin,
-		EnvironmentID: p.catalog.EnvironmentID,
+		EnvironmentID: catalog.EnvironmentID,
 		Target:        target,
 		Dependencies:  dependencies,
 		TestPlan: testPlan{
@@ -222,7 +223,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if len(encodedPlan) > maximumProbePlanBytes {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: materialized test plan exceeds %d bytes", maximumProbePlanBytes)
 	}
-	if _, err := resolveConfiguration(configuration, p.catalog, p.inputPolicy, limits); err != nil {
+	if _, err := resolveConfiguration(configuration, catalog, p.inputPolicy, limits); err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
 	environment, err := json.Marshal(configuration)
@@ -249,23 +250,34 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	return job, nil
 }
 
-func (p *Provider) validateRemoteEnvironment(environment *runnerv1.ResolvedEnvironment) error {
+func (p *Provider) catalogForRemoteEnvironment(environment *runnerv1.ResolvedEnvironment) (resolvedCatalog, error) {
 	if environment == nil {
-		return errors.New("environment is required")
+		return resolvedCatalog{}, errors.New("environment is required")
 	}
 	if environment.GetProvider() != runnerv1.ServerProvider_SERVER_PROVIDER_PAPER {
-		return errors.New("environment.provider must be Paper")
-	}
-	if environment.GetGameVersion() != p.catalog.Paper.GameVersion || environment.GetServerBuild() != p.catalog.Paper.Build {
-		return errors.New("environment does not match the pinned Paper game version and build")
-	}
-	if environment.GetJavaDistribution() != p.catalog.Java.Distribution || environment.GetJavaVersion() != p.catalog.Java.Version {
-		return errors.New("environment does not match the pinned Java distribution and version")
+		return resolvedCatalog{}, errors.New("environment.provider must be Paper")
 	}
 	if environment.GetOperatingSystem() != runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX || environment.GetArchitecture() != runnerv1.Architecture_ARCHITECTURE_AMD64 {
-		return errors.New("environment must target Linux amd64")
+		return resolvedCatalog{}, errors.New("environment must target Linux amd64")
 	}
-	return nil
+	if environment.GetServerVersion() != environment.GetGameVersion() {
+		return resolvedCatalog{}, errors.New("environment.server_version must exactly match environment.game_version")
+	}
+	for _, catalog := range p.catalogs {
+		if environment.GetGameVersion() != catalog.Paper.GameVersion || environment.GetServerBuild() != catalog.Paper.Build ||
+			environment.GetJavaDistribution() != catalog.Java.Distribution || environment.GetJavaVersion() != catalog.Java.Version {
+			continue
+		}
+		serverDigest, err := sha256Digest("environment.server_binary", environment.GetServerBinary())
+		if err != nil {
+			return resolvedCatalog{}, err
+		}
+		if serverDigest != catalog.Paper.Artifact.SHA256 {
+			return resolvedCatalog{}, errors.New("environment.server_binary does not match the pinned Paper artifact")
+		}
+		return catalog, nil
+	}
+	return resolvedCatalog{}, errors.New("environment does not match a configured Paper catalog entry")
 }
 
 func decodeNormalizedConfiguration(data []byte) (normalizedConfiguration, []consoleCommandTest, error) {

@@ -34,6 +34,13 @@ func TestRunRefusesToOverwriteOutputBeforePreparation(t *testing.T) {
 	}
 }
 
+func TestRunRejectsUnknownEnvironmentBeforeReadingPaper(t *testing.T) {
+	err := run(context.Background(), []string{"-environment", "paper-latest", "-paper", "missing.jar", "-output", filepath.Join(t.TempDir(), "runtime.tar.gz")}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "immutable alpha catalog") {
+		t.Fatalf("run() error = %v", err)
+	}
+}
+
 func TestRunExecutesOnlyStagedVerifiedPaper(t *testing.T) {
 	root := t.TempDir()
 	input := filepath.Join(root, "paper.jar")

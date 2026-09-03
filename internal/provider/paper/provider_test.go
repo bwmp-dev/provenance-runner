@@ -541,6 +541,87 @@ func TestAlphaCatalogPinsStablePaperAndTemurin(t *testing.T) {
 	}
 }
 
+func TestAlphaCatalogsPinExactAcceptanceMatrix(t *testing.T) {
+	want := []struct {
+		environmentID string
+		gameVersion   string
+		build         uint32
+		sha256        string
+		sizeBytes     int64
+	}{
+		{Paper1206EnvironmentID, "1.20.6", 151, "4b011f5adb5f6c72007686a223174fce82f31aeb4b34faf4652abc840b47e640", 45_826_876},
+		{Paper1214EnvironmentID, "1.21.4", 232, "5ee4f542f628a14c644410b08c94ea42e772ef4d29fe92973636b6813d4eaffc", 51_437_498},
+		{AlphaEnvironmentID, "1.21.8", 60, "8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e", 52_811_717},
+	}
+	catalogs := AlphaCatalogs()
+	if len(catalogs) != len(want) {
+		t.Fatalf("AlphaCatalogs() length = %d, want %d", len(catalogs), len(want))
+	}
+	for index, expected := range want {
+		catalog := catalogs[index]
+		if catalog.EnvironmentID != expected.environmentID || catalog.Paper.GameVersion != expected.gameVersion || catalog.Paper.Build != expected.build || catalog.Paper.Artifact.SHA256 != expected.sha256 || catalog.Paper.Artifact.SizeBytes != expected.sizeBytes {
+			t.Errorf("AlphaCatalogs()[%d] = %#v, want %#v", index, catalog, expected)
+		}
+		if catalog.Java != AlphaCatalog().Java || catalog.ProbeVersion != AlphaProbeVersion || catalog.ProbeSourceCommit != AlphaProbeSourceCommit || catalog.Probe != AlphaCatalog().Probe {
+			t.Errorf("AlphaCatalogs()[%d] did not preserve shared Java/probe pins", index)
+		}
+		if catalog.PreparedRuntime != (ArchivePin{}) {
+			t.Errorf("AlphaCatalogs()[%d] invented a prepared-runtime pin: %#v", index, catalog.PreparedRuntime)
+		}
+		if selected, exists := CatalogForEnvironmentID(expected.environmentID); !exists || selected != catalog {
+			t.Errorf("CatalogForEnvironmentID(%q) = %#v, %v", expected.environmentID, selected, exists)
+		}
+	}
+	if _, exists := CatalogForEnvironmentID("paper-latest"); exists {
+		t.Error("CatalogForEnvironmentID(paper-latest) unexpectedly succeeded")
+	}
+}
+
+func TestResolveBindsEachEnvironmentToItsPreparedRuntime(t *testing.T) {
+	payloads := map[string][]byte{
+		"/paper":                  []byte("Paper"),
+		"/java":                   testRuntimeArchive(t, "test-jre"),
+		"/target":                 []byte("target"),
+		"/probe":                  []byte("probe"),
+		"/prepared-runtime":       testPreparedRuntimeArchiveWithContent(t, "first"),
+		"/prepared-runtime-other": testPreparedRuntimeArchiveWithContent(t, "second"),
+	}
+	server, requests := artifactServer(t, payloads)
+	provider := testProvider(t, server, &fakeSandboxProvider{prepared: &fakePrepared{}}, payloads, "test-jre")
+	first := provider.catalogs["test-paper-environment"]
+	secondCatalog := first.Catalog
+	secondCatalog.EnvironmentID = "test-paper-environment-two"
+	secondCatalog.Paper.GameVersion = "1.21.4"
+	secondCatalog.Paper.Build = 232
+	secondCatalog.PreparedRuntime = ArchivePin{Artifact: ArtifactPin{
+		URI: server.URL + "/prepared-runtime-other", SHA256: artifact.SHA256(payloads["/prepared-runtime-other"]).String(), Filename: "prepared-runtime-two.tar.gz", SizeBytes: int64(len(payloads["/prepared-runtime-other"])),
+	}, MaximumExpandedBytes: 1 << 20}
+	second, err := validateCatalog(secondCatalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.catalogs[second.EnvironmentID] = second
+
+	config := validConfiguration(server.URL, payloads)
+	config.EnvironmentID = second.EnvironmentID
+	config.TestPlan.RequiredDependencies = nil
+	resolvedEnvironment := resolveTestEnvironment(t, provider, "second-runtime", config)
+	if got := resolvedEnvironment.(*environment).catalog.runtimeDigest.String(); got != second.runtimeDigest.String() {
+		t.Fatalf("resolved runtime digest = %s, want %s", got, second.runtimeDigest)
+	}
+	prepared, err := resolvedEnvironment.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	counts := requests.snapshot()
+	if counts["/prepared-runtime-other"] != 1 || counts["/prepared-runtime"] != 0 {
+		t.Fatalf("prepared runtime requests = %#v; selected environment crossed runtime pins", counts)
+	}
+}
+
 func TestToolkitSafeArtifactsPreparation(t *testing.T) {
 	targetPath := os.Getenv("PROVENANCE_SAFE_FIXTURE_JAR")
 	probePath := os.Getenv("PROVENANCE_PAPER_PROBE_JAR")
@@ -763,12 +844,16 @@ func testRuntimeArchive(t *testing.T, root string) []byte {
 }
 
 func testPreparedRuntimeArchive(t *testing.T) []byte {
+	return testPreparedRuntimeArchiveWithContent(t, "prepared Paper runtime")
+}
+
+func testPreparedRuntimeArchiveWithContent(t *testing.T, value string) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
 	gzipWriter.Header.ModTime = unixEpoch
 	tarWriter := tar.NewWriter(gzipWriter)
-	content := []byte("prepared Paper runtime")
+	content := []byte(value)
 	if err := tarWriter.WriteHeader(&tar.Header{Name: "cache/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
 		t.Fatal(err)
 	}
