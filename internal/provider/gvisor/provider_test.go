@@ -612,8 +612,8 @@ func TestResolveRejectsUnsafeStructuredEventFile(t *testing.T) {
 }
 
 func TestPIDReserveFormulaFailsClosed(t *testing.T) {
-	if got, err := outerPIDLimit(48); err != nil || got != 64 {
-		t.Fatalf("outerPIDLimit(48) = %d, %v; want 64, nil", got, err)
+	if got, err := outerPIDLimit(48); err != nil || got != 65 {
+		t.Fatalf("outerPIDLimit(48) = %d, %v; want 65, nil", got, err)
 	}
 	for _, test := range []struct {
 		guest   int64

@@ -9,10 +9,11 @@ import (
 )
 
 // gVisor uses host tasks for the Sentry, gofer, and teardown/control paths.
-// Keep those tasks outside the customer-visible guest process quota. Sixteen
-// tasks covers the observed Paper shutdown burst while remaining a small,
-// fixed, auditable expansion of the outer containment boundary.
-const gvisorRuntimePIDReserve int64 = 16
+// Keep those tasks outside the customer-visible guest process quota. Seventeen
+// tasks covers the observed Paper shutdown burst plus the trusted host-FIFO
+// mediation task while remaining a small, fixed, auditable expansion of the
+// outer containment boundary.
+const gvisorRuntimePIDReserve int64 = 17
 const maximumGVisorRuntimePIDReserve int64 = 64
 
 type ociSpec struct {

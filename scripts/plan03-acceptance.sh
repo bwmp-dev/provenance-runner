@@ -47,13 +47,13 @@ pid_resource_contract='
   [.[] | pid_denials_or_null | select(. != null)] as $denial_observations |
   [.[] | sandbox_pids_or_null | select(. != null)] as $sandbox_observations |
   length > 0 and
-  all(.[]; .pidsMax=="64") and
+  all(.[]; .pidsMax=="65") and
   all(.[]; ((.pidsEvents | type)=="string" and (.pidsEvents | test("^max [0-9]+;$")))) and
   all(.[]; (.sandboxPIDsCurrent==null or (.sandboxPIDsCurrent | type)=="number")) and
-  ([.[].pidsCurrent | tonumber] | max) <= 60 and
+  ([.[].pidsCurrent | tonumber] | max) <= 61 and
   ($sandbox_observations | length) > 0 and
   ($sandbox_observations | max) == 48 and
-  all(.[]; (.pidsCurrent | tonumber) >= 0 and (.pidsCurrent | tonumber) <= 60 and ((sandbox_pids_or_null==null) or sandbox_pids_or_null<=48)) and
+  all(.[]; (.pidsCurrent | tonumber) >= 0 and (.pidsCurrent | tonumber) <= 61 and ((sandbox_pids_or_null==null) or sandbox_pids_or_null<=48)) and
   ($denial_observations | length) == length and
   all($denial_observations[]; . == 0) and
   all(.[]; memory_event("max")==0 and memory_event("oom")==0 and memory_event("oom_kill")==0)
@@ -247,7 +247,7 @@ run_contract_tests() {
       --arg pidsCurrent "$pids_current" \
       --argjson pidsEvents "$pids_events" \
       --argjson sandboxPIDsCurrent "$sandbox_pids" \
-      '{timestampNanoseconds:$timestamp,pidsMax:"64",pidsCurrent:$pidsCurrent,pidsEvents:("max "+($pidsEvents|tostring)+";"),memoryEvents:"low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0;",sandboxPIDsCurrent:$sandboxPIDsCurrent}' \
+      '{timestampNanoseconds:$timestamp,pidsMax:"65",pidsCurrent:$pidsCurrent,pidsEvents:("max "+($pidsEvents|tostring)+";"),memoryEvents:"low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0;",sandboxPIDsCurrent:$sandboxPIDsCurrent}' \
       >> "$good_samples"
   done
   jq -es "$pid_resource_contract" "$good_samples" >/dev/null
@@ -284,7 +284,7 @@ run_contract_tests() {
     printf 'PID resource contract did not cleanly reject entirely unavailable denial evidence (status=%s)\n' "$rejection_status" >&2
     return 1
   fi
-  if jq -c '.pidsCurrent="61"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+  if jq -c '.pidsCurrent="62"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
     printf 'PID resource contract accepted fewer than four outer reserve slots\n' >&2
     return 1
   fi
@@ -645,13 +645,13 @@ validate_result() {
   local complete_log="$PLAN03_EVIDENCE_ROOT/results/$case_identity.log.gz"
   local stderr_file="$PLAN03_EVIDENCE_ROOT/results/$case_identity.stderr"
   local decompressed="$PLAN03_WORK_ROOT/$case_identity.complete.log"
-  local expected_memory=2147483648 expected_pids=128 expected_outer_pids=144
+  local expected_memory=2147483648 expected_pids=128 expected_outer_pids=145
   if [[ "$fixture" == memory-bomb ]]; then
     expected_memory=1610612736
   elif [[ "$fixture" == fork-pid-bomb ]]; then
     expected_memory=4294967296
     expected_pids=48
-    expected_outer_pids=64
+    expected_outer_pids=65
   fi
   if [[ "$fixture" == fork-pid-bomb ]]; then
     jq -e "$pid_result_contract" "$result" >/dev/null
