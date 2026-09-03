@@ -51,12 +51,16 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 					Archive:           archive,
 				},
 				EvidenceUsage: EvidenceUsage{
-					RawBytesObserved:     6,
-					CapturedBytes:        6,
-					StructuredEventCount: 1,
-					StructuredEventBytes: 14,
-					CompleteLogBytes:     6,
-					CompressedLogBytes:   10,
+					RawBytesObserved:          6,
+					CapturedBytes:             6,
+					StructuredEventCount:      1,
+					StructuredEventBytes:      14,
+					CompleteLogBytes:          6,
+					CompressedLogBytes:        10,
+					EventChannelMaximumBytes:  1024,
+					EventChannelBufferedBytes: 15,
+					EventChannelResourceBytes: 0,
+					EventChannelRemoved:       true,
 				},
 			}, nil
 		},
@@ -98,7 +102,7 @@ func TestExecutorSuccessfulLifecycle(t *testing.T) {
 	if result.CompleteLog == nil || result.CompleteLog.Archive != archive {
 		t.Fatalf("complete log = %#v", result.CompleteLog)
 	}
-	if result.Usage.StructuredEventCount != 1 || result.Usage.StructuredEventBytes != 14 || result.Usage.CompressedLogBytes != 10 {
+	if result.Usage.StructuredEventCount != 1 || result.Usage.StructuredEventBytes != 14 || result.Usage.CompressedLogBytes != 10 || result.Usage.EventChannelMaximumBytes != 1024 || result.Usage.EventChannelBufferedBytes != 15 || result.Usage.EventChannelResourceBytes != 0 || result.Usage.EventChannelOverflowed || !result.Usage.EventChannelRemoved {
 		t.Fatalf("usage = %#v", result.Usage)
 	}
 	if result.Cleanup == nil || !result.Cleanup.Attempted || !result.Cleanup.Succeeded {

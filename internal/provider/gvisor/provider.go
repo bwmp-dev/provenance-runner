@@ -25,15 +25,17 @@ import (
 )
 
 const (
-	ProviderName                  = "gvisor"
-	containerUID           uint32 = 65532
-	containerGID           uint32 = 65532
-	cleanupTimeout                = 10 * time.Second
-	metadataName                  = ".provenance-gvisor.json"
-	attemptName                   = ".provenance-run-attempted"
-	metadataVersion               = 1
-	metadataPhasePrepared         = "prepared"
-	metadataPhaseAttempted        = "run_attempted"
+	ProviderName                       = "gvisor"
+	containerUID                uint32 = 65532
+	containerGID                uint32 = 65532
+	cleanupTimeout                     = 10 * time.Second
+	metadataName                       = ".provenance-gvisor.json"
+	attemptName                        = ".provenance-run-attempted"
+	metadataVersion                    = 1
+	metadataPhasePrepared              = "prepared"
+	metadataPhaseAttempted             = "run_attempted"
+	structuredEventFileName            = "structured-events.ndjson"
+	maximumStructuredEventBytes        = int64(4 << 20)
 )
 
 // runsc reserves 128 for failures in the runtime command itself.
@@ -257,16 +259,54 @@ func (p *Provider) resolveWorkload(ctx context.Context, request execution.Reques
 	if err != nil {
 		return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_mounts_invalid", err)
 	}
+	structuredEventFile, err := validateStructuredEventFile(workload.StructuredEventFile)
+	if err != nil {
+		return nil, invalidEnvironment(err)
+	}
+	if structuredEventFile != nil && (workload.StructuredOutputPrefix != "" || workload.StructuredOutputKind != "") {
+		return nil, invalidEnvironment(errors.New("structured event FIFO cannot be combined with the legacy stdout event channel"))
+	}
+	structuredEventPrefix := ""
+	if structuredEventFile != nil {
+		structuredEventPrefix, err = randomStructuredEventPrefix()
+		if err != nil {
+			return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_event_channel_unavailable", err)
+		}
+		evidenceConfig.StructuredLinePrefix = structuredEventPrefix
+		evidenceConfig.StructuredLineKind = structuredEventFile.Kind
+		if err := evidence.ValidateConfig(evidenceConfig); err != nil {
+			return nil, invalidEnvironment(err)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return &environment{
-		provider:       p,
-		config:         config,
-		inputs:         inputs,
-		mounts:         mounts,
-		evidenceConfig: evidenceConfig,
+		provider:              p,
+		config:                config,
+		inputs:                inputs,
+		mounts:                mounts,
+		evidenceConfig:        evidenceConfig,
+		structuredEventFile:   structuredEventFile,
+		structuredEventPrefix: structuredEventPrefix,
 	}, nil
+}
+
+func validateStructuredEventFile(requested *execution.StructuredEventFile) (*execution.StructuredEventFile, error) {
+	if requested == nil {
+		return nil, nil
+	}
+	if requested.Destination != "/tmp/provenance-probe-events.ndjson" {
+		return nil, errors.New("structured event FIFO destination must be /tmp/provenance-probe-events.ndjson")
+	}
+	if requested.MaximumBytes < 1 || requested.MaximumBytes > maximumStructuredEventBytes {
+		return nil, fmt.Errorf("structured event FIFO maximumBytes must be between 1 and %d", maximumStructuredEventBytes)
+	}
+	if err := evidence.ValidateConfig(evidence.Config{StructuredLinePrefix: "VALIDATE:", StructuredLineKind: requested.Kind}); err != nil {
+		return nil, fmt.Errorf("structured event FIFO kind: %w", err)
+	}
+	validated := *requested
+	return &validated, nil
 }
 
 func cloneMap(values map[string]string) map[string]string {
@@ -278,6 +318,14 @@ func cloneMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func randomStructuredEventPrefix() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("create structured event channel identity: %w", err)
+	}
+	return "PROVENANCE_HOST_EVENT_" + hex.EncodeToString(value) + ":", nil
 }
 
 func invalidEnvironment(err error) error {
@@ -401,11 +449,13 @@ func (p *Provider) validateMountSource(inputs, path string) (string, error) {
 }
 
 type environment struct {
-	provider       *Provider
-	config         configuration
-	inputs         string
-	mounts         []execution.ReadOnlyMount
-	evidenceConfig evidence.Config
+	provider              *Provider
+	config                configuration
+	inputs                string
+	mounts                []execution.ReadOnlyMount
+	evidenceConfig        evidence.Config
+	structuredEventFile   *execution.StructuredEventFile
+	structuredEventPrefix string
 }
 
 func (e *environment) Identity() string {
@@ -442,15 +492,29 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		return nil, errors.Join(fmt.Errorf("create gVisor bundle: %w", err), collector.Close())
 	}
 	prepared := &preparedEnvironment{
-		provider:    e.provider,
-		containerID: containerID,
-		bundle:      bundle,
-		evidence:    collector,
+		provider:              e.provider,
+		containerID:           containerID,
+		bundle:                bundle,
+		evidence:              collector,
+		structuredEventFile:   e.structuredEventFile,
+		structuredEventPrefix: e.structuredEventPrefix,
 	}
 	if err := prepared.writeMetadata(); err != nil {
 		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
-	spec := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID, e.mounts)
+	var eventMount *structuredEventMount
+	if e.structuredEventFile != nil {
+		prepared.structuredEventPath = filepath.Join(bundle, structuredEventFileName)
+		prepared.structuredEventChannel, err = createStructuredEventChannel(prepared.structuredEventPath, e.structuredEventFile.MaximumBytes)
+		if err != nil {
+			return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
+		}
+		eventMount = &structuredEventMount{source: prepared.structuredEventPath, destination: e.structuredEventFile.Destination}
+	}
+	spec, err := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID, e.mounts, eventMount)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("build OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
+	}
 	if err := writeJSONFile(filepath.Join(bundle, "config.json"), spec); err != nil {
 		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
@@ -461,15 +525,25 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 }
 
 type preparedEnvironment struct {
-	mu          sync.Mutex
-	usageMu     sync.Mutex
-	provider    *Provider
-	containerID string
-	bundle      string
-	evidence    *evidence.Collector
-	cleaned     bool
-	observer    execution.ExecutionObserver
-	usage       execution.ResourceUsage
+	mu                        sync.Mutex
+	usageMu                   sync.Mutex
+	provider                  *Provider
+	containerID               string
+	bundle                    string
+	evidence                  *evidence.Collector
+	cleaned                   bool
+	observer                  execution.ExecutionObserver
+	usage                     execution.ResourceUsage
+	structuredEventPath       string
+	structuredEventChannel    *structuredEventChannel
+	structuredEventFile       *execution.StructuredEventFile
+	structuredEventPrefix     string
+	structuredEventErr        string
+	eventChannelMaximumBytes  int64
+	eventChannelBufferedBytes int64
+	eventChannelResourceBytes int64
+	eventChannelOverflowed    bool
+	eventChannelRemoved       bool
 }
 
 func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
@@ -482,6 +556,20 @@ func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserve
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
+	if e.structuredEventChannel != nil {
+		if err := e.structuredEventChannel.start(); err != nil {
+			e.collectStructuredEvents()
+			return execution.ExecutionOutcome{}, execution.NewClassifiedError(
+				execution.ClassificationInfrastructureFailure,
+				"gvisor_event_channel_unavailable",
+				err,
+			)
+		}
+		// The live host reader is finalized after every execution path, including
+		// cancellation and non-zero sandbox teardown. Execution failures retain
+		// precedence over any independently recorded channel failure.
+		defer e.collectStructuredEvents()
+	}
 	stdout, err := e.evidence.RawWriter(evidence.StreamStdout)
 	if err != nil {
 		return execution.ExecutionOutcome{}, err
@@ -517,6 +605,18 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 		}
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, ctx.Err()
 	}
+	outerPIDDenials, denialEvidenceAvailable := readOuterPIDDenials(e.containerID)
+	return classifyRunResult(result, outerPIDDenials, denialEvidenceAvailable)
+}
+
+func classifyRunResult(result commandResult, outerPIDDenials uint64, denialEvidenceAvailable bool) (execution.ExecutionOutcome, error) {
+	if denialEvidenceAvailable && outerPIDDenials > 0 {
+		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, execution.NewClassifiedError(
+			execution.ClassificationInfrastructureFailure,
+			"gvisor_runtime_pid_reserve_exhausted",
+			fmt.Errorf("outer gVisor cgroup rejected %d process creations", outerPIDDenials),
+		)
+	}
 	if result.Err == nil {
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, nil
 	}
@@ -534,6 +634,9 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		return execution.CollectedOutput{}, err
 	}
 	bundle, err := e.evidence.Snapshot(ctx)
+	if e.structuredEventErr != "" && bundle.StructuredEventError == "" {
+		bundle.StructuredEventError = e.structuredEventErr
+	}
 	e.usageMu.Lock()
 	usage := e.usage
 	e.usageMu.Unlock()
@@ -560,21 +663,74 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			Archive:           bundle.CompleteLog.Archive,
 		},
 		EvidenceUsage: execution.EvidenceUsage{
-			RawBytesObserved:     bundle.Usage.RawBytesObserved,
-			CapturedBytes:        bundle.Usage.CapturedBytes,
-			StructuredEventCount: bundle.Usage.StructuredEventCount,
-			StructuredEventBytes: bundle.Usage.StructuredEventBytes,
-			CompleteLogBytes:     bundle.Usage.CompleteLogBytes,
-			CompressedLogBytes:   bundle.Usage.CompressedLogBytes,
-			TruncatedLineCount:   bundle.Usage.TruncatedLineCount,
-			OutputTruncated:      bundle.Usage.OutputTruncated,
-			CompleteLogState:     bundle.Usage.CompleteLogState,
-			CompleteLogTruncated: bundle.Usage.CompleteLogTruncated,
-			EventsTruncated:      bundle.Usage.EventsTruncated,
+			RawBytesObserved:          bundle.Usage.RawBytesObserved,
+			CapturedBytes:             bundle.Usage.CapturedBytes,
+			StructuredEventCount:      bundle.Usage.StructuredEventCount,
+			StructuredEventBytes:      bundle.Usage.StructuredEventBytes,
+			CompleteLogBytes:          bundle.Usage.CompleteLogBytes,
+			CompressedLogBytes:        bundle.Usage.CompressedLogBytes,
+			TruncatedLineCount:        bundle.Usage.TruncatedLineCount,
+			OutputTruncated:           bundle.Usage.OutputTruncated,
+			CompleteLogState:          bundle.Usage.CompleteLogState,
+			CompleteLogTruncated:      bundle.Usage.CompleteLogTruncated,
+			EventsTruncated:           bundle.Usage.EventsTruncated,
+			EventChannelMaximumBytes:  e.eventChannelMaximumBytes,
+			EventChannelBufferedBytes: e.eventChannelBufferedBytes,
+			EventChannelResourceBytes: e.eventChannelResourceBytes,
+			EventChannelOverflowed:    e.eventChannelOverflowed,
+			EventChannelRemoved:       e.eventChannelRemoved,
 		},
 		StructuredEventError: bundle.StructuredEventError,
 		ResourceUsage:        &usage,
 	}, err
+}
+
+func (e *preparedEnvironment) collectStructuredEvents() {
+	if e.structuredEventChannel == nil {
+		return
+	}
+	snapshot := e.structuredEventChannel.finish()
+	defer clear(snapshot.content)
+	e.eventChannelMaximumBytes = snapshot.maximum
+	e.eventChannelBufferedBytes = snapshot.bufferedBytes
+	e.eventChannelResourceBytes = snapshot.resourceBytes
+	e.eventChannelOverflowed = snapshot.overflowed
+	e.eventChannelRemoved = snapshot.removed
+	if snapshot.readErr != nil {
+		e.structuredEventErr = snapshot.readErr.Error()
+		return
+	}
+	if snapshot.overflowed {
+		e.structuredEventErr = fmt.Sprintf("structured event FIFO exceeds %d bytes", snapshot.maximum)
+		return
+	}
+	content := snapshot.content
+	if len(content) == 0 {
+		return
+	}
+	if content[len(content)-1] != '\n' {
+		e.structuredEventErr = "structured event FIFO has an unterminated final record"
+		return
+	}
+	writer, err := e.evidence.RawWriter(evidence.StreamStdout)
+	if err != nil {
+		e.structuredEventErr = err.Error()
+		return
+	}
+	for _, line := range bytes.Split(content[:len(content)-1], []byte{'\n'}) {
+		if len(line) == 0 {
+			e.structuredEventErr = "structured event FIFO contains an empty record"
+			return
+		}
+		record := make([]byte, 0, len(e.structuredEventPrefix)+len(line)+1)
+		record = append(record, e.structuredEventPrefix...)
+		record = append(record, line...)
+		record = append(record, '\n')
+		if _, err := writer.Write(record); err != nil {
+			e.structuredEventErr = err.Error()
+			return
+		}
+	}
 }
 
 func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
@@ -585,6 +741,9 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if e.structuredEventChannel != nil {
+		e.structuredEventChannel.finish()
 	}
 	attempted, err := runWasAttempted(e.bundle)
 	if err != nil {
@@ -631,7 +790,9 @@ func (p *Provider) runArguments(arguments ...string) []string {
 		"--file-access=exclusive",
 		"--file-access-mounts=exclusive",
 		"--host-uds=none",
-		"--host-fifo=none",
+		// The only host FIFO reachable from the sandbox is the provider-created,
+		// write-only evidence mount. Trusted inputs contain regular files only.
+		"--host-fifo=open",
 		"--character-device-policy=emulated-only",
 		"--net-raw=false",
 		"--allow-suid=false",

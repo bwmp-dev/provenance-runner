@@ -205,6 +205,11 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 	result.Usage.CompleteLogState = output.EvidenceUsage.CompleteLogState
 	result.Usage.CompleteLogTruncated = output.EvidenceUsage.CompleteLogTruncated
 	result.Usage.StructuredEventsTruncated = output.EvidenceUsage.EventsTruncated
+	result.Usage.EventChannelMaximumBytes = output.EvidenceUsage.EventChannelMaximumBytes
+	result.Usage.EventChannelBufferedBytes = output.EvidenceUsage.EventChannelBufferedBytes
+	result.Usage.EventChannelResourceBytes = output.EvidenceUsage.EventChannelResourceBytes
+	result.Usage.EventChannelOverflowed = output.EvidenceUsage.EventChannelOverflowed
+	result.Usage.EventChannelRemoved = output.EvidenceUsage.EventChannelRemoved
 	if output.ResourceUsage != nil {
 		usage := *output.ResourceUsage
 		result.Usage.MeasuredResources = &usage
