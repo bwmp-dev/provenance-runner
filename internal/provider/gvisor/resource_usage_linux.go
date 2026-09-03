@@ -79,6 +79,37 @@ func readCgroupUsage(containerID string) (execution.ResourceUsage, bool) {
 	return execution.ResourceUsage{}, false
 }
 
+func readOuterPIDDenials(containerID string) (uint64, bool) {
+	relative, ok := currentUnifiedCgroup()
+	if !ok {
+		return 0, false
+	}
+	for _, root := range cgroupUsageRoots(relative, containerID) {
+		if !strings.HasPrefix(root, "/sys/fs/cgroup/") {
+			continue
+		}
+		if denials, found := readPIDMaxEvents(filepath.Join(root, "pids.events")); found {
+			return denials, true
+		}
+	}
+	return 0, false
+}
+
+func readPIDMaxEvents(path string) (uint64, bool) {
+	content, ok := readSmallFile(path)
+	if !ok {
+		return 0, false
+	}
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "max" {
+			value, err := strconv.ParseUint(fields[1], 10, 64)
+			return value, err == nil
+		}
+	}
+	return 0, false
+}
+
 func cgroupUsageRoots(relative, containerID string) []string {
 	return []string{
 		filepath.Clean(filepath.Join("/sys/fs/cgroup", relative, "provenance", containerID)),

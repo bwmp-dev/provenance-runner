@@ -208,6 +208,7 @@ jobs:
           sudo --preserve-env=PLAN03_ASSET_ROOT,PLAN03_CGROUP_PARENT,PLAN03_INSTALL_ROOT,PLAN03_RUNNER,PLAN03_RUNSC_BINARY,PLAN03_TOOLKIT_SHA,PROVENANCE_ROOTFS,PROVENANCE_ROOTFS_IDENTITY,PROVENANCE_RUNSC_PATH \
             env \
             PLAN03_EVIDENCE_ROOT="${evidence}" \
+            PLAN03_TOOLKIT_SOURCE_ROOT="${GITHUB_WORKSPACE}/_plan03-fixtures-source" \
             PLAN03_WORK_ROOT="${work}" \
             "${GITHUB_WORKSPACE}/scripts/plan03-acceptance.sh"
 

@@ -71,6 +71,21 @@ type IsolatedWorkload struct {
 	RedactSecrets          []string
 	StructuredOutputPrefix string
 	StructuredOutputKind   string
+	StructuredEventFile    *StructuredEventFile
+}
+
+// StructuredEventFile requests a live, host-drained NDJSON FIFO created by the
+// sandbox provider before execution. MaximumBytes bounds the host buffer at
+// write time; excess input makes the channel fail closed while the provider
+// continues draining and discarding it. Only a trusted product provider can
+// select the destination and event kind. The FIFO preserves already-drained
+// events across abnormal sandbox teardown, but it does not authenticate which
+// process inside the sandbox wrote them; consumers must validate the complete
+// protocol.
+type StructuredEventFile struct {
+	Destination  string
+	Kind         string
+	MaximumBytes int64
 }
 
 type ReadOnlyMount struct {
@@ -178,17 +193,22 @@ type CompleteLog struct {
 }
 
 type EvidenceUsage struct {
-	RawBytesObserved     int64
-	CapturedBytes        int64
-	StructuredEventCount int64
-	StructuredEventBytes int64
-	CompleteLogBytes     int64
-	CompressedLogBytes   int64
-	TruncatedLineCount   int64
-	OutputTruncated      bool
-	CompleteLogState     string
-	CompleteLogTruncated bool
-	EventsTruncated      bool
+	RawBytesObserved          int64
+	CapturedBytes             int64
+	StructuredEventCount      int64
+	StructuredEventBytes      int64
+	CompleteLogBytes          int64
+	CompressedLogBytes        int64
+	TruncatedLineCount        int64
+	OutputTruncated           bool
+	CompleteLogState          string
+	CompleteLogTruncated      bool
+	EventsTruncated           bool
+	EventChannelMaximumBytes  int64
+	EventChannelBufferedBytes int64
+	EventChannelResourceBytes int64
+	EventChannelOverflowed    bool
+	EventChannelRemoved       bool
 }
 
 type Failure struct {
@@ -281,6 +301,11 @@ type UsageResult struct {
 	CompleteLogState          string         `json:"completeLogState,omitempty"`
 	CompleteLogTruncated      bool           `json:"completeLogTruncated,omitempty"`
 	StructuredEventsTruncated bool           `json:"structuredEventsTruncated,omitempty"`
+	EventChannelMaximumBytes  int64          `json:"eventChannelMaximumBytes"`
+	EventChannelBufferedBytes int64          `json:"eventChannelBufferedBytes"`
+	EventChannelResourceBytes int64          `json:"eventChannelResourceBytes"`
+	EventChannelOverflowed    bool           `json:"eventChannelOverflowed"`
+	EventChannelRemoved       bool           `json:"eventChannelRemoved"`
 	MeasuredResources         *ResourceUsage `json:"measuredResources,omitempty"`
 }
 

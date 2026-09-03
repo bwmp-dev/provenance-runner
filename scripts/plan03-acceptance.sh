@@ -47,46 +47,27 @@ pid_resource_contract='
   [.[] | pid_denials_or_null | select(. != null)] as $denial_observations |
   [.[] | sandbox_pids_or_null | select(. != null)] as $sandbox_observations |
   length > 0 and
-  all(.[]; .pidsMax=="48") and
-  all(.[]; ((.pidsEvents // "")=="" or ((.pidsEvents | type)=="string" and (.pidsEvents | test("^max [0-9]+;$"))))) and
+  all(.[]; .pidsMax=="65") and
+  all(.[]; ((.pidsEvents | type)=="string" and (.pidsEvents | test("^max [0-9]+;$")))) and
   all(.[]; (.sandboxPIDsCurrent==null or (.sandboxPIDsCurrent | type)=="number")) and
-  ([.[].pidsCurrent | tonumber] | max) == 48 and
+  ([.[].pidsCurrent | tonumber] | max) <= 61 and
   ($sandbox_observations | length) > 0 and
-  ($sandbox_observations | max) > 0 and
-  ($sandbox_observations | max) <= 48 and
-  all(.[]; (.pidsCurrent | tonumber) >= 0 and (.pidsCurrent | tonumber) <= 48 and ((sandbox_pids_or_null==null) or sandbox_pids_or_null<=48)) and
-  ($denial_observations | length) > 0 and
-  all($denial_observations[]; . >= 0 and . <= 1) and
+  ($sandbox_observations | max) == 48 and
+  all(.[]; (.pidsCurrent | tonumber) >= 0 and (.pidsCurrent | tonumber) <= 61 and ((sandbox_pids_or_null==null) or sandbox_pids_or_null<=48)) and
+  ($denial_observations | length) == length and
+  all($denial_observations[]; . == 0) and
   all(.[]; memory_event("max")==0 and memory_event("oom")==0 and memory_event("oom_kill")==0)
 '
 pid_saturation_contract='
-  def at_ceiling: ((.pidsCurrent | tonumber) == 48);
-  def pid_denials_or_null:
-    (.pidsEvents // "") as $events |
-    if ($events | test("^max [0-9]+;$")) then
-      ($events | capture("^max (?<count>[0-9]+);$").count | tonumber)
-    else
-      null
-    end;
   def sandbox_pids_or_null:
     if (.sandboxPIDsCurrent | type)=="number" then .sandboxPIDsCurrent else null end;
-  def ceiling_prefix:
-    reduce .[] as $sample
-      ({active:true,samples:[]};
-       if .active and ($sample | at_ceiling) then
-         .samples += [$sample]
-       else
-         .active = false
-       end) |
-    .samples;
   def guest_release_runs($peak):
     reduce .[] as $sample
       ({runs:[],current:[]};
        ($sample | sandbox_pids_or_null) as $guest_pids |
-       ($sample | pid_denials_or_null) as $denials |
-       if ($guest_pids==null or $denials==null) then
+       if ($guest_pids==null) then
          .
-       elif ($guest_pids > 2 and $guest_pids < $peak and $denials==1) then
+       elif ($guest_pids > 2 and $guest_pids < $peak) then
          .current += [$sample]
        elif (.current | length) > 0 then
          .runs += [.current] | .current = []
@@ -94,33 +75,16 @@ pid_saturation_contract='
          .
        end) |
     if (.current | length) > 0 then .runs + [.current] else .runs end;
-  [to_entries[] |
-    (.value | pid_denials_or_null) as $denials |
-    select($denials != null) |
-    {sampleIndex:.key,denials:$denials}] as $denial_observations |
-  [range(1; $denial_observations | length) |
-    select($denial_observations[.].denials != $denial_observations[.-1].denials)] as $transitions |
-  ($transitions[0] // -1) as $transition_observation_index |
-  ($denial_observations[$transition_observation_index].sampleIndex // -1) as $transition_index |
-  .[$transition_index:] as $post_denial |
-  ($post_denial | ceiling_prefix) as $host_ceiling |
-  ([$post_denial[] | sandbox_pids_or_null | select(. != null)] | max // null) as $guest_peak |
-  ([range(0; $post_denial | length) |
-    select(($post_denial[.] | sandbox_pids_or_null)==$guest_peak)] | first // -1) as $guest_peak_index |
-  ($post_denial[$guest_peak_index+1:] | guest_release_runs($guest_peak)) as $guest_release_runs |
+  . as $samples |
+  ([$samples[] | sandbox_pids_or_null | select(. != null)] | max // null) as $guest_peak |
+  ([range(0; $samples | length) |
+    select(($samples[.] | sandbox_pids_or_null)==$guest_peak)] | first // -1) as $guest_peak_index |
+  ($samples[$guest_peak_index+1:] | guest_release_runs($guest_peak)) as $guest_release_runs |
   [$guest_release_runs[] |
     select((length >= 20) and
            ((.[-1].timestampNanoseconds - .[0].timestampNanoseconds) >= 1000000000))] as $qualifying_guest_releases |
-  ($transitions | length)==1 and
-  $transition_index >= 1 and
-  $transition_observation_index >= 1 and
-  all($denial_observations[0:$transition_observation_index][]; .denials==0) and
-  $denial_observations[$transition_observation_index].denials==1 and
-  all($denial_observations[$transition_observation_index:][]; .denials==1) and
-  (.[ $transition_index ] | at_ceiling) and
-  ($host_ceiling | length) >= 20 and
-  (($host_ceiling[-1].timestampNanoseconds - $host_ceiling[0].timestampNanoseconds) >= 1000000000) and
-  ($guest_peak != null and $guest_peak > 2) and
+  ($guest_peak_index >= 1) and
+  ($guest_peak == 48) and
   ($qualifying_guest_releases | length) > 0
 '
 pid_repetitions_contract='
@@ -130,6 +94,50 @@ pid_repetitions_contract='
   ($runs|map(.repetition)|sort)==[1,2,3] and
   all($runs[]; .accepted==true and .cliExit==0 and .classification=="passed" and .phase=="completed" and .failureCode==null and .completeLog.state=="complete" and .completeLog.truncated==false)
 '
+disk_fill_result_contract='
+  def first_sequence(condition):
+    first(.structuredEvents[] | select(condition) | .sequence);
+  first_sequence(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceDiskFill" and .payload.loaded==true and .payload.enabled==true) as $target_enabled |
+  first_sequence(.kind=="SERVER_LOADED") as $server_loaded |
+  first_sequence(.kind=="STABILIZATION_STARTED" and .payload.durationMillis==2000) as $stabilization_started |
+  first_sequence(.kind=="TARGET_REQUIREMENT" and .payload.role=="TARGET" and .payload.name=="ProvenanceDiskFill" and .payload.configured==true and .payload.loaded==true and .payload.enabled==true) as $target_requirement |
+  first_sequence(.kind=="STABILIZATION_COMPLETED" and .payload.durationMillis==2000) as $stabilization_completed |
+  first_sequence(.kind=="SERVER_READY" and .payload.requirementsSatisfied==true) as $server_ready |
+  first_sequence(.kind=="CLEAN_SHUTDOWN_REQUESTED") as $shutdown_requested |
+  first_sequence(.kind=="SERVER_STOPPED" and .payload.shutdownRequested==true) as $server_stopped |
+  (.structuredEvents | length)==21 and
+  ([.structuredEvents[].sequence] == [range(1;22)]) and
+  ([.structuredEvents[].kind] == ["METADATA_INSPECTION","METADATA_INSPECTION","TEST_PLAN","PLUGIN_STATE","PLUGIN_STATE","PROBE_LOADED","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","SERVER_LOADED","PLUGIN_STATE","PLUGIN_STATE","STABILIZATION_STARTED","TARGET_REQUIREMENT","STABILIZATION_COMPLETED","SERVER_READY","CLEAN_SHUTDOWN_REQUESTED","PLUGIN_STATE","PLUGIN_STATE","SERVER_STOPPED"]) and
+  .classification=="passed" and
+  .phase=="completed" and
+  (.failure // null)==null and
+  .execution.exitCode==0 and
+  .completeLog.state=="complete" and
+  .completeLog.truncated==false and
+  .cleanup.succeeded==true and
+  ($target_enabled < $server_loaded) and
+  ($server_loaded < $stabilization_started) and
+  ($stabilization_started < $target_requirement) and
+  ($target_requirement < $stabilization_completed) and
+  ($stabilization_completed < $server_ready) and
+  ($server_ready < $shutdown_requested) and
+  ($shutdown_requested < $server_stopped)
+'
+disk_fill_marker='No space left on device'
+event_channel_usage_contract='
+  .usage.eventChannelMaximumBytes==4194304 and
+  .usage.eventChannelBufferedBytes>=0 and
+  .usage.eventChannelBufferedBytes<=.usage.eventChannelMaximumBytes and
+  .usage.eventChannelResourceBytes==0 and
+  .usage.eventChannelOverflowed==false and
+  .usage.eventChannelRemoved==true
+'
+
+validate_disk_fill_contract() {
+  local result=$1 complete_log=$2
+  jq -e "$disk_fill_result_contract" "$result" >/dev/null &&
+    grep -Fq "$disk_fill_marker" "$complete_log"
+}
 
 fixture_repetitions() {
   [[ $1 == fork-pid-bomb ]] && printf '3\n' || printf '1\n'
@@ -147,12 +155,14 @@ run_contract_tests() {
       return 2
     }
   done
-  local test_root good_result good_samples good_summary rejection_status
+  local test_root good_result good_samples good_summary good_disk_result good_disk_log rejection_status
   test_root=$(mktemp -d "${TMPDIR:-/tmp}/plan03-contract-test.XXXXXX")
   trap 'rm --recursive --force -- "$test_root"' RETURN
   good_result="$test_root/good-result.json"
   good_samples="$test_root/good-samples.ndjson"
   good_summary="$test_root/good-summary.ndjson"
+  good_disk_result="$test_root/good-disk-result.json"
+  good_disk_log="$test_root/good-disk.log"
 
   jq -n '{classification:"passed",phase:"completed",failure:null,execution:{exitCode:0},completeLog:{state:"complete",truncated:false},cleanup:{succeeded:true},structuredEvents:[
     {sequence:1,kind:"METADATA_INSPECTION",payload:{}},
@@ -191,31 +201,63 @@ run_contract_tests() {
     return 1
   fi
 
+  jq '
+    .structuredEvents[9].payload.name="ProvenanceDiskFill" |
+    .structuredEvents[13].payload.durationMillis=2000 |
+    .structuredEvents[14].payload.name="ProvenanceDiskFill" |
+    .structuredEvents[15].payload.durationMillis=2000
+  ' "$good_result" > "$good_disk_result"
+  printf 'fixture observed: %s\n' "$disk_fill_marker" > "$good_disk_log"
+  validate_disk_fill_contract "$good_disk_result" "$good_disk_log"
+  if jq '.classification="timed_out" | .phase="execution" | .failure={code:"job_timeout"} | .execution.exitCode=-1' "$good_disk_result" > "$test_root/wrong-disk-result.json" &&
+    validate_disk_fill_contract "$test_root/wrong-disk-result.json" "$good_disk_log"; then
+    printf 'disk-fill contract accepted the old timeout classification\n' >&2
+    return 1
+  fi
+  printf 'fixture completed without saturation evidence\n' > "$test_root/missing-disk-marker.log"
+  if validate_disk_fill_contract "$good_disk_result" "$test_root/missing-disk-marker.log"; then
+    printf 'disk-fill contract accepted success without ENOSPC evidence\n' >&2
+    return 1
+  fi
+
+  jq -n '{usage:{eventChannelMaximumBytes:4194304,eventChannelBufferedBytes:4096,eventChannelResourceBytes:0,eventChannelOverflowed:false,eventChannelRemoved:true}}' > "$test_root/good-event-channel.json"
+  jq -e "$event_channel_usage_contract" "$test_root/good-event-channel.json" >/dev/null
+  for mutation in \
+    '.usage.eventChannelBufferedBytes=4194305' \
+    '.usage.eventChannelResourceBytes=1' \
+    '.usage.eventChannelOverflowed=true' \
+    '.usage.eventChannelRemoved=false' \
+    '.usage.eventChannelMaximumBytes=68719476736'; do
+    if jq "$mutation" "$test_root/good-event-channel.json" | jq -e "$event_channel_usage_contract" >/dev/null; then
+      printf 'event-channel usage contract accepted mutation: %s\n' "$mutation" >&2
+      return 1
+    fi
+  done
+
   for sample in $(seq 0 49); do
     pids_current=45
     sandbox_pids=39
     pids_events=0
     if [[ "$sample" -ge 5 ]]; then
-      pids_current=48
-      pids_events=1
+      pids_current=50
     fi
-    [[ "$sample" -eq 5 ]] && sandbox_pids=40
+    [[ "$sample" -eq 5 ]] && sandbox_pids=48
     jq -cn \
       --argjson timestamp "$((sample * 50000000))" \
       --arg pidsCurrent "$pids_current" \
       --argjson pidsEvents "$pids_events" \
       --argjson sandboxPIDsCurrent "$sandbox_pids" \
-      '{timestampNanoseconds:$timestamp,pidsMax:"48",pidsCurrent:$pidsCurrent,pidsEvents:("max "+($pidsEvents|tostring)+";"),memoryEvents:"low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0;",sandboxPIDsCurrent:$sandboxPIDsCurrent}' \
+      '{timestampNanoseconds:$timestamp,pidsMax:"65",pidsCurrent:$pidsCurrent,pidsEvents:("max "+($pidsEvents|tostring)+";"),memoryEvents:"low 0;high 0;max 0;oom 0;oom_kill 0;oom_group_kill 0;",sandboxPIDsCurrent:$sandboxPIDsCurrent}' \
       >> "$good_samples"
   done
   jq -es "$pid_resource_contract" "$good_samples" >/dev/null
   jq -es "$pid_saturation_contract" "$good_samples" >/dev/null
-  if ! jq -c 'if .timestampNanoseconds==500000000 then .sandboxPIDsCurrent=null elif .timestampNanoseconds==2450000000 then .sandboxPIDsCurrent=null | .pidsEvents="" else . end' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
-    printf 'PID resource contract rejected bounded interspersed/terminal unavailable observations\n' >&2
+  if ! jq -c 'if .timestampNanoseconds==500000000 or .timestampNanoseconds==2450000000 then .sandboxPIDsCurrent=null else . end' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+    printf 'PID resource contract rejected bounded unavailable guest observations\n' >&2
     return 1
   fi
-  if ! jq -c 'if .timestampNanoseconds==500000000 then .sandboxPIDsCurrent=null elif .timestampNanoseconds==2450000000 then .sandboxPIDsCurrent=null | .pidsEvents="" else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract rejected bounded interspersed/terminal unavailable observations\n' >&2
+  if ! jq -c 'if .timestampNanoseconds==500000000 or .timestampNanoseconds==2450000000 then .sandboxPIDsCurrent=null else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+    printf 'PID saturation contract rejected bounded unavailable guest observations\n' >&2
     return 1
   fi
   set +e
@@ -242,20 +284,20 @@ run_contract_tests() {
     printf 'PID resource contract did not cleanly reject entirely unavailable denial evidence (status=%s)\n' "$rejection_status" >&2
     return 1
   fi
-  set +e
-  jq -c '.pidsEvents=""' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null 2>&1
-  rejection_status=$?
-  set -e
-  if [[ "$rejection_status" -ne 1 ]]; then
-    printf 'PID saturation contract did not cleanly reject entirely unavailable denial evidence (status=%s)\n' "$rejection_status" >&2
+  if jq -c '.pidsCurrent="62"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+    printf 'PID resource contract accepted fewer than four outer reserve slots\n' >&2
     return 1
   fi
-  if jq -c '.pidsCurrent="49"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
-    printf 'PID resource contract accepted an observation above 48\n' >&2
+  if jq -c '.pidsMax="48"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+    printf 'PID resource contract accepted an outer limit without the runtime reserve\n' >&2
     return 1
   fi
-  if jq -c '.pidsEvents="max 1;"' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract accepted no pre-attack zero-denial sample\n' >&2
+  if jq -c '.pidsEvents="max 1;"' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
+    printf 'PID resource contract accepted an outer-controller denial\n' >&2
+    return 1
+  fi
+  if jq -c 'if .sandboxPIDsCurrent==48 then .sandboxPIDsCurrent=47 else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+    printf 'PID saturation contract accepted a guest that did not reach its exact quota\n' >&2
     return 1
   fi
   for memory_failure in \
@@ -267,35 +309,11 @@ run_contract_tests() {
       return 1
     fi
   done
-  if jq -c '.pidsEvents="max 0;"' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract accepted a missing denial transition\n' >&2
-    return 1
-  fi
-  if jq -c 'if .timestampNanoseconds==1500000000 then .pidsEvents="max 0;" else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract accepted multiple denial transitions\n' >&2
-    return 1
-  fi
-  if jq -c 'if .timestampNanoseconds>=1500000000 then .pidsEvents="max 0;" else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract accepted a nonmonotonic denial transition\n' >&2
-    return 1
-  fi
-  if jq -c 'if .timestampNanoseconds==1500000000 then .pidsEvents="max 2;" else . end' "$good_samples" | jq -es "$pid_resource_contract" >/dev/null; then
-    printf 'PID resource contract accepted denial growth above one\n' >&2
-    return 1
-  fi
-  if jq -c 'if .timestampNanoseconds==250000000 then .pidsCurrent="47" else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract accepted a transition below the host ceiling\n' >&2
-    return 1
-  fi
-  if jq -c 'if .timestampNanoseconds>=1250000000 then .pidsCurrent="47" else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
-    printf 'PID saturation contract accepted a short continuous host ceiling\n' >&2
-    return 1
-  fi
-  if jq -c 'if .timestampNanoseconds>250000000 then .sandboxPIDsCurrent=40 else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+  if jq -c 'if .timestampNanoseconds>250000000 then .sandboxPIDsCurrent=48 else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
     printf 'PID saturation contract accepted missing guest release\n' >&2
     return 1
   fi
-  if jq -c 'if .timestampNanoseconds>=1300000000 then .sandboxPIDsCurrent=40 else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
+  if jq -c 'if .timestampNanoseconds>=1300000000 then .sandboxPIDsCurrent=48 else . end' "$good_samples" | jq -es "$pid_saturation_contract" >/dev/null; then
     printf 'PID saturation contract accepted a short guest release interval\n' >&2
     return 1
   fi
@@ -341,6 +359,7 @@ required_environment=(
   PLAN03_RUNNER
   PLAN03_RUNSC_BINARY
   PLAN03_TOOLKIT_SHA
+  PLAN03_TOOLKIT_SOURCE_ROOT
   PLAN03_WORK_ROOT
   PROVENANCE_ROOTFS
   PROVENANCE_ROOTFS_IDENTITY
@@ -377,9 +396,21 @@ if [[ "$job_cgroup_root" != "$PLAN03_CGROUP_PARENT/provenance" ]]; then
   printf 'refusing unexpected PLAN03_JOB_CGROUP_ROOT: %s\n' "$job_cgroup_root" >&2
   exit 2
 fi
-for path in "$PLAN03_ASSET_ROOT" "$PROVENANCE_ROOTFS"; do
+for path in "$PLAN03_ASSET_ROOT" "$PLAN03_TOOLKIT_SOURCE_ROOT" "$PROVENANCE_ROOTFS"; do
   [[ -d "$path" ]] || { printf '%s is not a directory\n' "$path" >&2; exit 2; }
 done
+
+pid_fixture_source="$PLAN03_TOOLKIT_SOURCE_ROOT/packages/test-fixtures/hostile/fork-pid-bomb/src/main/java/dev/provenance/fixtures/hostile/ForkPidBombPlugin.java"
+[[ $(git -c safe.directory="$PLAN03_TOOLKIT_SOURCE_ROOT" -C "$PLAN03_TOOLKIT_SOURCE_ROOT" rev-parse HEAD) == "$PLAN03_TOOLKIT_SHA" ]] || {
+  printf 'Plan 03 toolkit source checkout does not match %s\n' "$PLAN03_TOOLKIT_SHA" >&2
+  exit 2
+}
+[[ -f "$pid_fixture_source" ]] || { printf 'missing pinned fork/PID fixture source\n' >&2; exit 2; }
+pid_fixture_source_sha=$(sha256sum "$pid_fixture_source"); pid_fixture_source_sha=${pid_fixture_source_sha%% *}
+[[ "$pid_fixture_source_sha" == 5c2ea8936a69f3d25e9b513a002e7df434d0839794721e637254a767a74649c8 ]] || {
+  printf 'pinned fork/PID fixture source contract changed: %s\n' "$pid_fixture_source_sha" >&2
+  exit 2
+}
 for path in "$PLAN03_RUNNER" "$PLAN03_RUNSC_BINARY" "$PROVENANCE_RUNSC_PATH"; do
   [[ -x "$path" ]] || { printf '%s is not executable\n' "$path" >&2; exit 2; }
 done
@@ -534,6 +565,13 @@ sample_resources() {
         continue
       fi
       if (( sample_number % 5 == 0 )); then
+        # Never carry a successful runsc reading across a later failed stats
+        # request. A null is truthful; a stale guest value can fabricate a
+        # saturation or release interval after the sandbox has disappeared.
+        sandbox_pids_current=""
+        sandbox_cpu_usage=""
+        sandbox_memory_usage=""
+        sandbox_network_interfaces='[]'
         stats_json=$("$PROVENANCE_RUNSC_PATH" --root="$PROVENANCE_GVISOR_STATE_ROOT" events --stats "$container_id" 2>/dev/null || true)
         if jq -e '.type=="stats" and (.data.pids.current|type)=="number"' >/dev/null 2>&1 <<< "$stats_json"; then
           sandbox_pids_current=$(jq -r '.data.pids.current' <<< "$stats_json")
@@ -607,12 +645,13 @@ validate_result() {
   local complete_log="$PLAN03_EVIDENCE_ROOT/results/$case_identity.log.gz"
   local stderr_file="$PLAN03_EVIDENCE_ROOT/results/$case_identity.stderr"
   local decompressed="$PLAN03_WORK_ROOT/$case_identity.complete.log"
-  local expected_memory=2147483648 expected_pids=128
+  local expected_memory=2147483648 expected_pids=128 expected_outer_pids=145
   if [[ "$fixture" == memory-bomb ]]; then
     expected_memory=1610612736
   elif [[ "$fixture" == fork-pid-bomb ]]; then
     expected_memory=4294967296
     expected_pids=48
+    expected_outer_pids=65
   fi
   if [[ "$fixture" == fork-pid-bomb ]]; then
     jq -e "$pid_result_contract" "$result" >/dev/null
@@ -633,6 +672,7 @@ validate_result() {
       end
     ) and .cleanup.succeeded==true and .usage.resourceClass.cpuMillis==1000 and .usage.resourceClass.memoryBytes==$memoryBytes and .usage.resourceClass.processCount==$pids and .usage.resourceClass.diskBytes==1073741824 and .usage.resourceClass.network=="none" and .usage.resourceClass.maximumConnections==0 and .usage.resourceClass.maximumBandwidthBytesPerSecond==0' \
     "$result" >/dev/null
+  jq -e "$event_channel_usage_contract" "$result" >/dev/null
   gzip --test "$complete_log"
   local digest compressed_bytes uncompressed_bytes
   digest=$(sha256sum "$complete_log"); digest=${digest%% *}
@@ -651,10 +691,10 @@ validate_result() {
       return 1
     fi
   done
-  jq -e --arg memory "$expected_memory" --arg pids "$expected_pids" 'select(.memoryMax==$memory and .cpuMax=="100000 100000" and .pidsMax==$pids)' "$samples" >/dev/null
+  jq -e --arg memory "$expected_memory" --arg pids "$expected_outer_pids" 'select(.memoryMax==$memory and .cpuMax=="100000 100000" and .pidsMax==$pids)' "$samples" >/dev/null
   grep -Eq 'nr_throttled [1-9][0-9]*' "$samples"
 
-  if [[ "$fixture" == enable-hang || "$fixture" == disk-fill ]]; then
+  if [[ "$fixture" == enable-hang ]]; then
     jq -e --argjson timeout "$timeout" '.usage.wallTimeMilliseconds >= $timeout' "$result" >/dev/null
   fi
   case "$fixture" in
@@ -670,7 +710,7 @@ validate_result() {
       jq -es "$pid_saturation_contract" "$samples" >/dev/null
       ;;
     disk-fill)
-      grep -Fq 'No space left on device' "$decompressed"
+      validate_disk_fill_contract "$result" "$decompressed"
       ;;
     network-scan|metadata-endpoint)
       jq -e --arg plugin "$(jq -r '.environment.testPlan.targetPlugin' "$PLAN03_EVIDENCE_ROOT/jobs/$case_identity.json")" '.structuredEvents[] | select(.kind=="PLUGIN_STATE" and .payload.name==$plugin and .payload.enabled==true)' "$result" >/dev/null
@@ -711,24 +751,13 @@ write_pid_verification() {
       def sandbox_pids_or_null:
         if (.sandboxPIDsCurrent | type)=="number" then .sandboxPIDsCurrent else null end;
       def memory_event($name): (.memoryEvents | capture("(^|;)"+$name+" (?<count>[0-9]+);").count | tonumber);
-      def at_ceiling: ((.pidsCurrent | tonumber) == 48);
-      def ceiling_prefix:
-        reduce .[] as $sample
-          ({active:true,samples:[]};
-           if .active and ($sample | at_ceiling) then
-             .samples += [$sample]
-           else
-             .active = false
-           end) |
-        .samples;
       def guest_release_runs($peak):
         reduce .[] as $sample
           ({runs:[],current:[]};
            ($sample | sandbox_pids_or_null) as $guest_pids |
-           ($sample | pid_denials_or_null) as $denials |
-           if ($guest_pids==null or $denials==null) then
+           if ($guest_pids==null) then
              .
-           elif ($guest_pids > 2 and $guest_pids < $peak and $denials==1) then
+           elif ($guest_pids > 2 and $guest_pids < $peak) then
              .current += [$sample]
            elif (.current | length) > 0 then
              .runs += [.current] | .current = []
@@ -737,23 +766,18 @@ write_pid_verification() {
            end) |
         if (.current | length) > 0 then .runs + [.current] else .runs end;
       def sequence($kind): first($result[0].structuredEvents[] | select(.kind==$kind) | .sequence);
-      [$samples | to_entries[] |
-        (.value | pid_denials_or_null) as $denials |
-        select($denials != null) |
-        {sampleIndex:.key,denials:$denials}] as $denialObservations |
-      [range(1; $denialObservations | length) |
-        select($denialObservations[.].denials != $denialObservations[.-1].denials)] as $transitions |
-      $transitions[0] as $transitionObservationIndex |
-      $denialObservations[$transitionObservationIndex].sampleIndex as $transitionIndex |
-      $samples[$transitionIndex:] as $postDenial |
-      ($postDenial | ceiling_prefix) as $hostCeiling |
-      ([$postDenial[] | sandbox_pids_or_null | select(. != null)] | max) as $guestPeak |
-      ([range(0; $postDenial | length) |
-        select(($postDenial[.] | sandbox_pids_or_null)==$guestPeak)] | first) as $guestPeakIndex |
-      ($postDenial[$guestPeakIndex+1:] | guest_release_runs($guestPeak)) as $guestReleaseRuns |
+      [$samples[] | sandbox_pids_or_null | select(. != null)] as $guestObservations |
+      ($guestObservations | max) as $guestPeak |
+      ([range(0; $samples | length) |
+        select(($samples[.] | sandbox_pids_or_null)==$guestPeak)] | first) as $guestPeakIndex |
+      ($samples[$guestPeakIndex+1:] | guest_release_runs($guestPeak)) as $guestReleaseRuns |
       ([$guestReleaseRuns[] |
         select((length >= 20) and
                ((.[-1].timestampNanoseconds - .[0].timestampNanoseconds) >= 1000000000))] | first) as $guestRelease |
+      ([$samples[].pidsCurrent | tonumber] | max) as $outerPeak |
+      ([$samples[] | pid_denials_or_null] | max) as $outerDenials |
+      ($result[0].usage.resourceClass.processCount) as $requestedGuestMaximum |
+      ($samples[0].pidsMax | tonumber) as $configuredOuterMaximum |
       {
         fixture:$fixture,
         caseIdentity:$caseIdentity,
@@ -761,7 +785,7 @@ write_pid_verification() {
         toolkitSourceSHA:$toolkitSHA,
         runnerHeadSHA:$runnerHeadSHA,
         accepted:true,
-        pids:{configuredMax:48,observedCgroupMax:([$samples[].pidsCurrent|tonumber]|max),observedSandboxMax:([$samples[]|sandbox_pids_or_null|select(.!=null)]|max),kernelMaxEvents:([$denialObservations[].denials]|max),unavailableDenialSamples:(($samples|length)-($denialObservations|length)),unavailableGuestPIDSamples:([$samples[]|select(sandbox_pids_or_null==null)]|length),noObservationAboveLimit:(all($samples[]; (.pidsCurrent|tonumber)<=48 and ((sandbox_pids_or_null==null) or sandbox_pids_or_null<=48))),preDenialZeroSamples:$transitionObservationIndex,denialTransitionCount:($transitions|length),denialTransitionTimestampNanoseconds:$samples[$transitionIndex].timestampNanoseconds,denialTransitionHostPIDsCurrent:($samples[$transitionIndex].pidsCurrent|tonumber),exactlyOneZeroToOneTransition:(($transitions|length)==1 and $transitionObservationIndex>=1 and all($denialObservations[0:$transitionObservationIndex][]; .denials==0) and all($denialObservations[$transitionObservationIndex:][]; .denials==1)),noDenialGrowthAfterTransition:(all($denialObservations[$transitionObservationIndex:][]; .denials==1)),hostCeilingSamplesFromTransition:($hostCeiling|length),sustainedHostCeilingNanoseconds:($hostCeiling[-1].timestampNanoseconds-$hostCeiling[0].timestampNanoseconds),postDenialGuestPeak:$guestPeak,postDenialGuestPeakTimestampNanoseconds:$postDenial[$guestPeakIndex].timestampNanoseconds,guestReleaseSamples:($guestRelease|length),sustainedGuestReleaseNanoseconds:($guestRelease[-1].timestampNanoseconds-$guestRelease[0].timestampNanoseconds),guestReleaseMinimum:([$guestRelease[].sandboxPIDsCurrent]|min),guestReleaseMaximum:([$guestRelease[].sandboxPIDsCurrent]|max),guestReleaseAboveTeardownFloor:(all($guestRelease[]; .sandboxPIDsCurrent>2)),guestReleaseBelowPostDenialPeak:(all($guestRelease[]; .sandboxPIDsCurrent<$guestPeak)),guestReleaseDenialsRemainOne:(all($guestRelease[]; pid_denials_or_null==1))},
+        pids:{requestedGuestMaximum:$requestedGuestMaximum,configuredOuterMaximum:$configuredOuterMaximum,configuredRuntimeReserve:($configuredOuterMaximum-$requestedGuestMaximum),requiredOuterHeadroom:4,observedOuterMaximum:$outerPeak,minimumObservedOuterHeadroom:($configuredOuterMaximum-$outerPeak),observedGuestMaximum:$guestPeak,outerControllerMaxEvents:$outerDenials,unavailableOuterDenialSamples:([$samples[]|select(pid_denials_or_null==null)]|length),unavailableGuestPIDSamples:([$samples[]|select(sandbox_pids_or_null==null)]|length),guestNeverAboveRequestedMaximum:(all($guestObservations[]; .<=$requestedGuestMaximum)),outerNeverConsumesRequiredHeadroom:(all($samples[]; (.pidsCurrent|tonumber)<=($configuredOuterMaximum-4))),outerControllerDeniedNoProcesses:($outerDenials==0),guestQuotaReached:($guestPeak==$requestedGuestMaximum),guestPressureProof:{pinnedFixtureSHA256:"b4d936c12370892047839396786b6e65b1b5ccf65c6ddae70e283b43fe3e8e16",pinnedToolkitSourceSHA:$toolkitSHA,exactGuestQuotaObserved:($guestPeak==$requestedGuestMaximum),outerControllerDeniedNoProcesses:($outerDenials==0),paperLifecycleCompleted:($result[0].classification=="passed" and $result[0].execution.exitCode==0)},guestPeakTimestampNanoseconds:$samples[$guestPeakIndex].timestampNanoseconds,guestReleaseSamples:($guestRelease|length),sustainedGuestReleaseNanoseconds:($guestRelease[-1].timestampNanoseconds-$guestRelease[0].timestampNanoseconds),guestReleaseMinimum:([$guestRelease[].sandboxPIDsCurrent]|min),guestReleaseMaximum:([$guestRelease[].sandboxPIDsCurrent]|max),guestReleaseAboveTeardownFloor:(all($guestRelease[]; .sandboxPIDsCurrent>2)),guestReleaseBelowGuestPeak:(all($guestRelease[]; .sandboxPIDsCurrent<$guestPeak))},
         memory:{maxEvents:([$samples[]|memory_event("max")]|max),oomEvents:([$samples[]|memory_event("oom")]|max),oomKillEvents:([$samples[]|memory_event("oom_kill")]|max),noMemoryPressureEvents:(all($samples[]; memory_event("max")==0 and memory_event("oom")==0 and memory_event("oom_kill")==0))},
         completeLog:{state:$result[0].completeLog.state,truncated:$result[0].completeLog.truncated,sha256:$result[0].completeLog.sha256,compressedBytes:$result[0].completeLog.compressedBytes,uncompressedBytes:$result[0].completeLog.uncompressedBytes},
         lifecycle:{eventCount:($result[0].structuredEvents|length),ordered:true,continuousSequence:([$result[0].structuredEvents[].sequence]==[range(1;22)]),trustedInventory:([$result[0].structuredEvents[].kind]==["METADATA_INSPECTION","METADATA_INSPECTION","TEST_PLAN","PLUGIN_STATE","PLUGIN_STATE","PROBE_LOADED","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","SERVER_LOADED","PLUGIN_STATE","PLUGIN_STATE","STABILIZATION_STARTED","TARGET_REQUIREMENT","STABILIZATION_COMPLETED","SERVER_READY","CLEAN_SHUTDOWN_REQUESTED","PLUGIN_STATE","PLUGIN_STATE","SERVER_STOPPED"]),targetEnabledSequence:first($result[0].structuredEvents[]|select(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.loaded==true and .payload.enabled==true)|.sequence),serverLoadedSequence:sequence("SERVER_LOADED"),stabilizationStartedSequence:sequence("STABILIZATION_STARTED"),stabilizationCompletedSequence:sequence("STABILIZATION_COMPLETED"),serverReadySequence:sequence("SERVER_READY"),shutdownRequestedSequence:sequence("CLEAN_SHUTDOWN_REQUESTED"),serverStoppedSequence:sequence("SERVER_STOPPED")},
@@ -944,6 +968,7 @@ cp "$fixture_manifest" "$PLAN03_EVIDENCE_ROOT/fixtures.tsv"
   printf 'cgroup-v2=%s\n' "$(stat -fc %T /sys/fs/cgroup)"
   "$PROVENANCE_RUNSC_PATH" --version
   sha256sum "$PLAN03_RUNNER" "$PLAN03_RUNSC_BINARY" "$PROVENANCE_RUNSC_PATH"
+  printf '%s  %s\n' "$pid_fixture_source_sha" "$pid_fixture_source"
 } > "$PLAN03_EVIDENCE_ROOT/identities.txt" 2>&1
 
 run_complete_log_boundary

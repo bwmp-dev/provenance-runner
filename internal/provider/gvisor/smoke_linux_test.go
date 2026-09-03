@@ -38,7 +38,7 @@ func TestRunscSmoke(t *testing.T) {
 
 	temporaryRoot := t.TempDir()
 	inputsRoot := filepath.Join(temporaryRoot, "inputs")
-	for _, jobID := range []string{"smoke", "smoke-cancel", "smoke-restart"} {
+	for _, jobID := range []string{"smoke", "smoke-events", "smoke-cancel", "smoke-restart"} {
 		if err := os.MkdirAll(filepath.Join(inputsRoot, jobID), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -96,6 +96,58 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		if output.ResourceUsage == nil || output.ResourceUsage.CPUTime <= 0 || output.ResourceUsage.PeakMemoryBytes == 0 || output.ResourceUsage.NetworkReceiveBytes != 0 || output.ResourceUsage.NetworkTransmitBytes != 0 {
 			t.Fatalf("sandbox measured usage = %#v", output.ResourceUsage)
+		}
+		cleanupSmokeEnvironment(t, prepared)
+		assertNoSandboxResidue(t, provider, containerID)
+	})
+
+	t.Run("live bounded event FIFO survives nonzero exit", func(t *testing.T) {
+		environment, err := provider.ResolveWorkload(context.Background(), execution.Request{
+			JobID:  "smoke-events",
+			Limits: execution.Limits{MaxOutputBytes: 64 << 10},
+		}, execution.IsolatedWorkload{
+			Command:     "/bin/sh",
+			Arguments:   []string{"-c", `printf '{"state":"ready"}\n' > /tmp/provenance-probe-events.ndjson; exit 2`},
+			InputsPath:  filepath.Join(inputsRoot, "smoke-events"),
+			Network:     "none",
+			MemoryBytes: 128 << 20,
+			CPUMillis:   500,
+			PIDs:        64,
+			DiskBytes:   8 << 20,
+			StructuredEventFile: &execution.StructuredEventFile{
+				Destination:  "/tmp/provenance-probe-events.ndjson",
+				Kind:         "smoke",
+				MaximumBytes: 1024,
+			},
+		})
+		if err != nil {
+			t.Fatalf("ResolveWorkload() error = %v", err)
+		}
+		preparedValue, err := environment.Prepare(context.Background())
+		if err != nil {
+			t.Fatalf("Prepare() error = %v", err)
+		}
+		prepared := preparedValue.(*preparedEnvironment)
+		defer cleanupSmokeEnvironment(t, prepared)
+		containerID := prepared.containerID
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		outcome, executeErr := prepared.Execute(ctx)
+		output, collectErr := prepared.Collect(ctx)
+		if executeErr != nil {
+			t.Fatalf("Execute() error = %v; stdout=%q stderr=%q; Collect() error=%v", executeErr, output.Stdout, output.Stderr, collectErr)
+		}
+		if collectErr != nil {
+			t.Fatalf("Collect() error = %v", collectErr)
+		}
+		if outcome.Failure == nil || outcome.Failure.Code != "gvisor_process_exit_nonzero" {
+			t.Fatalf("Execute() outcome = %#v", outcome)
+		}
+		if len(output.StructuredEvents) != 1 || output.StructuredEvents[0].Kind != "smoke" || string(output.StructuredEvents[0].Payload) != `{"state":"ready"}` {
+			t.Fatalf("structured events = %#v; channel error=%q", output.StructuredEvents, output.StructuredEventError)
+		}
+		if output.EvidenceUsage.EventChannelMaximumBytes != 1024 || output.EvidenceUsage.EventChannelBufferedBytes != 18 || output.EvidenceUsage.EventChannelResourceBytes != 0 || output.EvidenceUsage.EventChannelOverflowed || !output.EvidenceUsage.EventChannelRemoved {
+			t.Fatalf("event channel usage = %#v", output.EvidenceUsage)
 		}
 		cleanupSmokeEnvironment(t, prepared)
 		assertNoSandboxResidue(t, provider, containerID)
