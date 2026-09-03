@@ -264,7 +264,7 @@ func (p *Provider) resolveWorkload(ctx context.Context, request execution.Reques
 		return nil, invalidEnvironment(err)
 	}
 	if structuredEventFile != nil && (workload.StructuredOutputPrefix != "" || workload.StructuredOutputKind != "") {
-		return nil, invalidEnvironment(errors.New("structured event file cannot be combined with the legacy stdout event channel"))
+		return nil, invalidEnvironment(errors.New("structured event FIFO cannot be combined with the legacy stdout event channel"))
 	}
 	structuredEventPrefix := ""
 	if structuredEventFile != nil {
@@ -297,13 +297,13 @@ func validateStructuredEventFile(requested *execution.StructuredEventFile) (*exe
 		return nil, nil
 	}
 	if requested.Destination != "/tmp/provenance-probe-events.ndjson" {
-		return nil, errors.New("structured event file destination must be /tmp/provenance-probe-events.ndjson")
+		return nil, errors.New("structured event FIFO destination must be /tmp/provenance-probe-events.ndjson")
 	}
 	if requested.MaximumBytes < 1 || requested.MaximumBytes > maximumStructuredEventBytes {
-		return nil, fmt.Errorf("structured event file maximumBytes must be between 1 and %d", maximumStructuredEventBytes)
+		return nil, fmt.Errorf("structured event FIFO maximumBytes must be between 1 and %d", maximumStructuredEventBytes)
 	}
 	if err := evidence.ValidateConfig(evidence.Config{StructuredLinePrefix: "VALIDATE:", StructuredLineKind: requested.Kind}); err != nil {
-		return nil, fmt.Errorf("structured event file kind: %w", err)
+		return nil, fmt.Errorf("structured event FIFO kind: %w", err)
 	}
 	validated := *requested
 	return &validated, nil
@@ -505,15 +505,9 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	var eventMount *structuredEventMount
 	if e.structuredEventFile != nil {
 		prepared.structuredEventPath = filepath.Join(bundle, structuredEventFileName)
-		file, createErr := os.OpenFile(prepared.structuredEventPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
-		if createErr != nil {
-			return nil, errors.Join(fmt.Errorf("create structured event file: %w", createErr), collector.Close(), os.RemoveAll(bundle))
-		}
-		if closeErr := file.Close(); closeErr != nil {
-			return nil, errors.Join(fmt.Errorf("close structured event file: %w", closeErr), collector.Close(), os.RemoveAll(bundle))
-		}
-		if chmodErr := os.Chmod(prepared.structuredEventPath, 0o666); chmodErr != nil {
-			return nil, errors.Join(fmt.Errorf("make structured event file sandbox-writable: %w", chmodErr), collector.Close(), os.RemoveAll(bundle))
+		prepared.structuredEventChannel, err = createStructuredEventChannel(prepared.structuredEventPath, e.structuredEventFile.MaximumBytes)
+		if err != nil {
+			return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 		}
 		eventMount = &structuredEventMount{source: prepared.structuredEventPath, destination: e.structuredEventFile.Destination}
 	}
@@ -531,19 +525,25 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 }
 
 type preparedEnvironment struct {
-	mu                    sync.Mutex
-	usageMu               sync.Mutex
-	provider              *Provider
-	containerID           string
-	bundle                string
-	evidence              *evidence.Collector
-	cleaned               bool
-	observer              execution.ExecutionObserver
-	usage                 execution.ResourceUsage
-	structuredEventPath   string
-	structuredEventFile   *execution.StructuredEventFile
-	structuredEventPrefix string
-	structuredEventErr    string
+	mu                        sync.Mutex
+	usageMu                   sync.Mutex
+	provider                  *Provider
+	containerID               string
+	bundle                    string
+	evidence                  *evidence.Collector
+	cleaned                   bool
+	observer                  execution.ExecutionObserver
+	usage                     execution.ResourceUsage
+	structuredEventPath       string
+	structuredEventChannel    *structuredEventChannel
+	structuredEventFile       *execution.StructuredEventFile
+	structuredEventPrefix     string
+	structuredEventErr        string
+	eventChannelMaximumBytes  int64
+	eventChannelBufferedBytes int64
+	eventChannelResourceBytes int64
+	eventChannelOverflowed    bool
+	eventChannelRemoved       bool
 }
 
 func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
@@ -556,6 +556,20 @@ func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserve
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
+	if e.structuredEventChannel != nil {
+		if err := e.structuredEventChannel.start(); err != nil {
+			e.collectStructuredEvents()
+			return execution.ExecutionOutcome{}, execution.NewClassifiedError(
+				execution.ClassificationInfrastructureFailure,
+				"gvisor_event_channel_unavailable",
+				err,
+			)
+		}
+		// The live host reader is finalized after every execution path, including
+		// cancellation and non-zero sandbox teardown. Execution failures retain
+		// precedence over any independently recorded channel failure.
+		defer e.collectStructuredEvents()
+	}
 	stdout, err := e.evidence.RawWriter(evidence.StreamStdout)
 	if err != nil {
 		return execution.ExecutionOutcome{}, err
@@ -567,10 +581,6 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	if err := e.markRunAttempted(); err != nil {
 		return execution.ExecutionOutcome{}, fmt.Errorf("mark gVisor run attempted: %w", err)
 	}
-	// The host-backed file is collected after every execution path, including a
-	// cancelled or non-zero sandbox. This preserves records the probe flushed
-	// before teardown without changing execution-failure precedence.
-	defer e.collectStructuredEvents()
 	stopSampling := make(chan struct{})
 	samplingDone := make(chan struct{})
 	go e.sampleUsageUntil(stopSampling, samplingDone)
@@ -653,17 +663,22 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 			Archive:           bundle.CompleteLog.Archive,
 		},
 		EvidenceUsage: execution.EvidenceUsage{
-			RawBytesObserved:     bundle.Usage.RawBytesObserved,
-			CapturedBytes:        bundle.Usage.CapturedBytes,
-			StructuredEventCount: bundle.Usage.StructuredEventCount,
-			StructuredEventBytes: bundle.Usage.StructuredEventBytes,
-			CompleteLogBytes:     bundle.Usage.CompleteLogBytes,
-			CompressedLogBytes:   bundle.Usage.CompressedLogBytes,
-			TruncatedLineCount:   bundle.Usage.TruncatedLineCount,
-			OutputTruncated:      bundle.Usage.OutputTruncated,
-			CompleteLogState:     bundle.Usage.CompleteLogState,
-			CompleteLogTruncated: bundle.Usage.CompleteLogTruncated,
-			EventsTruncated:      bundle.Usage.EventsTruncated,
+			RawBytesObserved:          bundle.Usage.RawBytesObserved,
+			CapturedBytes:             bundle.Usage.CapturedBytes,
+			StructuredEventCount:      bundle.Usage.StructuredEventCount,
+			StructuredEventBytes:      bundle.Usage.StructuredEventBytes,
+			CompleteLogBytes:          bundle.Usage.CompleteLogBytes,
+			CompressedLogBytes:        bundle.Usage.CompressedLogBytes,
+			TruncatedLineCount:        bundle.Usage.TruncatedLineCount,
+			OutputTruncated:           bundle.Usage.OutputTruncated,
+			CompleteLogState:          bundle.Usage.CompleteLogState,
+			CompleteLogTruncated:      bundle.Usage.CompleteLogTruncated,
+			EventsTruncated:           bundle.Usage.EventsTruncated,
+			EventChannelMaximumBytes:  e.eventChannelMaximumBytes,
+			EventChannelBufferedBytes: e.eventChannelBufferedBytes,
+			EventChannelResourceBytes: e.eventChannelResourceBytes,
+			EventChannelOverflowed:    e.eventChannelOverflowed,
+			EventChannelRemoved:       e.eventChannelRemoved,
 		},
 		StructuredEventError: bundle.StructuredEventError,
 		ResourceUsage:        &usage,
@@ -671,24 +686,30 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 }
 
 func (e *preparedEnvironment) collectStructuredEvents() {
-	if e.structuredEventFile == nil {
+	if e.structuredEventChannel == nil {
 		return
 	}
-	content, err := readBoundedRegularFile(e.structuredEventPath, e.structuredEventFile.MaximumBytes)
-	if err != nil {
-		e.structuredEventErr = err.Error()
+	snapshot := e.structuredEventChannel.finish()
+	defer clear(snapshot.content)
+	e.eventChannelMaximumBytes = snapshot.maximum
+	e.eventChannelBufferedBytes = snapshot.bufferedBytes
+	e.eventChannelResourceBytes = snapshot.resourceBytes
+	e.eventChannelOverflowed = snapshot.overflowed
+	e.eventChannelRemoved = snapshot.removed
+	if snapshot.readErr != nil {
+		e.structuredEventErr = snapshot.readErr.Error()
 		return
 	}
-	defer func() {
-		if err := os.Truncate(e.structuredEventPath, 0); err != nil && e.structuredEventErr == "" {
-			e.structuredEventErr = fmt.Sprintf("clear structured event file: %v", err)
-		}
-	}()
+	if snapshot.overflowed {
+		e.structuredEventErr = fmt.Sprintf("structured event FIFO exceeds %d bytes", snapshot.maximum)
+		return
+	}
+	content := snapshot.content
 	if len(content) == 0 {
 		return
 	}
 	if content[len(content)-1] != '\n' {
-		e.structuredEventErr = "structured event file has an unterminated final record"
+		e.structuredEventErr = "structured event FIFO has an unterminated final record"
 		return
 	}
 	writer, err := e.evidence.RawWriter(evidence.StreamStdout)
@@ -698,7 +719,7 @@ func (e *preparedEnvironment) collectStructuredEvents() {
 	}
 	for _, line := range bytes.Split(content[:len(content)-1], []byte{'\n'}) {
 		if len(line) == 0 {
-			e.structuredEventErr = "structured event file contains an empty record"
+			e.structuredEventErr = "structured event FIFO contains an empty record"
 			return
 		}
 		record := make([]byte, 0, len(e.structuredEventPrefix)+len(line)+1)
@@ -712,32 +733,6 @@ func (e *preparedEnvironment) collectStructuredEvents() {
 	}
 }
 
-func readBoundedRegularFile(path string, maximum int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("inspect structured event file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, errors.New("structured event file is not a regular file")
-	}
-	if info.Size() > maximum {
-		return nil, fmt.Errorf("structured event file exceeds %d bytes", maximum)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open structured event file: %w", err)
-	}
-	defer file.Close()
-	content, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil {
-		return nil, fmt.Errorf("read structured event file: %w", err)
-	}
-	if int64(len(content)) > maximum {
-		return nil, fmt.Errorf("structured event file exceeds %d bytes", maximum)
-	}
-	return content, nil
-}
-
 func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -746,6 +741,9 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if e.structuredEventChannel != nil {
+		e.structuredEventChannel.finish()
 	}
 	attempted, err := runWasAttempted(e.bundle)
 	if err != nil {
@@ -792,7 +790,9 @@ func (p *Provider) runArguments(arguments ...string) []string {
 		"--file-access=exclusive",
 		"--file-access-mounts=exclusive",
 		"--host-uds=none",
-		"--host-fifo=none",
+		// The only host FIFO reachable from the sandbox is the provider-created,
+		// write-only evidence mount. Trusted inputs contain regular files only.
+		"--host-fifo=open",
 		"--character-device-policy=emulated-only",
 		"--net-raw=false",
 		"--allow-suid=false",

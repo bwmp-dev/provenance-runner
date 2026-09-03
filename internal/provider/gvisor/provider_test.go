@@ -1,6 +1,7 @@
 package gvisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -295,7 +296,7 @@ func TestExecuteUsesHardenedRunscFlagsAndCollectsBoundedOutput(t *testing.T) {
 		"--file-access=exclusive",
 		"--file-access-mounts=exclusive",
 		"--host-uds=none",
-		"--host-fifo=none",
+		"--host-fifo=open",
 		"--character-device-policy=emulated-only",
 		"--net-raw=false",
 		"--allow-suid=false",
@@ -317,12 +318,27 @@ func TestExecuteUsesHardenedRunscFlagsAndCollectsBoundedOutput(t *testing.T) {
 	}
 }
 
-func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *testing.T) {
+func TestHostDrainedStructuredEventFIFOPreservesFlushedEventsOnNonzeroExit(t *testing.T) {
 	provider, runner, roots := testProvider(t)
 	exitCode := 2
+	var prepared *preparedEnvironment
 	runner.run = func(_ context.Context, invocation command) commandResult {
 		if commandVerb(invocation.Args) == "run" {
 			_, _ = io.WriteString(invocation.Stdout, "PROVENANCE_PROBE_EVENT_V1:{\"state\":\"forged\"}\n")
+			info, err := os.Lstat(prepared.structuredEventPath)
+			if err != nil || info.Mode().Perm() != 0o222 {
+				t.Fatalf("sandbox-visible FIFO mode = %#v, error %v", info, err)
+			}
+			fifo, err := os.OpenFile(prepared.structuredEventPath, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(fifo, "{\"state\":\"sensitive\"}\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fifo.Close(); err != nil {
+				t.Fatal(err)
+			}
 			return commandResult{ExitCode: &exitCode, Err: errors.New("exit status 2")}
 		}
 		return successResult()
@@ -340,7 +356,7 @@ func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared := preparedValue.(*preparedEnvironment)
+	prepared = preparedValue.(*preparedEnvironment)
 	t.Cleanup(func() { _ = prepared.Cleanup(context.Background()) })
 	content, err := os.ReadFile(filepath.Join(prepared.bundle, "config.json"))
 	if err != nil {
@@ -354,8 +370,8 @@ func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *tes
 	if mount.Source != prepared.structuredEventPath || !reflect.DeepEqual(mount.Options, []string{"bind", "rw", "nosuid", "nodev", "noexec"}) {
 		t.Fatalf("structured event mount = %#v", mount)
 	}
-	if err := os.WriteFile(prepared.structuredEventPath, []byte("{\"state\":\"sensitive\"}\n"), 0o666); err != nil {
-		t.Fatal(err)
+	if info, err := os.Lstat(prepared.structuredEventPath); err != nil || info.Mode()&os.ModeNamedPipe == 0 || info.Size() != 0 {
+		t.Fatalf("structured event resource is not an empty FIFO: info=%#v error=%v", info, err)
 	}
 	outcome, err := prepared.Execute(context.Background())
 	if err != nil {
@@ -364,8 +380,11 @@ func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *tes
 	if outcome.Failure == nil || outcome.Failure.Code != "gvisor_process_exit_nonzero" {
 		t.Fatalf("Execute() outcome = %#v", outcome)
 	}
-	if info, err := os.Stat(prepared.structuredEventPath); err != nil || info.Size() != 0 {
-		t.Fatalf("structured event staging file retained bytes: info=%#v error=%v", info, err)
+	if _, err := os.Lstat(prepared.structuredEventPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("structured event FIFO was retained: %v", err)
+	}
+	if len(prepared.structuredEventChannel.content) != 0 {
+		t.Fatalf("structured event memory staging retained %d bytes", len(prepared.structuredEventChannel.content))
 	}
 	output, err := prepared.Collect(context.Background())
 	if err != nil {
@@ -374,9 +393,12 @@ func TestHostBackedStructuredEventFilePreservesFlushedEventsOnNonzeroExit(t *tes
 	if len(output.StructuredEvents) != 1 || output.StructuredEvents[0].Kind != "probe" || string(output.StructuredEvents[0].Payload) != `{"state":"[REDACTED]"}` || !strings.Contains(output.Stdout, "PROVENANCE_PROBE_EVENT_V1:") {
 		t.Fatalf("output = %#v", output)
 	}
+	if output.EvidenceUsage.EventChannelMaximumBytes != 1024 || output.EvidenceUsage.EventChannelBufferedBytes != 22 || output.EvidenceUsage.EventChannelResourceBytes != 0 || output.EvidenceUsage.EventChannelOverflowed || !output.EvidenceUsage.EventChannelRemoved {
+		t.Fatalf("event channel usage = %#v", output.EvidenceUsage)
+	}
 }
 
-func TestStructuredEventFileTransportFailsClosed(t *testing.T) {
+func TestStructuredEventFIFOTransportFailsClosedAndRemovesResource(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		content string
@@ -389,7 +411,23 @@ func TestStructuredEventFileTransportFailsClosed(t *testing.T) {
 		{name: "malformed JSON", content: "{\"bad\":}\n", maximum: 32, want: "not valid JSON"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			provider, _, roots := testProvider(t)
+			provider, runner, roots := testProvider(t)
+			var prepared *preparedEnvironment
+			runner.run = func(_ context.Context, invocation command) commandResult {
+				if commandVerb(invocation.Args) == "run" {
+					fifo, err := os.OpenFile(prepared.structuredEventPath, os.O_WRONLY, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := io.WriteString(fifo, test.content); err != nil {
+						t.Fatal(err)
+					}
+					if err := fifo.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return successResult()
+			}
 			environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
 				Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
 				MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
@@ -402,13 +440,16 @@ func TestStructuredEventFileTransportFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			prepared := preparedValue.(*preparedEnvironment)
+			prepared = preparedValue.(*preparedEnvironment)
 			t.Cleanup(func() { _ = prepared.Cleanup(context.Background()) })
-			if err := os.WriteFile(prepared.structuredEventPath, []byte(test.content), 0o666); err != nil {
-				t.Fatal(err)
-			}
 			if _, err := prepared.Execute(context.Background()); err != nil {
 				t.Fatal(err)
+			}
+			if _, err := os.Lstat(prepared.structuredEventPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("structured event FIFO retained after failure: %v", err)
+			}
+			if len(prepared.structuredEventChannel.content) != 0 {
+				t.Fatalf("structured event memory staging retained %d bytes", len(prepared.structuredEventChannel.content))
 			}
 			output, err := prepared.Collect(context.Background())
 			if err != nil {
@@ -417,7 +458,127 @@ func TestStructuredEventFileTransportFailsClosed(t *testing.T) {
 			if !strings.Contains(output.StructuredEventError, test.want) {
 				t.Fatalf("StructuredEventError = %q, want %q", output.StructuredEventError, test.want)
 			}
+			if output.EvidenceUsage.EventChannelBufferedBytes > test.maximum || output.EvidenceUsage.EventChannelResourceBytes != 0 || !output.EvidenceUsage.EventChannelRemoved {
+				t.Fatalf("event channel usage = %#v", output.EvidenceUsage)
+			}
 		})
+	}
+}
+
+func TestStructuredEventFIFOOverflowNeverGrowsHostStorage(t *testing.T) {
+	provider, runner, roots := testProvider(t)
+	var prepared *preparedEnvironment
+	content := bytes.Repeat([]byte("0123456789abcdef"), 1<<16)
+	runner.run = func(_ context.Context, invocation command) commandResult {
+		if commandVerb(invocation.Args) == "run" {
+			fifo, err := os.OpenFile(prepared.structuredEventPath, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fifo.Write(content); err != nil {
+				t.Fatal(err)
+			}
+			if err := fifo.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return successResult()
+	}
+	environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
+		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
+		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
+		StructuredEventFile: &execution.StructuredEventFile{Destination: "/tmp/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedValue, err := environment.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared = preparedValue.(*preparedEnvironment)
+	t.Cleanup(func() { _ = prepared.Cleanup(context.Background()) })
+	if info, err := os.Lstat(prepared.structuredEventPath); err != nil || info.Size() != 0 || info.Mode()&os.ModeNamedPipe == 0 {
+		t.Fatalf("initial FIFO storage = info %#v, error %v", info, err)
+	}
+	if _, err := prepared.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(prepared.structuredEventPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overflowed FIFO retained: %v", err)
+	}
+	if len(prepared.structuredEventChannel.content) != 0 {
+		t.Fatalf("overflow memory staging retained %d bytes", len(prepared.structuredEventChannel.content))
+	}
+	output, err := prepared.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.EvidenceUsage.EventChannelMaximumBytes != 1024 || output.EvidenceUsage.EventChannelBufferedBytes != 1024 || output.EvidenceUsage.EventChannelResourceBytes != 0 || !output.EvidenceUsage.EventChannelOverflowed || !output.EvidenceUsage.EventChannelRemoved {
+		t.Fatalf("overflow usage = %#v", output.EvidenceUsage)
+	}
+	if !strings.Contains(output.StructuredEventError, "exceeds 1024 bytes") {
+		t.Fatalf("StructuredEventError = %q", output.StructuredEventError)
+	}
+}
+
+func TestStructuredEventFIFORejectsAndRemovesNonFIFOResource(t *testing.T) {
+	provider, _, roots := testProvider(t)
+	environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
+		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
+		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
+		StructuredEventFile: &execution.StructuredEventFile{Destination: "/tmp/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedValue, err := environment.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedValue.(*preparedEnvironment)
+	t.Cleanup(func() { _ = prepared.Cleanup(context.Background()) })
+	if err := os.Remove(prepared.structuredEventPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(prepared.structuredEventPath, []byte("retained"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepared.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "not a FIFO") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if _, err := os.Lstat(prepared.structuredEventPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("non-FIFO staging resource retained: %v", err)
+	}
+	if len(prepared.structuredEventChannel.content) != 0 {
+		t.Fatalf("non-FIFO memory staging retained %d bytes", len(prepared.structuredEventChannel.content))
+	}
+}
+
+func TestStructuredEventFIFOIsRemovedWhenPreparedExecutionIsSkipped(t *testing.T) {
+	provider, _, roots := testProvider(t)
+	environment, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "job-1", Limits: execution.Limits{MaxOutputBytes: 1024}}, execution.IsolatedWorkload{
+		Command: "/bin/sh", Arguments: []string{"-c", "true"}, InputsPath: filepath.Join(roots.inputs, "job-1"), Network: "none",
+		MemoryBytes: 256 << 20, CPUMillis: 1000, PIDs: 32, DiskBytes: 64 << 20,
+		StructuredEventFile: &execution.StructuredEventFile{Destination: "/tmp/provenance-probe-events.ndjson", Kind: "probe", MaximumBytes: 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedValue, err := environment.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedValue.(*preparedEnvironment)
+	path := prepared.structuredEventPath
+	if err := prepared.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexecuted FIFO retained: %v", err)
+	}
+	if len(prepared.structuredEventChannel.content) != 0 {
+		t.Fatalf("unexecuted memory staging retained %d bytes", len(prepared.structuredEventChannel.content))
 	}
 }
 

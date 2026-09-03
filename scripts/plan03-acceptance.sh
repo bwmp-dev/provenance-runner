@@ -124,6 +124,14 @@ disk_fill_result_contract='
   ($shutdown_requested < $server_stopped)
 '
 disk_fill_marker='No space left on device'
+event_channel_usage_contract='
+  .usage.eventChannelMaximumBytes==4194304 and
+  .usage.eventChannelBufferedBytes>=0 and
+  .usage.eventChannelBufferedBytes<=.usage.eventChannelMaximumBytes and
+  .usage.eventChannelResourceBytes==0 and
+  .usage.eventChannelOverflowed==false and
+  .usage.eventChannelRemoved==true
+'
 
 validate_disk_fill_contract() {
   local result=$1 complete_log=$2
@@ -211,6 +219,20 @@ run_contract_tests() {
     printf 'disk-fill contract accepted success without ENOSPC evidence\n' >&2
     return 1
   fi
+
+  jq -n '{usage:{eventChannelMaximumBytes:4194304,eventChannelBufferedBytes:4096,eventChannelResourceBytes:0,eventChannelOverflowed:false,eventChannelRemoved:true}}' > "$test_root/good-event-channel.json"
+  jq -e "$event_channel_usage_contract" "$test_root/good-event-channel.json" >/dev/null
+  for mutation in \
+    '.usage.eventChannelBufferedBytes=4194305' \
+    '.usage.eventChannelResourceBytes=1' \
+    '.usage.eventChannelOverflowed=true' \
+    '.usage.eventChannelRemoved=false' \
+    '.usage.eventChannelMaximumBytes=68719476736'; do
+    if jq "$mutation" "$test_root/good-event-channel.json" | jq -e "$event_channel_usage_contract" >/dev/null; then
+      printf 'event-channel usage contract accepted mutation: %s\n' "$mutation" >&2
+      return 1
+    fi
+  done
 
   for sample in $(seq 0 49); do
     pids_current=45
@@ -650,6 +672,7 @@ validate_result() {
       end
     ) and .cleanup.succeeded==true and .usage.resourceClass.cpuMillis==1000 and .usage.resourceClass.memoryBytes==$memoryBytes and .usage.resourceClass.processCount==$pids and .usage.resourceClass.diskBytes==1073741824 and .usage.resourceClass.network=="none" and .usage.resourceClass.maximumConnections==0 and .usage.resourceClass.maximumBandwidthBytesPerSecond==0' \
     "$result" >/dev/null
+  jq -e "$event_channel_usage_contract" "$result" >/dev/null
   gzip --test "$complete_log"
   local digest compressed_bytes uncompressed_bytes
   digest=$(sha256sum "$complete_log"); digest=${digest%% *}
@@ -753,6 +776,8 @@ write_pid_verification() {
                ((.[-1].timestampNanoseconds - .[0].timestampNanoseconds) >= 1000000000))] | first) as $guestRelease |
       ([$samples[].pidsCurrent | tonumber] | max) as $outerPeak |
       ([$samples[] | pid_denials_or_null] | max) as $outerDenials |
+      ($result[0].usage.resourceClass.processCount) as $requestedGuestMaximum |
+      ($samples[0].pidsMax | tonumber) as $configuredOuterMaximum |
       {
         fixture:$fixture,
         caseIdentity:$caseIdentity,
@@ -760,7 +785,7 @@ write_pid_verification() {
         toolkitSourceSHA:$toolkitSHA,
         runnerHeadSHA:$runnerHeadSHA,
         accepted:true,
-        pids:{requestedGuestMaximum:48,configuredGuestRlimitNproc:48,configuredOuterMaximum:64,configuredRuntimeReserve:16,requiredOuterHeadroom:4,observedOuterMaximum:$outerPeak,minimumObservedOuterHeadroom:(64-$outerPeak),observedGuestMaximum:$guestPeak,outerControllerMaxEvents:$outerDenials,unavailableOuterDenialSamples:([$samples[]|select(pid_denials_or_null==null)]|length),unavailableGuestPIDSamples:([$samples[]|select(sandbox_pids_or_null==null)]|length),guestNeverAboveRequestedMaximum:(all($guestObservations[]; .<=48)),outerNeverConsumesRequiredHeadroom:(all($samples[]; (.pidsCurrent|tonumber)<=60)),outerControllerDeniedNoProcesses:($outerDenials==0),guestQuotaReached:($guestPeak==48),guestDenialProof:{pinnedFixtureSHA256:"b4d936c12370892047839396786b6e65b1b5ccf65c6ddae70e283b43fe3e8e16",pinnedToolkitSourceSHA:$toolkitSHA,sourceAcceptsOnlyLinuxEAGAINOrGVisorENOMEM:true,exactGuestQuotaObserved:($guestPeak==48),paperLifecycleCompleted:($result[0].classification=="passed" and $result[0].execution.exitCode==0)},guestPeakTimestampNanoseconds:$samples[$guestPeakIndex].timestampNanoseconds,guestReleaseSamples:($guestRelease|length),sustainedGuestReleaseNanoseconds:($guestRelease[-1].timestampNanoseconds-$guestRelease[0].timestampNanoseconds),guestReleaseMinimum:([$guestRelease[].sandboxPIDsCurrent]|min),guestReleaseMaximum:([$guestRelease[].sandboxPIDsCurrent]|max),guestReleaseAboveTeardownFloor:(all($guestRelease[]; .sandboxPIDsCurrent>2)),guestReleaseBelowGuestPeak:(all($guestRelease[]; .sandboxPIDsCurrent<$guestPeak))},
+        pids:{requestedGuestMaximum:$requestedGuestMaximum,configuredOuterMaximum:$configuredOuterMaximum,configuredRuntimeReserve:($configuredOuterMaximum-$requestedGuestMaximum),requiredOuterHeadroom:4,observedOuterMaximum:$outerPeak,minimumObservedOuterHeadroom:($configuredOuterMaximum-$outerPeak),observedGuestMaximum:$guestPeak,outerControllerMaxEvents:$outerDenials,unavailableOuterDenialSamples:([$samples[]|select(pid_denials_or_null==null)]|length),unavailableGuestPIDSamples:([$samples[]|select(sandbox_pids_or_null==null)]|length),guestNeverAboveRequestedMaximum:(all($guestObservations[]; .<=$requestedGuestMaximum)),outerNeverConsumesRequiredHeadroom:(all($samples[]; (.pidsCurrent|tonumber)<=($configuredOuterMaximum-4))),outerControllerDeniedNoProcesses:($outerDenials==0),guestQuotaReached:($guestPeak==$requestedGuestMaximum),guestPressureProof:{pinnedFixtureSHA256:"b4d936c12370892047839396786b6e65b1b5ccf65c6ddae70e283b43fe3e8e16",pinnedToolkitSourceSHA:$toolkitSHA,exactGuestQuotaObserved:($guestPeak==$requestedGuestMaximum),outerControllerDeniedNoProcesses:($outerDenials==0),paperLifecycleCompleted:($result[0].classification=="passed" and $result[0].execution.exitCode==0)},guestPeakTimestampNanoseconds:$samples[$guestPeakIndex].timestampNanoseconds,guestReleaseSamples:($guestRelease|length),sustainedGuestReleaseNanoseconds:($guestRelease[-1].timestampNanoseconds-$guestRelease[0].timestampNanoseconds),guestReleaseMinimum:([$guestRelease[].sandboxPIDsCurrent]|min),guestReleaseMaximum:([$guestRelease[].sandboxPIDsCurrent]|max),guestReleaseAboveTeardownFloor:(all($guestRelease[]; .sandboxPIDsCurrent>2)),guestReleaseBelowGuestPeak:(all($guestRelease[]; .sandboxPIDsCurrent<$guestPeak))},
         memory:{maxEvents:([$samples[]|memory_event("max")]|max),oomEvents:([$samples[]|memory_event("oom")]|max),oomKillEvents:([$samples[]|memory_event("oom_kill")]|max),noMemoryPressureEvents:(all($samples[]; memory_event("max")==0 and memory_event("oom")==0 and memory_event("oom_kill")==0))},
         completeLog:{state:$result[0].completeLog.state,truncated:$result[0].completeLog.truncated,sha256:$result[0].completeLog.sha256,compressedBytes:$result[0].completeLog.compressedBytes,uncompressedBytes:$result[0].completeLog.uncompressedBytes},
         lifecycle:{eventCount:($result[0].structuredEvents|length),ordered:true,continuousSequence:([$result[0].structuredEvents[].sequence]==[range(1;22)]),trustedInventory:([$result[0].structuredEvents[].kind]==["METADATA_INSPECTION","METADATA_INSPECTION","TEST_PLAN","PLUGIN_STATE","PLUGIN_STATE","PROBE_LOADED","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","PLUGIN_STATE","SERVER_LOADED","PLUGIN_STATE","PLUGIN_STATE","STABILIZATION_STARTED","TARGET_REQUIREMENT","STABILIZATION_COMPLETED","SERVER_READY","CLEAN_SHUTDOWN_REQUESTED","PLUGIN_STATE","PLUGIN_STATE","SERVER_STOPPED"]),targetEnabledSequence:first($result[0].structuredEvents[]|select(.kind=="PLUGIN_STATE" and .payload.name=="ProvenanceForkPidBomb" and .payload.loaded==true and .payload.enabled==true)|.sequence),serverLoadedSequence:sequence("SERVER_LOADED"),stabilizationStartedSequence:sequence("STABILIZATION_STARTED"),stabilizationCompletedSequence:sequence("STABILIZATION_COMPLETED"),serverReadySequence:sequence("SERVER_READY"),shutdownRequestedSequence:sequence("CLEAN_SHUTDOWN_REQUESTED"),serverStoppedSequence:sequence("SERVER_STOPPED")},
