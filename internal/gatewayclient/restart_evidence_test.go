@@ -233,28 +233,22 @@ func TestRestartEvidenceFailsClosedOnMissingUsageAndCompleteLogBound(t *testing.
 	}
 }
 
-func TestRestartEvidenceObservationIsDurableBeforeReturn(t *testing.T) {
-	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
-	journalPath, _, offer := restartEvidenceFixture(t, now)
-	store, err := createRestartEvidenceStore(journalPath, offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: []byte("committed before return\n")})
-	store.observeUsage(execution.ResourceUsage{CPUTime: 3 * time.Second, PeakMemoryBytes: 1024})
+func TestRestartEvidenceObservationNeverBackpressuresProvider(t *testing.T) {
+	store := &restartEvidenceStore{commands: make(chan restartEvidenceCommand, 1)}
+	store.commands <- restartEvidenceCommand{stream: "stdout", data: []byte("already queued\n")}
 
-	// Reopen the files directly without flushing or closing the active writer. A
-	// process killed immediately after either observation returns must expose the
-	// same committed prefix and cumulative usage to restart recovery.
-	recovered, err := loadRestartEvidenceStore(restartEvidencePath(journalPath), offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
-	if err != nil {
-		t.Fatal(err)
+	returned := make(chan struct{})
+	go func() {
+		store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: []byte("must not block\n")})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("restart evidence observer backpressured the execution provider")
 	}
-	if recovered.metadata.StdoutBytes != int64(len("committed before return\n")) || recovered.metadata.Usage.CPUTime != 3*time.Second || !recovered.metadata.UsageObserved {
-		t.Fatalf("durable observation = %#v", recovered.metadata)
-	}
-	if err := store.close(); err != nil {
-		t.Fatal(err)
+	if !store.overflow.Load() {
+		t.Fatal("full restart evidence queue did not fail the recovery snapshot closed")
 	}
 }
 
