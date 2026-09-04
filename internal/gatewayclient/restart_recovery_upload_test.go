@@ -181,6 +181,17 @@ func TestRestartRecoveryRejectsCapabilityInEventAcknowledgement(t *testing.T) {
 	if uploader.calls != 0 || harness.client.completeLogTarget(harness.offer.GetJob().GetLease(), harness.offer.GetJob().GetAttempt()) != nil || !bytes.Equal(pending, harness.client.journal.snapshot().PendingMessage) {
 		t.Fatalf("invalid event acknowledgement mutated recovery state: calls=%d", uploader.calls)
 	}
+	acknowledgement.Reconciliation.CompleteLogUpload = nil
+	if err := harness.session.handleEventAcknowledgement(acknowledgement, now); err != nil {
+		t.Fatal(err)
+	}
+	acknowledgement.Reconciliation.CompleteLogUpload = validCompleteLogUpload(now)
+	if err := harness.session.handleEventAcknowledgement(acknowledgement, now); err == nil || !strings.Contains(err.Error(), "must not contain") {
+		t.Fatalf("settled event acknowledgement capability error = %v", err)
+	}
+	if uploader.calls != 0 || harness.client.completeLogTarget(harness.offer.GetJob().GetLease(), harness.offer.GetJob().GetAttempt()) != nil {
+		t.Fatalf("invalid settled event acknowledgement mutated recovery state: calls=%d", uploader.calls)
+	}
 }
 
 func TestRestartRecoveryUploadFailureRequiresFreshCapabilityAndRetainsEvidence(t *testing.T) {

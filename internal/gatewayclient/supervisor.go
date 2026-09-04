@@ -279,6 +279,9 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 	if acknowledgement == nil || validateTimestamp("eventAcknowledgement.committedAt", acknowledgement.GetCommittedAt()) != nil {
 		return permanent("event acknowledgement is invalid")
 	}
+	if acknowledgement.GetReconciliation().GetCompleteLogUpload() != nil {
+		return permanent("event acknowledgement must not contain a complete log upload")
+	}
 	if settled, exists := s.settledEvents[acknowledgement.GetRunnerMessageId()]; exists {
 		return s.handleSettledEventAcknowledgement(settled, acknowledgement, now)
 	}
@@ -296,9 +299,6 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 	reconciliation := acknowledgement.GetReconciliation()
 	if err := validateReconciliation(reconciliation); err != nil {
 		return permanent("event acknowledgement: %v", err)
-	}
-	if reconciliation.GetCompleteLogUpload() != nil {
-		return permanent("event acknowledgement must not contain a complete log upload")
 	}
 	pendingLease, pendingAttempt := runnerMessageIdentity(pending)
 	if pendingLease == nil || pendingAttempt == nil || !sameLeaseAttempt(pendingLease, pendingAttempt, reconciliation.GetLease(), reconciliation.GetAttempt()) {
