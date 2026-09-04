@@ -10,6 +10,38 @@ The artifact is accepted only when its `manifest.sha256` verifies and every
 fixture-specific assertion in `scripts/plan03-acceptance.sh` passes. The pull
 request records the exact candidate SHA, workflow run URL, and artifact name.
 
+## Trigger and accountability policy
+
+Normal CI and the short real-gVisor smoke run on every pull request. The full
+retained-evidence gate runs automatically when the workflow, harness, fixture
+inventory, any command, or any module-internal package changes, except for the
+four explicitly remote-only packages `internal/buildinfo`,
+`internal/enrollment`, `internal/gatewayclient`, and
+`internal/runneridentity`. The broad `cmd/**` and `internal/**` patterns make a
+new command or internal package fail safe into the full gate unless it is
+deliberately reviewed and excluded. An unfiltered Go test fixes that exclusion
+set, rejects imports from covered internal packages into those packages, and
+confines their command-level use to the enrollment and connection functions.
+
+`go.mod` and `go.sum` changes do not run the full gate for every pull-request
+revision. The integrator responsible for merging the pull request must classify
+the frozen dependency diff. A Go toolchain change, or a direct or transitive
+dependency change capable of altering artifact handling, evidence or complete
+logs, local job decoding, Paper adaptation, process execution, workspace or
+instance-lock behavior, gVisor OCI construction, structured event transport,
+resource controls, cleanup, or reconciliation, requires a manual full-gate run
+before merge. This includes relevant changes to `golang.org/x/sys`, the
+Provenance toolkit protocol dependency, and Protobuf runtime dependencies.
+
+Dispatch the workflow against the frozen pull-request head branch and verify
+that the resulting run's `headSha` equals the intended head SHA. Record that
+SHA, the run URL, and the `plan03-exit-gate-<SHA>` artifact name in the pull
+request acceptance evidence. If the head moves, the run is stale and must be
+repeated. Every merge that changes `go.mod` or `go.sum` also triggers one
+post-main backstop run; that run must be green before the merged dependency
+state is treated as integrated. The post-main backstop does not replace the
+pre-merge manual run for a sandbox-relevant dependency change.
+
 ## Immutable inputs
 
 - gVisor nightly `2026-08-30`, runsc
@@ -26,7 +58,7 @@ request records the exact candidate SHA, workflow run URL, and artifact name.
 - Temurin JRE 21.0.8+9: 51,942,501 bytes, SHA-256
   `968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03`.
 - Probe and all fixtures: source commit
-  `98d5f07f173a9e3f1b365add24b81c934d7e3c61`. The probe is 478,837 bytes
+  `c4bf6bc9ddd0be3221e897e0ee9e2d409d206dec`. The probe is 478,837 bytes
   with SHA-256
   `abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43`.
 - Prepared Paper runtime: 153,958,528 compressed bytes and 163,396,442
@@ -59,7 +91,7 @@ After downloading and entering the artifact directory, verification is:
 ```sh
 sha256sum --check --strict manifest.sha256
 for log in results/*.log.gz; do gzip --test "$log"; done
-test "$(wc -l < summary.ndjson)" -eq 14
+test "$(wc -l < summary.ndjson)" -eq 16
 ```
 
 ## Observable acceptance paths

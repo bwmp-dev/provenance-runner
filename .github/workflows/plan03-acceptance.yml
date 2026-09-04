@@ -3,22 +3,28 @@ name: Plan 03 acceptance
 on:
   pull_request:
     # CI and the short gVisor smoke cover every PR. Automatically run this
-    # retained-evidence gate only when the local execution stack changes;
-    # dependency-only invariant changes use an exact-head manual dispatch.
+    # retained-evidence gate when the local execution stack changes. Known
+    # remote-only packages are excluded explicitly so new packages fail safe.
     paths:
       - ".github/workflows/plan03-acceptance.yml"
-      - "cmd/provenance-paper-runtime/**"
-      - "cmd/provenance-runner/**"
-      - "internal/artifact/**"
-      - "internal/evidence/**"
-      - "internal/execution/**"
-      - "internal/instancelock/**"
-      - "internal/localjob/**"
-      - "internal/pluginname/**"
-      - "internal/provider/**"
-      - "internal/workspace/**"
+      - "cmd/**"
+      - "internal/**"
+      - "!internal/buildinfo/**"
+      - "!internal/enrollment/**"
+      - "!internal/gatewayclient/**"
+      - "!internal/runneridentity/**"
       - "scripts/plan03-acceptance.sh"
       - "testdata/plan03/**"
+  # Module and toolchain changes get one post-merge backstop run instead of a
+  # full exit-gate run for every pull-request revision. Sandbox-relevant module
+  # changes still require a manual exact-head run before merge; see the evidence
+  # contract in docs/plan-03-exit-gate.md.
+  push:
+    branches:
+      - "main"
+    paths:
+      - "go.mod"
+      - "go.sum"
   workflow_dispatch:
 
 permissions:
@@ -37,7 +43,7 @@ env:
 
 jobs:
   paper-gvisor-exit-gate:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
