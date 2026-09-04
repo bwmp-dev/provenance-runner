@@ -1272,7 +1272,7 @@ func (s *clientSession) acceptRestartCompleteLogUpload(reconciliation *runnerv1.
 		return permanent("reconciliation complete log upload is malformed or expired")
 	}
 	job := &runnerv1.JobSpecification{Lease: reconciliation.GetLease(), Attempt: reconciliation.GetAttempt()}
-	s.client.setCompleteLogTarget(job, target)
+	s.client.setRecoveryCompleteLogTarget(job, target)
 	return nil
 }
 
