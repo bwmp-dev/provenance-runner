@@ -2,14 +2,22 @@ name: Plan 03 acceptance
 
 on:
   pull_request:
+    # CI and the short gVisor smoke cover every PR. Automatically run this
+    # retained-evidence gate only when the local execution stack changes;
+    # dependency-only invariant changes use an exact-head manual dispatch.
     paths:
       - ".github/workflows/plan03-acceptance.yml"
-      - "cmd/**"
-      - "internal/**"
+      - "cmd/provenance-paper-runtime/**"
+      - "cmd/provenance-runner/**"
+      - "internal/artifact/**"
+      - "internal/evidence/**"
+      - "internal/execution/**"
+      - "internal/localjob/**"
+      - "internal/pluginname/**"
+      - "internal/provider/**"
+      - "internal/workspace/**"
       - "scripts/plan03-acceptance.sh"
       - "testdata/plan03/**"
-      - "go.mod"
-      - "go.sum"
   workflow_dispatch:
 
 permissions:
