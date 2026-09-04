@@ -155,6 +155,11 @@ complete_cgroup_sample() {
   done
 }
 
+incomplete_cgroup_sample_is_teardown() {
+  local runner_pid=$1
+  ! kill -0 "$runner_pid" 2>/dev/null
+}
+
 run_contract_tests() {
   for command_name in awk grep head jq mktemp seq; do
     command -v "$command_name" >/dev/null || {
@@ -348,6 +353,17 @@ run_contract_tests() {
   complete_cgroup_sample max current events cpu stat max current events
   if complete_cgroup_sample max current events cpu stat max "" events; then
     printf 'cgroup sample completeness accepted a missing controller field\n' >&2
+    return 1
+  fi
+  if incomplete_cgroup_sample_is_teardown "$$"; then
+    printf 'live runner was classified as teardown\n' >&2
+    return 1
+  fi
+  (:) &
+  local completed_pid=$!
+  wait "$completed_pid"
+  if ! incomplete_cgroup_sample_is_teardown "$completed_pid"; then
+    printf 'completed runner was not classified as teardown\n' >&2
     return 1
   fi
   grep -Fq 'assert_no_residue "$case_identity" "$samples"' "$repository_root/scripts/plan03-acceptance.sh"
@@ -576,8 +592,14 @@ sample_resources() {
         "$memory_max" "$memory_current" "$memory_events" \
         "$cpu_max" "$cpu_stat" \
         "$pids_max" "$pids_current" "$pids_events"; then
-        sleep 0.05
-        continue
+        # The cgroup files may disappear between reads only after the runner
+        # has exited. Skip that teardown observation; while the runner is
+        # alive, fail loudly instead of silently weakening retained evidence.
+        if incomplete_cgroup_sample_is_teardown "$runner_pid"; then
+          break
+        fi
+        printf '%s observed an incomplete cgroup sample while runner pid %s was alive\n' "$fixture" "$runner_pid" >&2
+        return 1
       fi
       if (( sample_number % 5 == 0 )); then
         # Never carry a successful runsc reading across a later failed stats

@@ -79,7 +79,8 @@ The artifact contains:
 - `fixtures.tsv` and `jobs/*.json`: the reviewed expected outcomes and exact
   standalone CLI inputs;
 - `results/*.json`, `results/*.stderr`, and `results/*.log.gz`: structured
-  results and complete sanitized gzip logs for all 14 fixtures;
+  results and complete sanitized gzip logs for all 16 fixture runs (14
+  fixtures, with the PID-bomb case repeated three times);
 - `resources/*.ndjson`: repeated real cgroup and `runsc events --stats`
   samples, including configured CPU/memory/PID controls, CPU throttling,
   memory events, sandbox task count, memory/CPU usage, and network interfaces;

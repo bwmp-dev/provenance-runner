@@ -24,6 +24,10 @@ var plan03RemoteOnlyPackages = map[string]map[string]bool{
 	runnerModule + "/internal/runneridentity": {},
 }
 
+var plan03RemoteOnlyCommandFunctions = map[string]map[string]map[string]bool{
+	"provenance-runner": plan03RemoteOnlyPackages,
+}
+
 func TestPlan03RemoteOnlyPackagesStayOutsideLocalExecution(t *testing.T) {
 	t.Parallel()
 
@@ -45,17 +49,37 @@ func plan03RepositoryRoot(t *testing.T) string {
 func assertPlan03WorkflowExclusions(t *testing.T, repositoryRoot string) {
 	t.Helper()
 	workflowPath := filepath.Join(repositoryRoot, ".github", "workflows", "plan03-acceptance.yml")
-	workflow, err := os.Open(workflowPath)
+	workflow, err := os.ReadFile(workflowPath)
 	if err != nil {
 		t.Fatalf("open Plan 03 workflow: %v", err)
 	}
-	defer workflow.Close()
 
 	want := remoteOnlyDirectories()
 	var got []string
-	scanner := bufio.NewScanner(workflow)
+	var paths []string
+	scanner := bufio.NewScanner(strings.NewReader(string(workflow)))
+	inPullRequest := false
+	inPaths := false
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		rawLine := scanner.Text()
+		line := strings.TrimSpace(rawLine)
+		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		if line == "pull_request:" && indent == 2 {
+			inPullRequest = true
+			continue
+		}
+		if inPullRequest && line == "paths:" && indent == 4 {
+			inPaths = true
+			continue
+		}
+		if inPaths && indent <= 4 && line != "" && !strings.HasPrefix(line, "#") {
+			break
+		}
+		if !inPaths || !strings.HasPrefix(line, `- "`) || !strings.HasSuffix(line, `"`) {
+			continue
+		}
+		path := strings.TrimSuffix(strings.TrimPrefix(line, `- "`), `"`)
+		paths = append(paths, path)
 		const prefix = `- "!internal/`
 		const suffix = `/**"`
 		if strings.HasPrefix(line, prefix) && strings.HasSuffix(line, suffix) {
@@ -68,6 +92,35 @@ func assertPlan03WorkflowExclusions(t *testing.T, repositoryRoot string) {
 	sort.Strings(got)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Plan 03 remote-only workflow exclusions = %v, want %v", got, want)
+	}
+	requiredPaths := []string{
+		".github/workflows/plan03-acceptance.yml",
+		"cmd/**",
+		"internal/**",
+		"scripts/plan03-acceptance.sh",
+		"testdata/plan03/**",
+	}
+	pathIndexes := make(map[string]int, len(paths))
+	for index, path := range paths {
+		if _, duplicate := pathIndexes[path]; duplicate {
+			t.Fatalf("Plan 03 pull-request path %q appears more than once", path)
+		}
+		pathIndexes[path] = index
+	}
+	for _, requiredPath := range requiredPaths {
+		if _, present := pathIndexes[requiredPath]; !present {
+			t.Errorf("Plan 03 pull-request paths do not include %q", requiredPath)
+		}
+	}
+	internalIndex, present := pathIndexes["internal/**"]
+	if !present {
+		return
+	}
+	for _, directory := range want {
+		exclusion := "!internal/" + directory + "/**"
+		if exclusionIndex, present := pathIndexes[exclusion]; !present || exclusionIndex <= internalIndex {
+			t.Errorf("Plan 03 exclusion %q must appear after internal/**", exclusion)
+		}
 	}
 }
 
@@ -127,41 +180,53 @@ func assertCoveredInternalPackagesDoNotImportRemoteOnly(t *testing.T, repository
 
 func assertCommandUsesRemoteOnlyPackagesInAllowedFunctions(t *testing.T, repositoryRoot string) {
 	t.Helper()
-	commandRoot := filepath.Join(repositoryRoot, "cmd", "provenance-runner")
-	entries, err := os.ReadDir(commandRoot)
+	commandsRoot := filepath.Join(repositoryRoot, "cmd")
+	commands, err := os.ReadDir(commandsRoot)
 	if err != nil {
-		t.Fatalf("read runner command: %v", err)
+		t.Fatalf("read commands: %v", err)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" || strings.HasSuffix(entry.Name(), "_test.go") {
+	for _, command := range commands {
+		if !command.IsDir() {
 			continue
 		}
-		path := filepath.Join(commandRoot, entry.Name())
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		commandName := command.Name()
+		commandRoot := filepath.Join(commandsRoot, commandName)
+		entries, err := os.ReadDir(commandRoot)
 		if err != nil {
-			t.Fatalf("parse %s: %v", entry.Name(), err)
+			t.Fatalf("read command %s: %v", commandName, err)
 		}
-		aliases := remoteOnlyImportAliases(t, file)
-		for _, declaration := range file.Decls {
-			functionName := "<package scope>"
-			if function, ok := declaration.(*ast.FuncDecl); ok {
-				functionName = function.Name.Name
+		allowedFunctions := plan03RemoteOnlyCommandFunctions[commandName]
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" || strings.HasSuffix(entry.Name(), "_test.go") {
+				continue
 			}
-			ast.Inspect(declaration, func(node ast.Node) bool {
-				selector, ok := node.(*ast.SelectorExpr)
-				if !ok {
+			path := filepath.Join(commandRoot, entry.Name())
+			file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s/%s: %v", commandName, entry.Name(), err)
+			}
+			aliases := remoteOnlyImportAliases(t, file)
+			for _, declaration := range file.Decls {
+				functionName := "<package scope>"
+				if function, ok := declaration.(*ast.FuncDecl); ok {
+					functionName = function.Name.Name
+				}
+				ast.Inspect(declaration, func(node ast.Node) bool {
+					selector, ok := node.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					identifier, ok := selector.X.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					importPath, excluded := aliases[identifier.Name]
+					if excluded && !allowedFunctions[importPath][functionName] {
+						t.Errorf("%s/%s uses Plan 03 remote-only package %s in %s", commandName, entry.Name(), importPath, functionName)
+					}
 					return true
-				}
-				identifier, ok := selector.X.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				importPath, excluded := aliases[identifier.Name]
-				if excluded && !plan03RemoteOnlyPackages[importPath][functionName] {
-					t.Errorf("%s uses Plan 03 remote-only package %s in %s", entry.Name(), importPath, functionName)
-				}
-				return true
-			})
+				})
+			}
 		}
 	}
 }
