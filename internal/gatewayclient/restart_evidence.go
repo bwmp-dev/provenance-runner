@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
@@ -73,7 +72,6 @@ type restartEvidenceStore struct {
 	done     chan struct{}
 	closing  sync.RWMutex
 	closed   bool
-	overflow atomic.Bool
 
 	mu       sync.Mutex
 	metadata restartEvidenceMetadata
@@ -282,19 +280,11 @@ func (store *restartEvidenceStore) run() {
 			command.done <- err
 		}
 	}
-	store.mu.Lock()
-	if store.overflow.Load() && store.err == nil {
-		store.failLocked(errors.New("restart evidence queue overflowed"))
-	}
-	store.mu.Unlock()
 }
 
 func (store *restartEvidenceStore) apply(command restartEvidenceCommand) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.overflow.Load() && store.err == nil {
-		store.failLocked(errors.New("restart evidence queue overflowed"))
-	}
 	if store.err != nil {
 		return store.err
 	}
@@ -429,17 +419,20 @@ func (store *restartEvidenceStore) observeUsage(usage execution.ResourceUsage) {
 }
 
 func (store *restartEvidenceStore) enqueue(command restartEvidenceCommand) {
+	done := make(chan error, 1)
+	command.done = done
 	store.closing.RLock()
-	defer store.closing.RUnlock()
 	if store.closed {
-		store.overflow.Store(true)
+		store.closing.RUnlock()
 		return
 	}
-	select {
-	case store.commands <- command:
-	default:
-		store.overflow.Store(true)
-	}
+	store.commands <- command
+	store.closing.RUnlock()
+	// Returning from an observation is the durability boundary: the source bytes
+	// and their atomic metadata commit, or a durable failure marker, are on disk.
+	// This lets a subsequent hard process loss recover exactly what the worker
+	// already reported instead of silently dropping an in-memory queue suffix.
+	<-done
 }
 
 func (store *restartEvidenceStore) flush() error {
