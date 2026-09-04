@@ -301,6 +301,14 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 		return permanent("event acknowledgement reconciliation identity does not match the pending event")
 	}
 	activeMatches := state.Active != nil && activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt())
+	if reconciliation.GetCompleteLogUpload() != nil {
+		if !activeMatches {
+			return permanent("event acknowledgement complete log upload does not match the active attempt")
+		}
+		if err := s.acceptRestartCompleteLogUpload(reconciliation, now); err != nil {
+			return err
+		}
+	}
 	if err := validatePendingReconciliation(pending, reconciliation, state); err != nil {
 		return permanent("event acknowledgement: %v", err)
 	}
@@ -539,7 +547,13 @@ func (s *clientSession) handleSettledEventAcknowledgement(settled settledRunnerE
 func (s *clientSession) applyLateReconciliation(reconciliation *runnerv1.LeaseReconciliation, now time.Time) error {
 	state := s.client.journal.snapshot()
 	if state.Active == nil || !activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt()) {
+		if reconciliation.GetCompleteLogUpload() != nil {
+			return permanent("reconciliation complete log upload does not match the active attempt")
+		}
 		return nil
+	}
+	if err := s.acceptRestartCompleteLogUpload(reconciliation, now); err != nil {
+		return err
 	}
 	terminal := terminalLeaseStatus(reconciliation.GetStatus())
 	if terminal {
@@ -738,6 +752,9 @@ func validateReconciliation(reconciliation *runnerv1.LeaseReconciliation) error 
 	}
 	if reconciliation.GetPhase() == runnerv1.JobPhase_JOB_PHASE_CANCELLING && reconciliation.GetCancellationId() == "" && !terminalLeaseStatus(reconciliation.GetStatus()) {
 		return errors.New("nonterminal cancelling reconciliation requires a cancellation ID")
+	}
+	if reconciliation.GetCompleteLogUpload() != nil && (reconciliation.GetStatus() != runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE || reconciliation.GetPhase() == runnerv1.JobPhase_JOB_PHASE_CANCELLING || reconciliation.GetCancellationId() != "" || reconciliation.GetTerminalMessageId() != "") {
+		return errors.New("complete log upload requires a non-cancelling active reconciliation")
 	}
 	return nil
 }
@@ -1182,18 +1199,85 @@ func (s *clientSession) queueLeaseExpired(now time.Time) error {
 }
 
 func (s *clientSession) queueRestartFailure(now time.Time) error {
-	if s.client.activeRestartEvidence() != nil {
-		// Recovery evidence remains durable until the gateway supplies a fresh,
-		// attempt-scoped upload capability. Never replace it with a terminal
-		// event that omits the complete log or cumulative measured usage.
-		return nil
-	}
-	lease, attempt, err := activeIdentity(s.client.journal.snapshot())
+	state := s.client.journal.snapshot()
+	lease, attempt, err := activeIdentity(state)
 	if err != nil {
 		return err
 	}
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(normalizedTerminalTime(now)), Failure: &runnerv1.FailureDetail{Category: runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE, Stage: runnerv1.FailureStage_FAILURE_STAGE_EXECUTION, Code: "runner_restarted", Summary: "runner restarted with an authoritative lease whose execution outcome is uncertain", Retryable: true}}
+	store := s.client.activeRestartEvidence()
+	if store == nil {
+		// Legacy in-memory tests and peers without durable execution evidence keep
+		// their established terminal behavior. A recovered durable execution never
+		// takes this path.
+		failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(normalizedTerminalTime(now)), Failure: restartFailureDetail()}
+		return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+	}
+	target := s.client.completeLogTarget(lease, attempt)
+	if target == nil {
+		// Absence is valid for older gateways. Retain the evidence and wait for a
+		// later reconciliation rather than emitting an incomplete terminal event.
+		return nil
+	}
+	ctx := s.rootContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	recovered, err := store.snapshot(ctx)
+	if err != nil {
+		return permanent("restart evidence is unavailable or invalid")
+	}
+	defer closeCompleteLog(recovered.CompleteLog)
+	expectedIdentity, err := newRestartEvidenceIdentity(lease, attempt)
+	if err != nil || recovered.Identity != expectedIdentity {
+		return permanent("restart evidence identity does not match the active attempt")
+	}
+	completeLog, err := s.client.logUploader.Upload(ctx, target, recovered.CompleteLog)
+	if err != nil {
+		s.client.clearCompleteLogTarget()
+		return errors.New("restart complete log upload failed")
+	}
+	if err := validateRestartLogObject(completeLog, target, recovered.CompleteLog); err != nil {
+		s.client.clearCompleteLogTarget()
+		return permanent("restart complete log upload result is invalid")
+	}
+	// The URI is an ephemeral capability. Drop it immediately after successful
+	// use; only canonical object identity is durably journaled below.
+	s.client.clearCompleteLogTarget()
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(normalizedTerminalTime(now)), Failure: restartFailureDetail(), Usage: recovered.Usage, CompleteLog: completeLog}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+}
+
+func (s *clientSession) acceptRestartCompleteLogUpload(reconciliation *runnerv1.LeaseReconciliation, now time.Time) error {
+	upload := reconciliation.GetCompleteLogUpload()
+	if upload == nil {
+		return nil
+	}
+	if !s.client.recovering || s.client.activeRestartEvidence() == nil || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
+		return permanent("reconciliation complete log upload is not valid for this runner recovery")
+	}
+	state := s.client.journal.snapshot()
+	if state.Active == nil || !activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt()) {
+		return permanent("reconciliation complete log upload does not match the active attempt")
+	}
+	target, rejection := validateCompleteLogUpload(upload, now, now, now)
+	if rejection != nil || target == nil {
+		return permanent("reconciliation complete log upload is malformed or expired")
+	}
+	job := &runnerv1.JobSpecification{Lease: reconciliation.GetLease(), Attempt: reconciliation.GetAttempt()}
+	s.client.setCompleteLogTarget(job, target)
+	return nil
+}
+
+func restartFailureDetail() *runnerv1.FailureDetail {
+	return &runnerv1.FailureDetail{Category: runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE, Stage: runnerv1.FailureStage_FAILURE_STAGE_EXECUTION, Code: "runner_restarted", Summary: "runner restarted with an authoritative lease whose execution outcome is uncertain", Retryable: true}
+}
+
+func validateRestartLogObject(object *runnerv1.LogObject, target *completeLogTarget, completeLog *execution.CompleteLog) error {
+	digest, size, err := validateUploadArchive(completeLog)
+	if err != nil || object == nil || target == nil || object.GetObjectKey() != target.objectKey || object.GetContentType() != completeLogUploadContentType || object.GetCompressedSizeBytes() != uint64(size) || object.GetDigest().GetAlgorithm() != runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256 || !bytes.Equal(object.GetDigest().GetValue(), digest) {
+		return errors.New("uploaded restart log identity does not match the durable evidence")
+	}
+	return nil
 }
 
 func (s *clientSession) clearPending() error {

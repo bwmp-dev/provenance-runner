@@ -318,6 +318,11 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	if err != nil {
 		return false, err
 	}
+	if c.recovering {
+		// Recovery upload capabilities are connection-scoped secrets. A new
+		// authenticated stream must receive a fresh target in reconciliation.
+		c.clearCompleteLogTarget()
+	}
 	if err := c.reconcileCredentialRotationAfterAuthentication(); err != nil {
 		return true, permanent("credential rotation reconnect state failed")
 	}

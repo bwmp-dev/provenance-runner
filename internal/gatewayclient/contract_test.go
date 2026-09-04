@@ -44,8 +44,8 @@ func TestReleasedAlpha7ContractFieldNumbersAndFeatures(t *testing.T) {
 	}
 }
 
-func TestReleasedAlpha7ProtocolModuleAuthority(t *testing.T) {
-	const authority = "v0.0.0-20260902143734-85f89efbed00"
+func TestExpectedProtocolModuleAuthority(t *testing.T) {
+	const authority = "v0.0.0-20260904081456-85db7a428d42"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)

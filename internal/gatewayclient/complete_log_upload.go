@@ -190,6 +190,9 @@ func validateCompleteLogUpload(upload *runnerv1.ObjectUpload, now, offerExpiresA
 	if upload == nil {
 		return nil, nil
 	}
+	if len(upload.ProtoReflect().GetUnknown()) != 0 {
+		return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload contains unsupported fields")
+	}
 	if len(upload.GetUri()) == 0 || len(upload.GetUri()) > maximumUploadURIBytes || !utf8.ValidString(upload.GetUri()) {
 		return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload URI is missing or invalid")
 	}
