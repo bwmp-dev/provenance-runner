@@ -12,6 +12,7 @@ on:
       - "internal/artifact/**"
       - "internal/evidence/**"
       - "internal/execution/**"
+      - "internal/instancelock/**"
       - "internal/localjob/**"
       - "internal/pluginname/**"
       - "internal/provider/**"
