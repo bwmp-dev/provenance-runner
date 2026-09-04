@@ -10,7 +10,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-func TestReleasedAlpha7ContractFieldNumbersAndFeatures(t *testing.T) {
+func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 	fields := []struct {
 		message protoreflect.MessageDescriptor
 		name    protoreflect.Name
@@ -20,6 +20,7 @@ func TestReleasedAlpha7ContractFieldNumbersAndFeatures(t *testing.T) {
 		{(&runnerv1.DependencyInput{}).ProtoReflect().Descriptor(), "plugin_name", 10},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "target_plugin_name", 20},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "job_correlation", 21},
+		{(&runnerv1.LeaseReconciliation{}).ProtoReflect().Descriptor(), "complete_log_upload", 16},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "event_acknowledgement", 30},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "heartbeat_acknowledgement", 31},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "credential_rotation", 15},
@@ -42,10 +43,13 @@ func TestReleasedAlpha7ContractFieldNumbersAndFeatures(t *testing.T) {
 	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1.Number() != 3 {
 		t.Fatalf("job correlation feature = %d, want 3", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1.Number())
 	}
+	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY.Number() != 4 {
+		t.Fatalf("restart upload recovery feature = %d, want 4", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY.Number())
+	}
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	const authority = "v0.0.0-20260904081456-85db7a428d42"
+	const authority = "v0.0.0-20260904093248-8668dc9317b1"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)

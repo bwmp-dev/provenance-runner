@@ -24,6 +24,7 @@ type clientSession struct {
 	authenticated                 *runnerv1.Authenticated
 	send                          func(*runnerv1.RunnerMessage) error
 	jobCorrelationV1              bool
+	restartUploadRecovery         bool
 	seen                          map[string][sha256.Size]byte
 	seenOrder                     []string
 	pendingHeartbeat              *runnerv1.RunnerMessage
@@ -1252,7 +1253,7 @@ func (s *clientSession) acceptRestartCompleteLogUpload(reconciliation *runnerv1.
 	if upload == nil {
 		return nil
 	}
-	if !s.client.recovering || s.client.activeRestartEvidence() == nil || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
+	if !s.restartUploadRecovery || !s.client.recovering || s.client.activeRestartEvidence() == nil || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
 		return permanent("reconciliation complete log upload is not valid for this runner recovery")
 	}
 	state := s.client.journal.snapshot()

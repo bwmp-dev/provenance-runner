@@ -106,7 +106,7 @@ func TestHandshakeCapabilitiesHeartbeatAndDrainOrdering(t *testing.T) {
 		t.Fatalf("authenticate = %#v", got)
 	}
 	capabilities := received[1].GetCapabilities()
-	if capabilities == nil || capabilities.GetRunnerVersion() != "test" || capabilities.GetOperatingSystem() != runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX || capabilities.GetArchitecture() != runnerv1.Architecture_ARCHITECTURE_AMD64 || fmt.Sprint(capabilities.GetFeatures()) != "[PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS PROTOCOL_FEATURE_JOB_CORRELATION_V1]" {
+	if capabilities == nil || capabilities.GetRunnerVersion() != "test" || capabilities.GetOperatingSystem() != runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX || capabilities.GetArchitecture() != runnerv1.Architecture_ARCHITECTURE_AMD64 || fmt.Sprint(capabilities.GetFeatures()) != "[PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS PROTOCOL_FEATURE_JOB_CORRELATION_V1 PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY]" {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
 	if fmt.Sprint(capabilities.GetProtocolVersions()) != "[1]" || fmt.Sprint(capabilities.GetSandboxes()) != "[SANDBOX_KIND_GVISOR]" || fmt.Sprint(capabilities.GetProviders()) != "[SERVER_PROVIDER_PAPER]" {

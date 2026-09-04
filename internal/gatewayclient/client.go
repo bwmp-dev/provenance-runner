@@ -336,15 +336,17 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		return true, err
 	}
 	jobCorrelationV1 := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
+	restartUploadRecovery := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY)
 	session := &clientSession{
-		client:           c,
-		authenticated:    authenticated,
-		send:             send,
-		jobCorrelationV1: jobCorrelationV1,
-		seen:             make(map[string][sha256.Size]byte),
-		rootContext:      ctx,
-		cancelSession:    cancel,
-		generation:       generation,
+		client:                c,
+		authenticated:         authenticated,
+		send:                  send,
+		jobCorrelationV1:      jobCorrelationV1,
+		restartUploadRecovery: restartUploadRecovery,
+		seen:                  make(map[string][sha256.Size]byte),
+		rootContext:           ctx,
+		cancelSession:         cancel,
+		generation:            generation,
 	}
 	if err := session.rememberGatewayMessage(first); err != nil {
 		return true, err
@@ -507,7 +509,10 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	if c.config.credentialStore != nil {
 		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION)
 	}
-	features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
+	features = append(features,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY,
+	)
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,
 		ProtocolVersions: []string{ProtocolVersion},

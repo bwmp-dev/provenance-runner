@@ -288,22 +288,29 @@ func TestJobCorrelationDoesNotReplaceAuthorizationScope(t *testing.T) {
 	}
 }
 
-func TestAdvertisedCorrelationFeatureIsUniqueAndKnown(t *testing.T) {
+func TestAdvertisedFeaturesAreUniqueAndKnown(t *testing.T) {
 	features := newClient(validConfig(), nil).capabilities().GetFeatures()
 	if err := validateAdvertisedFeatures(features); err != nil {
 		t.Fatal(err)
 	}
-	count := 0
+	correlationCount := 0
+	restartRecoveryCount := 0
 	for _, feature := range features {
 		if feature == runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1 {
-			count++
+			correlationCount++
+		}
+		if feature == runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY {
+			restartRecoveryCount++
 		}
 	}
-	if count != 1 {
-		t.Fatalf("job correlation feature count = %d in %v", count, features)
+	if correlationCount != 1 || restartRecoveryCount != 1 {
+		t.Fatalf("feature counts: correlation=%d restart-recovery=%d in %v", correlationCount, restartRecoveryCount, features)
 	}
 	if err := validateAdvertisedFeatures(append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)); err == nil {
 		t.Fatal("duplicate job correlation feature accepted")
+	}
+	if err := validateAdvertisedFeatures(append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY)); err == nil {
+		t.Fatal("duplicate restart upload recovery feature accepted")
 	}
 	if err := validateAdvertisedFeatures(append(features, runnerv1.ProtocolFeature(127))); err == nil {
 		t.Fatal("unknown protocol feature accepted")

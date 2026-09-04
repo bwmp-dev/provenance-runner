@@ -95,7 +95,7 @@ func newRestartRecoveryHarness(t *testing.T, now time.Time, uploader completeLog
 	harness := &restartRecoveryHarness{client: client, offer: offer}
 	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
 	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
-	harness.session = &clientSession{client: client, authenticated: authenticated, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+	harness.session = &clientSession{client: client, authenticated: authenticated, restartUploadRecovery: true, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
 		harness.sent = append(harness.sent, proto.Clone(message).(*runnerv1.RunnerMessage))
 		return nil
 	}}
@@ -256,6 +256,9 @@ func TestRestartRecoveryRejectsInvalidOrSubstitutedUploadResponses(t *testing.T)
 			h.session.authenticated.RunnerId = "50000000-0000-0000-0000-000000000002"
 		}},
 		{name: "not recovery", mutate: func(h *restartRecoveryHarness, _ *runnerv1.HeartbeatAcknowledgement) { h.client.recovering = false }},
+		{name: "not advertised on stream", mutate: func(h *restartRecoveryHarness, _ *runnerv1.HeartbeatAcknowledgement) {
+			h.session.restartUploadRecovery = false
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
