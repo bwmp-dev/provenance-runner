@@ -233,6 +233,30 @@ func TestRestartEvidenceFailsClosedOnMissingUsageAndCompleteLogBound(t *testing.
 	}
 }
 
+func TestRestartEvidenceAppendRejectsHardLinkedSource(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	journalPath, _, offer := restartEvidenceFixture(t, now)
+	store, err := createRestartEvidenceStore(journalPath, offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	if err := os.Link(store.stdoutPath, filepath.Join(t.TempDir(), "stdout-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(store.stdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if privateFileMetadata(info) {
+		t.Skip("platform does not expose private file ownership and link metadata")
+	}
+	store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: []byte("must not append\n")})
+	if err := store.flush(); err == nil || !strings.Contains(err.Error(), "unsafe permissions") {
+		t.Fatalf("hard-linked restart evidence append error = %v", err)
+	}
+}
+
 func TestRestartEvidenceContainsNoOfferOrCredentialSecretAndCleansIdempotently(t *testing.T) {
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 	config := validConfig()

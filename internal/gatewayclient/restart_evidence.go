@@ -359,7 +359,7 @@ func (store *restartEvidenceStore) appendLocked(stream string, data []byte) erro
 
 func openRestartEvidenceAppend(path string, size int64) (*os.File, error) {
 	pathInfo, err := os.Lstat(path)
-	if err != nil || !pathInfo.Mode().IsRegular() || !privateFileMode(pathInfo.Mode().Perm()) || pathInfo.Size() != size {
+	if err != nil || !pathInfo.Mode().IsRegular() || !privateFileMode(pathInfo.Mode().Perm()) || !privateFileMetadata(pathInfo) || pathInfo.Size() != size {
 		return nil, errors.New("restart evidence source is missing, substituted, or has unsafe permissions")
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, restartEvidenceFileMode)
@@ -367,7 +367,7 @@ func openRestartEvidenceAppend(path string, size int64) (*os.File, error) {
 		return nil, err
 	}
 	fileInfo, err := file.Stat()
-	if err != nil || !os.SameFile(pathInfo, fileInfo) || !fileInfo.Mode().IsRegular() || !privateFileMode(fileInfo.Mode().Perm()) || fileInfo.Size() != size {
+	if err != nil || !os.SameFile(pathInfo, fileInfo) || !fileInfo.Mode().IsRegular() || !privateFileMode(fileInfo.Mode().Perm()) || !privateFileMetadata(fileInfo) || fileInfo.Size() != size {
 		_ = file.Close()
 		return nil, errors.New("restart evidence source changed while opening")
 	}
