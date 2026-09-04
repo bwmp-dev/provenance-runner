@@ -7,27 +7,40 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSystemdLauncherExecutesRunscAndLeavesTrustedMarker(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), systemdLaunchMarker)
-	command := exec.Command(
-		os.Args[0],
-		SystemdLauncherCommand,
-		"--marker", marker,
-		"--",
-		"/bin/sh", "-c", "exit 7",
+	scopeRoot := "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"
+	unit := "provenance-0123456789abcdef0123456789abcdef"
+	expectedScope := systemdCgroupPath(scopeRoot, unit)
+	execCalled := false
+	code := runSystemdLauncher(
+		[]string{"--marker", marker, "--scope-root", scopeRoot, "--unit", unit, "--", "/bin/sh", "-c", "exit 7"},
+		io.Discard,
+		func() (string, bool) { return strings.TrimPrefix(expectedScope, "/sys/fs/cgroup"), true },
+		func(path string) (os.FileInfo, error) {
+			if path != expectedScope {
+				t.Fatalf("stat path = %q, want %q", path, expectedScope)
+			}
+			return directoryInfo{name: filepath.Base(path)}, nil
+		},
+		func(path string, args, _ []string) error {
+			execCalled = true
+			if path != "/bin/sh" || strings.Join(args, " ") != "/bin/sh -c exit 7" {
+				t.Fatalf("exec = %q %#v", path, args)
+			}
+			return nil
+		},
 	)
-	err := command.Run()
-	var exitError *exec.ExitError
-	if !errors.As(err, &exitError) || exitError.ExitCode() != 7 {
-		t.Fatalf("launcher exit = %v, want child exit 7", err)
+	if code != 0 || !execCalled {
+		t.Fatalf("launcher code = %d, exec called = %t", code, execCalled)
 	}
-	if err := validateSystemdLaunchMarker(marker); err != nil {
+	if err := validateSystemdLaunchMarker(marker, expectedScope); err != nil {
 		t.Fatalf("validateSystemdLaunchMarker() error = %v", err)
 	}
 }
@@ -35,7 +48,16 @@ func TestSystemdLauncherExecutesRunscAndLeavesTrustedMarker(t *testing.T) {
 func TestSystemdLauncherRemovesMarkerWhenExecFails(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), systemdLaunchMarker)
 	var stderr bytes.Buffer
-	code := RunSystemdLauncher([]string{"--marker", marker, "--", "/definitely/missing/runsc"}, &stderr)
+	scopeRoot := "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"
+	unit := "provenance-0123456789abcdef0123456789abcdef"
+	expectedScope := systemdCgroupPath(scopeRoot, unit)
+	code := runSystemdLauncher(
+		[]string{"--marker", marker, "--scope-root", scopeRoot, "--unit", unit, "--", "/definitely/missing/runsc"},
+		&stderr,
+		func() (string, bool) { return strings.TrimPrefix(expectedScope, "/sys/fs/cgroup"), true },
+		func(string) (os.FileInfo, error) { return directoryInfo{name: unit + ".scope"}, nil },
+		func(string, []string, []string) error { return os.ErrNotExist },
+	)
 	if code != runscFailureExitCode {
 		t.Fatalf("RunSystemdLauncher() = %d, want %d", code, runscFailureExitCode)
 	}
@@ -52,3 +74,12 @@ func TestSystemdLauncherRejectsInvalidArguments(t *testing.T) {
 		t.Fatalf("RunSystemdLauncher() = %d, want %d", code, runscFailureExitCode)
 	}
 }
+
+type directoryInfo struct{ name string }
+
+func (info directoryInfo) Name() string  { return info.name }
+func (directoryInfo) Size() int64        { return 0 }
+func (directoryInfo) Mode() os.FileMode  { return os.ModeDir | 0o700 }
+func (directoryInfo) ModTime() time.Time { return time.Time{} }
+func (directoryInfo) IsDir() bool        { return true }
+func (directoryInfo) Sys() any           { return nil }

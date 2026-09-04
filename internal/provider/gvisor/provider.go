@@ -206,6 +206,10 @@ func (p *Provider) Identity() string {
 }
 
 func existingCgroupRoot(path string) (string, error) {
+	return existingCgroupRootAt(path, "/sys/fs/cgroup", currentUnifiedCgroup)
+}
+
+func existingCgroupRootAt(path, mount string, current func() (string, bool)) (string, error) {
 	if path == "" || !filepath.IsAbs(path) {
 		return "", errors.New("systemd cgroup root must be an absolute directory")
 	}
@@ -213,7 +217,8 @@ func existingCgroupRoot(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve systemd cgroup root: %w", err)
 	}
-	if resolved == "/sys/fs/cgroup" || !strings.HasPrefix(resolved, "/sys/fs/cgroup/") {
+	mount = filepath.Clean(mount)
+	if resolved == mount || !strings.HasPrefix(resolved, mount+string(filepath.Separator)) {
 		return "", errors.New("systemd cgroup root must be a descendant of /sys/fs/cgroup")
 	}
 	if filepath.Base(resolved) != "app.slice" {
@@ -226,12 +231,12 @@ func existingCgroupRoot(path string) (string, error) {
 	if !info.IsDir() {
 		return "", errors.New("systemd cgroup root must be a directory")
 	}
-	relative, ok := currentUnifiedCgroup()
+	relative, ok := current()
 	if !ok {
 		return "", errors.New("cannot identify the runner's unified cgroup")
 	}
-	current := filepath.Clean(filepath.Join("/sys/fs/cgroup", relative))
-	if current != resolved && !strings.HasPrefix(current, resolved+string(filepath.Separator)) {
+	currentPath := filepath.Clean(filepath.Join(mount, relative))
+	if currentPath != resolved && !strings.HasPrefix(currentPath, resolved+string(filepath.Separator)) {
 		return "", errors.New("runner process is outside the configured user manager app.slice")
 	}
 	return resolved, nil
@@ -635,6 +640,7 @@ type preparedEnvironment struct {
 	usage                      execution.ResourceUsage
 	outerPIDDenials            uint64
 	pidDenialEvidenceAvailable bool
+	scopeCgroupObserved        bool
 	structuredEventPath        string
 	structuredEventChannel     *structuredEventChannel
 	structuredEventFile        *execution.StructuredEventFile
@@ -715,14 +721,22 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, ctx.Err()
 	}
 	if e.provider.config.CgroupDriver == CgroupDriverSystemdUser {
-		if err := validateSystemdLaunchMarker(launchMarker); err != nil {
+		expectedScope := systemdCgroupPath(e.provider.config.SystemdCgroupRoot, e.containerID)
+		if err := validateSystemdLaunchMarker(launchMarker, expectedScope); err != nil {
 			return execution.ExecutionOutcome{ExitCode: result.ExitCode}, fmt.Errorf("systemd user scope did not launch runsc: %w", errors.Join(result.Err, err))
 		}
+		e.usageMu.Lock()
+		e.scopeCgroupObserved = true
+		e.usageMu.Unlock()
 	}
 	e.usageMu.Lock()
 	outerPIDDenials := e.outerPIDDenials
 	denialEvidenceAvailable := e.pidDenialEvidenceAvailable
+	scopeCgroupObserved := e.scopeCgroupObserved
 	e.usageMu.Unlock()
+	if e.provider.config.CgroupDriver == CgroupDriverSystemdUser && !scopeCgroupObserved {
+		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, errors.New("systemd user scope was never observed")
+	}
 	return classifyRunResult(result, outerPIDDenials, denialEvidenceAvailable)
 }
 

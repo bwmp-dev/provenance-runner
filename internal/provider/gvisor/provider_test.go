@@ -635,6 +635,7 @@ func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
 		provider.config.CgroupDriver = CgroupDriverSystemdUser
 		provider.config.SystemdRunPath = "/usr/bin/systemd-run"
 		provider.config.systemdLauncher = "/opt/provenance/provenance-runner"
+		provider.config.SystemdCgroupRoot = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"
 		exitCode := 1
 		runner.run = func(context.Context, command) commandResult {
 			return commandResult{ExitCode: &exitCode, Err: errors.New("systemd scope unavailable")}
@@ -651,14 +652,24 @@ func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
 		provider.config.CgroupDriver = CgroupDriverSystemdUser
 		provider.config.SystemdRunPath = "/usr/bin/systemd-run"
 		provider.config.systemdLauncher = "/opt/provenance/provenance-runner"
+		provider.config.SystemdCgroupRoot = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"
 		exitCode := 1
 		runner.run = func(_ context.Context, invocation command) commandResult {
+			var marker, scopeRoot, unit string
 			for index, argument := range invocation.Args {
 				if argument == "--marker" && index+1 < len(invocation.Args) {
-					if err := os.WriteFile(invocation.Args[index+1], []byte("systemd-user-scope\n"), 0o600); err != nil {
-						t.Fatal(err)
-					}
+					marker = invocation.Args[index+1]
 				}
+				if argument == "--scope-root" && index+1 < len(invocation.Args) {
+					scopeRoot = invocation.Args[index+1]
+				}
+				if argument == "--unit" && index+1 < len(invocation.Args) {
+					unit = invocation.Args[index+1]
+				}
+			}
+			content := "systemd-user-scope:" + systemdCgroupPath(scopeRoot, unit) + "\n"
+			if err := os.WriteFile(marker, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
 			}
 			return commandResult{ExitCode: &exitCode, Err: errors.New("exit status 1")}
 		}

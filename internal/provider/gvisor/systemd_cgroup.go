@@ -33,8 +33,10 @@ func (p *Provider) wrapRunCommand(invocation command, limits cgroupLimits, conta
 	arguments := []string{
 		"--user",
 		"--scope",
+		"--collect",
 		"--quiet",
 		"--unit=" + containerID,
+		"--slice=" + filepath.Base(p.config.SystemdCgroupRoot),
 		"--property=MemoryAccounting=yes",
 		"--property=CPUAccounting=yes",
 		"--property=TasksAccounting=yes",
@@ -48,6 +50,10 @@ func (p *Provider) wrapRunCommand(invocation command, limits cgroupLimits, conta
 		SystemdLauncherCommand,
 		"--marker",
 		marker,
+		"--scope-root",
+		p.config.SystemdCgroupRoot,
+		"--unit",
+		containerID,
 		"--",
 		invocation.Path,
 	}

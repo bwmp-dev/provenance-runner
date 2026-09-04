@@ -3,6 +3,7 @@ package gvisor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,8 +21,32 @@ func TestCgroupUsageRootsIncludeDelegatedSibling(t *testing.T) {
 func TestCgroupUsageRootsPreferConfiguredSystemdScope(t *testing.T) {
 	roots := cgroupUsageRoots("/unrelated/runner", "provenance-abc", "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice")
 	want := "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/provenance-abc.scope"
-	if len(roots) != 4 || roots[0] != want {
+	if len(roots) != 1 || roots[0] != want {
 		t.Fatalf("roots = %#v, want configured systemd scope %q first", roots, want)
+	}
+}
+
+func TestSampleUsageCarriesScopePIDDenialIntoInfrastructureClassification(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"cpu.stat":    "usage_usec 10\n",
+		"memory.peak": "1024\n",
+		"io.stat":     "8:0 rbytes=2 wbytes=3\n",
+		"pids.events": "max 4\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	environment := &preparedEnvironment{provider: &Provider{config: Config{CgroupDriver: CgroupDriverSystemdUser}}}
+	environment.sampleUsageRoots([]string{root})
+	if !environment.scopeCgroupObserved || !environment.pidDenialEvidenceAvailable || environment.outerPIDDenials != 4 {
+		t.Fatalf("sampled scope state = observed:%t available:%t denials:%d", environment.scopeCgroupObserved, environment.pidDenialEvidenceAvailable, environment.outerPIDDenials)
+	}
+	exitCode := 2
+	outcome, err := classifyRunResult(commandResult{ExitCode: &exitCode, Err: os.ErrProcessDone}, environment.outerPIDDenials, environment.pidDenialEvidenceAvailable)
+	if err == nil || outcome.ExitCode == nil || *outcome.ExitCode != 2 || !strings.Contains(err.Error(), "gvisor_runtime_pid_reserve_exhausted") {
+		t.Fatalf("classification = %#v, %v", outcome, err)
 	}
 }
 

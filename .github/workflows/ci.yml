@@ -110,6 +110,59 @@ jobs:
             -test.run '^TestRunscSmoke$' \
             -test.count=1 \
             -test.timeout=60s
+      - name: Prepare non-root systemd user manager and narrow runsc profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_uid="$(id -u)"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@${runner_uid}.service"
+          runtime_dir="/run/user/${runner_uid}"
+          test -S "${runtime_dir}/bus"
+          profile="${RUNNER_TEMP}/provenance-ci-runsc.apparmor"
+          runsc="${PROVENANCE_INSTALL_ROOT}/gvisor/runsc"
+          printf '%s\n' \
+            'abi <abi/4.0>,' \
+            'include <tunables/global>' \
+            '' \
+            "${runsc} flags=(default_allow) {" \
+            '  userns,' \
+            '}' > "${profile}"
+          sudo apparmor_parser -r "${profile}"
+          echo "XDG_RUNTIME_DIR=${runtime_dir}" >> "${GITHUB_ENV}"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=${runtime_dir}/bus" >> "${GITHUB_ENV}"
+          echo "PROVENANCE_SYSTEMD_CGROUP_ROOT=/sys/fs/cgroup/user.slice/user-${runner_uid}.slice/user@${runner_uid}.service/app.slice" >> "${GITHUB_ENV}"
+          echo "PROVENANCE_CI_APPARMOR_PROFILE=${profile}" >> "${GITHUB_ENV}"
+      - name: Run real non-root systemd-user cgroup smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          systemctl --user start app.slice
+          test -d "${PROVENANCE_SYSTEMD_CGROUP_ROOT}"
+          systemd-run --user --scope --collect --quiet \
+            --slice=app.slice \
+            --unit="provenance-smoke-controller-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            env \
+              PROVENANCE_RUNSC_SMOKE=1 \
+              PROVENANCE_RUNSC_PATH="${PROVENANCE_RUNSC_PATH}" \
+              PROVENANCE_RUNSC_ROOTFS="${PROVENANCE_RUNSC_ROOTFS}" \
+              PROVENANCE_GVISOR_CGROUP_DRIVER=systemd-user \
+              PROVENANCE_SYSTEMD_RUN_PATH=/usr/bin/systemd-run \
+              PROVENANCE_SYSTEMD_CGROUP_ROOT="${PROVENANCE_SYSTEMD_CGROUP_ROOT}" \
+              "${RUNNER_TEMP}/gvisor-smoke.test" \
+                -test.v \
+                -test.run '^TestRunscSmoke$' \
+                -test.count=1 \
+                -test.timeout=90s
+      - name: Remove non-root systemd smoke policy
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${PROVENANCE_CI_APPARMOR_PROFILE:-}" && -f "${PROVENANCE_CI_APPARMOR_PROFILE}" ]]; then
+            sudo apparmor_parser -R "${PROVENANCE_CI_APPARMOR_PROFILE}"
+          fi
+          sudo loginctl disable-linger "$(id -un)" || true
       - name: Remove delegated cgroup subtree
         if: always()
         shell: bash
