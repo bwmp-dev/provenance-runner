@@ -339,7 +339,7 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 			s.client.recovering = false
 			s.rememberSettledMessage(pending, state.Active.Phase)
 			s.discardDeferred(errors.New("gateway reconciled the lease as terminal"))
-			err = s.client.clearRestartEvidence()
+			_ = s.client.clearRestartEvidence()
 		}
 		return err
 	}
@@ -413,7 +413,7 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 			s.client.clearCompleteLogTarget()
 			s.rememberSettledMessage(pending, state.Active.Phase)
 			s.discardDeferred(errors.New("job reached a terminal state"))
-			err = s.client.clearRestartEvidence()
+			_ = s.client.clearRestartEvidence()
 		}
 		return err
 	default:
@@ -567,7 +567,8 @@ func (s *clientSession) applyLateReconciliation(reconciliation *runnerv1.LeaseRe
 		s.client.clearCompleteLogTarget()
 		s.rememberSettledEvent(pending, state.Active.Phase)
 		s.discardDeferred(errors.New("gateway reconciled the lease as terminal"))
-		return s.client.clearRestartEvidence()
+		_ = s.client.clearRestartEvidence()
+		return nil
 	}
 	if reconciliation.GetCancellationId() != "" {
 		if err := s.applyAuthoritativeReconciliation(reconciliation); err != nil {
@@ -1220,12 +1221,12 @@ func (s *clientSession) queueRestartFailure(now time.Time) error {
 	}
 	recovered, err := store.snapshot(ctx)
 	if err != nil {
-		return permanent("restart evidence is unavailable or invalid")
+		return s.queueRestartFailureWithoutEvidence(now, lease, attempt)
 	}
 	defer closeCompleteLog(recovered.CompleteLog)
 	expectedIdentity, err := newRestartEvidenceIdentity(lease, attempt)
 	if err != nil || recovered.Identity != expectedIdentity {
-		return permanent("restart evidence identity does not match the active attempt")
+		return s.queueRestartFailureWithoutEvidence(now, lease, attempt)
 	}
 	completeLog, err := s.client.logUploader.Upload(ctx, target, recovered.CompleteLog)
 	if err != nil {
@@ -1240,6 +1241,16 @@ func (s *clientSession) queueRestartFailure(now time.Time) error {
 	// use; only canonical object identity is durably journaled below.
 	s.client.clearCompleteLogTarget()
 	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(normalizedTerminalTime(now)), Failure: restartFailureDetail(), Usage: recovered.Usage, CompleteLog: completeLog}
+	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
+}
+
+func (s *clientSession) queueRestartFailureWithoutEvidence(now time.Time, lease *runnerv1.LeaseIdentity, attempt *runnerv1.AttemptIdentity) error {
+	// A missing, incomplete, or untrusted snapshot must never be uploaded or
+	// strand the active journal in a restart loop. Release all ephemeral upload
+	// authority and durable evidence before journaling the bounded legacy event.
+	s.client.clearCompleteLogTarget()
+	_ = s.client.clearRestartEvidence()
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(normalizedTerminalTime(now)), Failure: restartFailureDetail()}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
 }
 

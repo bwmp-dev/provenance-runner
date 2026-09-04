@@ -144,7 +144,7 @@ func TestLiveExecutionObserverFeedsDurableRestartEvidence(t *testing.T) {
 	}
 }
 
-func TestRestartEvidenceRejectsMissingCorruptSubstitutedAndUnsafeState(t *testing.T) {
+func TestRestartEvidenceDiscardsMissingCorruptSubstitutedAndUnsafeState(t *testing.T) {
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name   string
@@ -208,10 +208,69 @@ func TestRestartEvidenceRejectsMissingCorruptSubstitutedAndUnsafeState(t *testin
 			}
 			directory := restartEvidencePath(journalPath)
 			test.mutate(t, directory, active, offer)
-			if _, err := openRestartEvidenceStore(journalPath, active); err == nil {
-				t.Fatal("unsafe restart evidence was accepted")
+			reopened, err := openRestartEvidenceStore(journalPath, active)
+			if err != nil || reopened != nil {
+				t.Fatalf("unsafe restart evidence recovery = %#v, %v", reopened, err)
+			}
+			if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsafe restart evidence remained active: %v", err)
 			}
 		})
+	}
+}
+
+func TestNewClientRecoversActiveLegacyJournalWithoutEvidenceDirectory(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	config := validConfig()
+	config.journalFile = filepath.Join(t.TempDir(), "journal.json")
+	journal, err := openJournal(config.journalFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, active, offer := restartEvidenceFixture(t, now)
+	if err := journal.update(func(state *journalState) error {
+		state.Active = active
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := newClientWithWorker(config, nil, nil)
+	if err != nil {
+		t.Fatalf("construct client with legacy active journal: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if !client.recovering || client.activeRestartEvidence() != nil {
+		t.Fatalf("legacy recovery state = recovering %t evidence %#v", client.recovering, client.activeRestartEvidence())
+	}
+	if advertisedFeature(client.capabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY) {
+		t.Fatal("legacy active recovery advertised restart upload support without a trusted evidence store")
+	}
+	var sent []*runnerv1.RunnerMessage
+	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
+	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
+	session := &clientSession{client: client, authenticated: authenticated, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+		sent = append(sent, proto.Clone(message).(*runnerv1.RunnerMessage))
+		return nil
+	}}
+	if err := session.sendHeartbeat(now); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := session.pendingHeartbeat
+	acknowledgement := &runnerv1.HeartbeatAcknowledgement{
+		RunnerMessageId: heartbeat.GetMessageId(), Sequence: heartbeat.GetHeartbeat().GetSequence(), CommittedAt: timestamppb.New(now),
+		Reconciliations: []*runnerv1.LeaseReconciliation{{
+			Lease: proto.Clone(offer.GetJob().GetLease()).(*runnerv1.LeaseIdentity), Attempt: proto.Clone(offer.GetJob().GetAttempt()).(*runnerv1.AttemptIdentity),
+			Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_APPLIED, Status: runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING,
+		}},
+	}
+	if err := session.handleHeartbeatAcknowledgement(acknowledgement, now); err != nil {
+		t.Fatalf("legacy restart reconciliation: %v", err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("legacy recovery sent %d messages", len(sent))
+	}
+	if failed := sent[1].GetFailed(); failed == nil || failed.GetFailure().GetCode() != "runner_restarted" || failed.GetCompleteLog() != nil || failed.GetUsage() != nil {
+		t.Fatalf("legacy restart terminal = %#v", failed)
 	}
 }
 
@@ -243,13 +302,21 @@ func TestRestartEvidenceFailsClosedOnMissingUsageAndCompleteLogBound(t *testing.
 	}
 }
 
-func TestRestartEvidenceObservationNeverBackpressuresProvider(t *testing.T) {
-	store := &restartEvidenceStore{commands: make(chan restartEvidenceCommand, 1)}
-	store.commands <- restartEvidenceCommand{stream: "stdout", data: []byte("already queued\n")}
+func TestRestartEvidenceCoalescesBurstWithoutBackpressuringProvider(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	journalPath, _, offer := restartEvidenceFixture(t, now)
+	store, err := createRestartEvidenceStore(journalPath, offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
 
 	returned := make(chan struct{})
 	go func() {
-		store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: []byte("must not block\n")})
+		for range restartEvidenceQueueDepth * 4 {
+			store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: []byte("burst\n")})
+		}
+		store.observeUsage(execution.ResourceUsage{CPUTime: time.Second})
 		close(returned)
 	}()
 	select {
@@ -257,8 +324,13 @@ func TestRestartEvidenceObservationNeverBackpressuresProvider(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("restart evidence observer backpressured the execution provider")
 	}
-	if !store.overflow.Load() {
-		t.Fatal("full restart evidence queue did not fail the recovery snapshot closed")
+	recovered, err := store.snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("coalesced burst snapshot: %v", err)
+	}
+	defer closeCompleteLog(recovered.CompleteLog)
+	if store.overflow.Load() || recovered.CompleteLog.UncompressedBytes != int64(len("[stdout]\n")+restartEvidenceQueueDepth*4*len("burst\n")) {
+		t.Fatalf("coalesced burst = overflow %t bytes %d", store.overflow.Load(), recovered.CompleteLog.UncompressedBytes)
 	}
 }
 

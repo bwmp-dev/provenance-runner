@@ -510,8 +510,14 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	}
 	features = append(features,
 		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1,
-		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY,
 	)
+	// An active journal without a trusted evidence store is an upgrade or
+	// fail-closed recovery case. Do not negotiate an upload capability that this
+	// process cannot safely consume; it will report the legacy bounded terminal
+	// result after authoritative reconciliation instead.
+	if c.journal.snapshot().Active == nil || c.activeRestartEvidence() != nil {
+		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY)
+	}
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,
 		ProtocolVersions: []string{ProtocolVersion},

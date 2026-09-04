@@ -55,6 +55,10 @@ type restartRecoveryHarness struct {
 }
 
 func newRestartRecoveryHarness(t *testing.T, now time.Time, uploader completeLogUploader) *restartRecoveryHarness {
+	return newRestartRecoveryHarnessWithUsage(t, now, uploader, true)
+}
+
+func newRestartRecoveryHarnessWithUsage(t *testing.T, now time.Time, uploader completeLogUploader, observeUsage bool) *restartRecoveryHarness {
 	t.Helper()
 	config := validConfig()
 	config.journalFile = filepath.Join(t.TempDir(), "journal.json")
@@ -80,8 +84,10 @@ func newRestartRecoveryHarness(t *testing.T, now time.Time, uploader completeLog
 	}
 	store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: []byte("safe output before restart\n"), Redacted: true})
 	store.observeLog(execution.LiveLogEntry{Stream: "stderr", Data: []byte("safe diagnostic\n"), Redacted: true})
-	store.observeUsage(execution.ResourceUsage{CPUTime: 3 * time.Second, PeakMemoryBytes: 4096, DiskReadBytes: 20, DiskWriteBytes: 8})
-	store.observeUsage(execution.ResourceUsage{CPUTime: time.Second, PeakMemoryBytes: 1024, DiskReadBytes: 30, NetworkReceiveBytes: 7})
+	if observeUsage {
+		store.observeUsage(execution.ResourceUsage{CPUTime: 3 * time.Second, PeakMemoryBytes: 4096, DiskReadBytes: 20, DiskWriteBytes: 8})
+		store.observeUsage(execution.ResourceUsage{CPUTime: time.Second, PeakMemoryBytes: 1024, DiskReadBytes: 30, NetworkReceiveBytes: 7})
+	}
 	if err := store.close(); err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +106,84 @@ func newRestartRecoveryHarness(t *testing.T, now time.Time, uploader completeLog
 		return nil
 	}}
 	return harness
+}
+
+func TestRestartRecoverySnapshotFailureDegradesToBoundedTerminal(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		prepare func(*restartEvidenceStore)
+	}{
+		{name: "before first usage"},
+		{name: "bounded queue overflow", prepare: func(store *restartEvidenceStore) {
+			store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: bytes.Repeat([]byte{'x'}, maximumRestartPendingBytes+1)})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			uploader := new(restartRecoveryUploader)
+			harness := newRestartRecoveryHarnessWithUsage(t, now, uploader, false)
+			if test.prepare != nil {
+				test.prepare(harness.client.activeRestartEvidence())
+			}
+			heartbeat := harness.sendHeartbeat(t, now)
+			if err := harness.session.handleHeartbeatAcknowledgement(harness.heartbeatAcknowledgement(heartbeat, now, validCompleteLogUpload(now)), now); err != nil {
+				t.Fatalf("recovery reconciliation: %v", err)
+			}
+			if uploader.calls != 0 || len(harness.sent) != 2 {
+				t.Fatalf("degraded recovery = uploads %d sent %d", uploader.calls, len(harness.sent))
+			}
+			failed := harness.sent[1].GetFailed()
+			if failed == nil || failed.GetFailure().GetCode() != "runner_restarted" || failed.GetCompleteLog() != nil || failed.GetUsage() != nil {
+				t.Fatalf("degraded terminal = %#v", failed)
+			}
+			pending := new(runnerv1.RunnerMessage)
+			if err := proto.Unmarshal(harness.client.journal.snapshot().PendingMessage, pending); err != nil || !proto.Equal(pending, harness.sent[1]) {
+				t.Fatalf("degraded terminal was not journaled before send: %v", err)
+			}
+			if harness.client.activeRestartEvidence() != nil || harness.client.completeLogTarget(failed.GetLease(), failed.GetAttempt()) != nil {
+				t.Fatal("degraded terminal retained evidence or upload authority")
+			}
+			ack := &runnerv1.RunnerEventAcknowledgement{RunnerMessageId: pending.GetMessageId(), CommittedAt: timestamppb.New(now), Reconciliation: &runnerv1.LeaseReconciliation{
+				Lease: failed.GetLease(), Attempt: failed.GetAttempt(), Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_APPLIED,
+				Status: runnerv1.LeaseStatus_LEASE_STATUS_RELEASED, Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, TerminalMessageId: pending.GetMessageId(),
+			}}
+			if err := harness.session.handleEventAcknowledgement(ack, now); err != nil {
+				t.Fatalf("degraded terminal acknowledgement: %v", err)
+			}
+			if harness.client.journal.snapshot().Active != nil {
+				t.Fatal("degraded terminal acknowledgement retained active lease")
+			}
+		})
+	}
+}
+
+func TestTerminalAcknowledgementIgnoresRestartEvidenceCleanupFailure(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	uploader := new(restartRecoveryUploader)
+	harness := newRestartRecoveryHarness(t, now, uploader)
+	heartbeat := harness.sendHeartbeat(t, now)
+	if err := harness.session.handleHeartbeatAcknowledgement(harness.heartbeatAcknowledgement(heartbeat, now, validCompleteLogUpload(now)), now); err != nil {
+		t.Fatal(err)
+	}
+	pending := new(runnerv1.RunnerMessage)
+	if err := proto.Unmarshal(harness.client.journal.snapshot().PendingMessage, pending); err != nil {
+		t.Fatal(err)
+	}
+	directory := restartEvidencePath(harness.client.config.journalFile)
+	if err := os.WriteFile(filepath.Join(directory, "unexpected"), nil, restartEvidenceFileMode); err != nil {
+		t.Fatal(err)
+	}
+	failed := pending.GetFailed()
+	ack := &runnerv1.RunnerEventAcknowledgement{RunnerMessageId: pending.GetMessageId(), CommittedAt: timestamppb.New(now), Reconciliation: &runnerv1.LeaseReconciliation{
+		Lease: failed.GetLease(), Attempt: failed.GetAttempt(), Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_APPLIED,
+		Status: runnerv1.LeaseStatus_LEASE_STATUS_RELEASED, Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, TerminalMessageId: pending.GetMessageId(),
+	}}
+	if err := harness.session.handleEventAcknowledgement(ack, now); err != nil {
+		t.Fatalf("terminal acknowledgement returned cleanup failure: %v", err)
+	}
+	if state := harness.client.journal.snapshot(); state.Active != nil || len(state.PendingMessage) != 0 {
+		t.Fatalf("terminal acknowledgement state = %#v", state)
+	}
 }
 
 func (h *restartRecoveryHarness) sendHeartbeat(t *testing.T, now time.Time) *runnerv1.RunnerMessage {

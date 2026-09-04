@@ -28,6 +28,7 @@ const (
 	restartEvidenceDirectoryMode = 0o700
 	restartEvidenceFileMode      = 0o600
 	restartEvidenceQueueDepth    = 256
+	maximumRestartPendingBytes   = 1 << 20
 	maximumRestartMetadataBytes  = 64 << 10
 )
 
@@ -57,10 +58,7 @@ type restartEvidenceMetadata struct {
 }
 
 type restartEvidenceCommand struct {
-	stream string
-	data   []byte
-	usage  *execution.ResourceUsage
-	done   chan error
+	done chan error
 }
 
 type restartEvidenceStore struct {
@@ -74,12 +72,23 @@ type restartEvidenceStore struct {
 	closing  sync.RWMutex
 	closed   bool
 	overflow atomic.Bool
+	pending  restartEvidencePending
 
 	mu       sync.Mutex
 	metadata restartEvidenceMetadata
 	err      error
 	stdout   hash.Hash
 	stderr   hash.Hash
+}
+
+type restartEvidencePending struct {
+	mu            sync.Mutex
+	stdout        []byte
+	stderr        []byte
+	usage         execution.ResourceUsage
+	usageObserved bool
+	scheduled     bool
+	bytes         int64
 }
 
 type recoveredRestartEvidence struct {
@@ -143,9 +152,7 @@ func openRestartEvidenceStore(journalPath string, active *journalJob) (*restartE
 		return nil, nil
 	}
 	if active == nil {
-		if err := removeRestartEvidenceDirectory(directory); err != nil {
-			return nil, fmt.Errorf("remove acknowledged restart evidence: %w", err)
-		}
+		_ = discardRestartEvidenceDirectory(directory)
 		return nil, nil
 	}
 	lease, attempt, err := activeIdentity(journalState{Active: active})
@@ -154,7 +161,12 @@ func openRestartEvidenceStore(journalPath string, active *journalJob) (*restartE
 	}
 	store, err := loadRestartEvidenceStore(directory, lease, attempt)
 	if err != nil {
-		return nil, fmt.Errorf("recover restart evidence: %w", err)
+		// Missing evidence is expected when upgrading a runner with an active
+		// legacy lease. Corrupt or unsafe evidence is never trusted: move it out
+		// of the active path so recovery can report a bounded terminal result
+		// without entering a process restart loop.
+		_ = discardRestartEvidenceDirectory(directory)
+		return nil, nil
 	}
 	store.start()
 	return store, nil
@@ -277,19 +289,28 @@ func (store *restartEvidenceStore) start() {
 func (store *restartEvidenceStore) run() {
 	defer close(store.done)
 	for command := range store.commands {
-		err := store.apply(command)
+		err := store.applyPending()
 		if command.done != nil {
 			command.done <- err
 		}
 	}
-	store.mu.Lock()
-	if store.overflow.Load() && store.err == nil {
-		store.failLocked(errors.New("restart evidence queue overflowed"))
-	}
-	store.mu.Unlock()
+	_ = store.applyPending()
 }
 
-func (store *restartEvidenceStore) apply(command restartEvidenceCommand) error {
+func (store *restartEvidenceStore) applyPending() error {
+	store.pending.mu.Lock()
+	stdout := store.pending.stdout
+	stderr := store.pending.stderr
+	usage := store.pending.usage
+	usageObserved := store.pending.usageObserved
+	store.pending.stdout = nil
+	store.pending.stderr = nil
+	store.pending.usage = execution.ResourceUsage{}
+	store.pending.usageObserved = false
+	store.pending.scheduled = false
+	store.pending.bytes = 0
+	store.pending.mu.Unlock()
+
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.overflow.Load() && store.err == nil {
@@ -299,21 +320,22 @@ func (store *restartEvidenceStore) apply(command restartEvidenceCommand) error {
 		return store.err
 	}
 	var err error
-	switch {
-	case len(command.data) != 0:
-		err = store.appendLocked(command.stream, command.data)
-	case command.usage != nil:
-		if command.usage.CPUTime < 0 {
+	if len(stdout) != 0 {
+		err = store.appendLocked("stdout", stdout)
+	}
+	if err == nil && len(stderr) != 0 {
+		err = store.appendLocked("stderr", stderr)
+	}
+	if err == nil && usageObserved {
+		if usage.CPUTime < 0 {
 			err = errors.New("restart evidence usage is invalid")
-			break
+		} else {
+			mergeResourceUsage(&store.metadata.Usage, usage)
 		}
-		mergeResourceUsage(&store.metadata.Usage, *command.usage)
 		store.metadata.UsageObserved = true
-		err = store.persistMetadata()
-	case command.done != nil:
-		return nil
-	default:
-		err = errors.New("restart evidence command is empty")
+		if err == nil {
+			err = store.persistMetadata()
+		}
 	}
 	if err != nil {
 		store.failLocked(err)
@@ -417,7 +439,7 @@ func (store *restartEvidenceStore) observeLog(entry execution.LiveLogEntry) {
 	if store == nil || (entry.Stream != "stdout" && entry.Stream != "stderr") || len(entry.Data) == 0 {
 		return
 	}
-	store.enqueue(restartEvidenceCommand{stream: entry.Stream, data: bytes.Clone(entry.Data)})
+	store.enqueue(entry.Stream, entry.Data, nil)
 }
 
 func (store *restartEvidenceStore) observeUsage(usage execution.ResourceUsage) {
@@ -425,24 +447,48 @@ func (store *restartEvidenceStore) observeUsage(usage execution.ResourceUsage) {
 		return
 	}
 	copyUsage := usage
-	store.enqueue(restartEvidenceCommand{usage: &copyUsage})
+	store.enqueue("", nil, &copyUsage)
 }
 
-func (store *restartEvidenceStore) enqueue(command restartEvidenceCommand) {
+func (store *restartEvidenceStore) enqueue(stream string, data []byte, usage *execution.ResourceUsage) {
 	store.closing.RLock()
 	defer store.closing.RUnlock()
 	if store.closed {
 		store.overflow.Store(true)
 		return
 	}
-	// Execution observers are called synchronously while the provider drains the
-	// workload's output pipes. Never wait on filesystem I/O here: a full queue
-	// fails the recovery snapshot closed when the writer next runs or flushes.
-	select {
-	case store.commands <- command:
-	default:
-		store.overflow.Store(true)
+	store.pending.mu.Lock()
+	if len(data) != 0 {
+		if int64(len(data)) > maximumRestartPendingBytes-store.pending.bytes {
+			store.overflow.Store(true)
+		} else {
+			if stream == "stdout" {
+				store.pending.stdout = append(store.pending.stdout, data...)
+			} else if stream == "stderr" {
+				store.pending.stderr = append(store.pending.stderr, data...)
+			} else {
+				store.overflow.Store(true)
+			}
+			store.pending.bytes += int64(len(data))
+		}
 	}
+	if usage != nil {
+		mergeResourceUsage(&store.pending.usage, *usage)
+		store.pending.usageObserved = true
+	}
+	if !store.pending.scheduled {
+		// Execution observers run synchronously while the provider drains output.
+		// Coalesce a burst behind one wake-up rather than enqueueing and syncing
+		// every line. The pending bytes remain explicitly bounded and observation
+		// never waits for filesystem I/O.
+		select {
+		case store.commands <- restartEvidenceCommand{}:
+			store.pending.scheduled = true
+		default:
+			store.overflow.Store(true)
+		}
+	}
+	store.pending.mu.Unlock()
 }
 
 func (store *restartEvidenceStore) flush() error {
@@ -864,4 +910,41 @@ func removeRestartEvidenceDirectory(directory string) error {
 		return err
 	}
 	return syncRestartEvidenceDirectory(filepath.Dir(directory))
+}
+
+func discardRestartEvidenceDirectory(directory string) error {
+	if err := removeRestartEvidenceDirectory(directory); err == nil {
+		return nil
+	}
+	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	parent := filepath.Dir(directory)
+	quarantine, err := os.MkdirTemp(parent, ".restart-evidence-quarantine-")
+	if err != nil {
+		return err
+	}
+	removeQuarantine := true
+	defer func() {
+		if removeQuarantine {
+			_ = os.RemoveAll(quarantine)
+		}
+	}()
+	if err := os.Remove(quarantine); err != nil {
+		return err
+	}
+	if err := os.Rename(directory, quarantine); err != nil {
+		return err
+	}
+	removeQuarantine = false
+	if err := syncRestartEvidenceDirectory(parent); err != nil {
+		return err
+	}
+	// RemoveAll does not follow symlinks. The active path is already free even
+	// if best-effort removal of quarantined, untrusted contents cannot finish.
+	_ = os.RemoveAll(quarantine)
+	_ = syncRestartEvidenceDirectory(parent)
+	return nil
 }
