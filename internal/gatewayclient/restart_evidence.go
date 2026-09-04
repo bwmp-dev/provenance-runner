@@ -819,8 +819,11 @@ func validatePrivateDirectory(path string) error {
 			continue
 		}
 		if strings.HasPrefix(entry.Name(), ".restart-evidence-metadata-") {
+			if entry.Type()&os.ModeSymlink != 0 {
+				return errors.New("restart evidence directory contains an unsafe temporary entry")
+			}
 			info, err := entry.Info()
-			if err != nil || !info.Mode().IsRegular() || !privateFileMode(info.Mode().Perm()) {
+			if err != nil || !info.Mode().IsRegular() || !privateFileMode(info.Mode().Perm()) || !privateFileMetadata(info) {
 				return errors.New("restart evidence directory contains an unsafe temporary entry")
 			}
 			continue

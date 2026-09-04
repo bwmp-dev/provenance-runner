@@ -183,6 +183,16 @@ func TestRestartEvidenceRejectsMissingCorruptSubstitutedAndUnsafeState(t *testin
 				t.Fatal(err)
 			}
 		}},
+		{name: "symlinked temporary metadata", mutate: func(t *testing.T, directory string, _ *journalJob, _ *runnerv1.LeaseOffer) {
+			if err := os.Symlink(filepath.Join(directory, "metadata.json"), filepath.Join(directory, ".restart-evidence-metadata-hostile")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "hard-linked temporary metadata", mutate: func(t *testing.T, directory string, _ *journalJob, _ *runnerv1.LeaseOffer) {
+			if err := os.Link(filepath.Join(directory, "metadata.json"), filepath.Join(directory, ".restart-evidence-metadata-hostile")); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
