@@ -68,6 +68,53 @@ func TestRestartEvidenceSurvivesProcessReopenWithExactLogAndMonotonicUsage(t *te
 	}
 }
 
+func TestRestartEvidenceRecoveryDiscardsOnlyUncommittedSourceSuffix(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	journalPath, active, offer := restartEvidenceFixture(t, now)
+	store, err := createRestartEvidenceStore(journalPath, offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.observeLog(execution.LiveLogEntry{Stream: "stdout", Data: []byte("committed\n")})
+	store.observeUsage(execution.ResourceUsage{CPUTime: time.Second})
+	if err := store.close(); err != nil {
+		t.Fatal(err)
+	}
+	stdoutPath := filepath.Join(restartEvidencePath(journalPath), "stdout")
+	file, err := os.OpenFile(stdoutPath, os.O_WRONLY|os.O_APPEND, restartEvidenceFileMode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("uncommitted suffix\n")); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := openRestartEvidenceStore(journalPath, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.close() })
+	recovered, err := reopened.snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeCompleteLog(recovered.CompleteLog) })
+	if got := readRestartCompleteLog(t, recovered.CompleteLog); got != "[stdout]\ncommitted\n" {
+		t.Fatalf("recovered complete log = %q", got)
+	}
+	if info, err := os.Stat(stdoutPath); err != nil || info.Size() != int64(len("committed\n")) {
+		t.Fatalf("recovered source size = %v, %v", info, err)
+	}
+}
+
 func TestLiveExecutionObserverFeedsDurableRestartEvidence(t *testing.T) {
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 	journalPath, _, offer := restartEvidenceFixture(t, now)

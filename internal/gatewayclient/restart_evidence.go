@@ -238,6 +238,12 @@ func loadRestartEvidenceStore(directory string, lease *runnerv1.LeaseIdentity, a
 		return nil, errors.New("restart evidence identity or schema does not match the active attempt")
 	}
 	store := newRestartEvidenceStore(directory, metadata)
+	if err := recoverRestartEvidenceSource(store.stdoutPath, metadata.StdoutBytes, metadata.StdoutSHA256); err != nil {
+		return nil, err
+	}
+	if err := recoverRestartEvidenceSource(store.stderrPath, metadata.StderrBytes, metadata.StderrSHA256); err != nil {
+		return nil, err
+	}
 	if err := store.validateSources(); err != nil {
 		return nil, err
 	}
@@ -585,7 +591,7 @@ func validateRestartEvidenceSource(path string, size int64, expectedDigest strin
 		return errors.New("restart evidence source metadata is invalid")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || !privateFileMode(info.Mode().Perm()) || info.Size() != size {
+	if err != nil || !info.Mode().IsRegular() || !privateFileMode(info.Mode().Perm()) || !privateFileMetadata(info) || info.Size() != size {
 		return errors.New("restart evidence source is missing, substituted, or has unsafe permissions")
 	}
 	digest, err := digestFile(path, size)
@@ -604,6 +610,45 @@ func validateRestartEvidenceSource(path string, size int64, expectedDigest strin
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil || last[0] != expectedLast {
 		return errors.New("restart evidence source terminal byte is invalid")
+	}
+	return nil
+}
+
+// The source bytes are synced before their metadata is atomically committed. A process kill in
+// that interval can therefore leave a suffix that was written but never committed. Recovery may
+// discard only that suffix; missing committed bytes, substituted files, and unsafe metadata remain
+// fatal because they cannot be reconstructed without weakening the retained evidence identity.
+func recoverRestartEvidenceSource(path string, committedSize int64, committedDigest string) error {
+	if committedSize < 0 || committedSize > evidence.MaximumCompleteLogBytes || len(committedDigest) != sha256.Size*2 {
+		return errors.New("restart evidence source metadata is invalid")
+	}
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() || !privateFileMode(before.Mode().Perm()) || !privateFileMetadata(before) ||
+		before.Size() < committedSize || before.Size() > evidence.MaximumCompleteLogBytes {
+		return errors.New("restart evidence source is missing, truncated, substituted, or has unsafe permissions")
+	}
+	if before.Size() == committedSize {
+		return nil
+	}
+	digest, err := digestFile(path, committedSize)
+	if err != nil || digest != committedDigest {
+		return errors.New("restart evidence source committed prefix does not match metadata")
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY, restartEvidenceFileMode)
+	if err != nil {
+		return errors.New("open restart evidence source for crash recovery")
+	}
+	after, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() ||
+		!privateFileMode(after.Mode().Perm()) || !privateFileMetadata(after) || after.Size() != before.Size() {
+		_ = file.Close()
+		return errors.New("restart evidence source changed during crash recovery")
+	}
+	truncateErr := file.Truncate(committedSize)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if truncateErr != nil || syncErr != nil || closeErr != nil {
+		return errors.New("truncate uncommitted restart evidence suffix")
 	}
 	return nil
 }
