@@ -84,6 +84,8 @@ The artifact contains:
 - `resources/*.ndjson`: repeated real cgroup and `runsc events --stats`
   samples, including configured CPU/memory/PID controls, CPU throttling,
   memory events, sandbox task count, memory/CPU usage, and network interfaces;
+  paired `resources/*-teardown.json` records retain whether the sampler omitted
+  at most one incomplete observation after an exact terminal result existed;
 - `summary.ndjson`: one compact accepted result per fixture; and
 - `manifest.sha256`: hashes for every other retained file.
 
