@@ -120,7 +120,7 @@ jobs:
           runtime_dir="/run/user/${runner_uid}"
           test -S "${runtime_dir}/bus"
           profile="${RUNNER_TEMP}/provenance-ci-runsc.apparmor"
-          runsc="${PROVENANCE_INSTALL_ROOT}/gvisor/runsc"
+          runsc="$(readlink -f "${PROVENANCE_INSTALL_ROOT}/gvisor/runsc")"
           printf '%s\n' \
             'abi <abi/4.0>,' \
             'include <tunables/global>' \
