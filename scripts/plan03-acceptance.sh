@@ -148,6 +148,13 @@ fixture_case_identity() {
   [[ "$fixture" == fork-pid-bomb ]] && printf '%s-run-%s\n' "$fixture" "$repetition" || printf '%s\n' "$fixture"
 }
 
+complete_cgroup_sample() {
+  local field
+  for field in "$@"; do
+    [[ -n "$field" ]] || return 1
+  done
+}
+
 run_contract_tests() {
   for command_name in awk grep head jq mktemp seq; do
     command -v "$command_name" >/dev/null || {
@@ -338,6 +345,11 @@ run_contract_tests() {
   [[ $(fixture_case_identity fork-pid-bomb 1) == fork-pid-bomb-run-1 ]]
   [[ $(fixture_case_identity fork-pid-bomb 2) == fork-pid-bomb-run-2 ]]
   [[ $(fixture_case_identity fork-pid-bomb 3) == fork-pid-bomb-run-3 ]]
+  complete_cgroup_sample max current events cpu stat max current events
+  if complete_cgroup_sample max current events cpu stat max "" events; then
+    printf 'cgroup sample completeness accepted a missing controller field\n' >&2
+    return 1
+  fi
   grep -Fq 'assert_no_residue "$case_identity" "$samples"' "$repository_root/scripts/plan03-acceptance.sh"
   grep -Fq 'write_pid_verification "$case_identity" "$repetition"' "$repository_root/scripts/plan03-acceptance.sh"
   printf 'Plan 03 PID acceptance contracts passed\n'
@@ -560,7 +572,10 @@ sample_resources() {
       pids_max=$(sed -n '1p' "$leaf/pids.max" 2>/dev/null || true)
       pids_current=$(sed -n '1p' "$leaf/pids.current" 2>/dev/null || true)
       pids_events=$(sed -n '1,$p' "$leaf/pids.events" 2>/dev/null | tr '\n' ';' || true)
-      if [[ -z "$memory_max" || -z "$cpu_max" || -z "$pids_max" ]]; then
+      if ! complete_cgroup_sample \
+        "$memory_max" "$memory_current" "$memory_events" \
+        "$cpu_max" "$cpu_stat" \
+        "$pids_max" "$pids_current" "$pids_events"; then
         sleep 0.05
         continue
       fi
