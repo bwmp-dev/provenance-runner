@@ -252,6 +252,31 @@ func TestRestartEvidenceObservationNeverBackpressuresProvider(t *testing.T) {
 	}
 }
 
+func TestRestartEvidenceQueueOverflowPersistsFailClosedState(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	journalPath, active, offer := restartEvidenceFixture(t, now)
+	store, err := createRestartEvidenceStore(journalPath, offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.overflow.Store(true)
+	if err := store.flush(); err == nil || !strings.Contains(err.Error(), "queue overflowed") {
+		t.Fatalf("overflow flush error = %v", err)
+	}
+	if err := store.close(); err == nil || !strings.Contains(err.Error(), "queue overflowed") {
+		t.Fatalf("overflow close error = %v", err)
+	}
+
+	reopened, err := openRestartEvidenceStore(journalPath, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.close()
+	if _, err := reopened.snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "queue overflowed") {
+		t.Fatalf("persisted overflow error = %v", err)
+	}
+}
+
 func TestRestartEvidenceAppendRejectsHardLinkedSource(t *testing.T) {
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 	journalPath, _, offer := restartEvidenceFixture(t, now)
