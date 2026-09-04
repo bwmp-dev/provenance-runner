@@ -1248,8 +1248,12 @@ func (s *clientSession) acceptRestartCompleteLogUpload(reconciliation *runnerv1.
 	if upload == nil {
 		return nil
 	}
-	if !s.restartUploadRecovery || !s.client.recovering || s.client.activeRestartEvidence() == nil || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
-		return permanent("reconciliation complete log upload is not valid for this runner recovery")
+	// A stream reconnect can occur while the execution worker survives. The
+	// gateway cannot distinguish that case from process recovery, so accept a
+	// valid negotiated replacement without treating it as a restart failure;
+	// queueRestartFailure remains gated by client.recovering.
+	if !s.restartUploadRecovery || s.client.activeRestartEvidence() == nil || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
+		return permanent("reconciliation complete log upload is not valid for this runner stream")
 	}
 	state := s.client.journal.snapshot()
 	if state.Active == nil || !activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt()) {

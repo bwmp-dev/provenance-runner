@@ -294,7 +294,6 @@ func TestRestartRecoveryRejectsInvalidOrSubstitutedUploadResponses(t *testing.T)
 		{name: "substituted runner", mutate: func(h *restartRecoveryHarness, _ *runnerv1.HeartbeatAcknowledgement) {
 			h.session.authenticated.RunnerId = "50000000-0000-0000-0000-000000000002"
 		}},
-		{name: "not recovery", mutate: func(h *restartRecoveryHarness, _ *runnerv1.HeartbeatAcknowledgement) { h.client.recovering = false }},
 		{name: "not advertised on stream", mutate: func(h *restartRecoveryHarness, _ *runnerv1.HeartbeatAcknowledgement) {
 			h.session.restartUploadRecovery = false
 		}},
@@ -313,6 +312,21 @@ func TestRestartRecoveryRejectsInvalidOrSubstitutedUploadResponses(t *testing.T)
 				t.Fatalf("invalid recovery upload mutated terminal state: calls=%d", uploader.calls)
 			}
 		})
+	}
+}
+
+func TestActiveExecutionAcceptsNegotiatedReconnectUploadWithoutFailingTheJob(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	uploader := new(restartRecoveryUploader)
+	harness := newRestartRecoveryHarness(t, now, uploader)
+	harness.client.recovering = false
+	heartbeat := harness.sendHeartbeat(t, now)
+	if err := harness.session.handleHeartbeatAcknowledgement(harness.heartbeatAcknowledgement(heartbeat, now, validCompleteLogUpload(now)), now); err != nil {
+		t.Fatal(err)
+	}
+	if uploader.calls != 0 || len(harness.client.journal.snapshot().PendingMessage) != 0 ||
+		harness.client.completeLogTarget(harness.offer.GetJob().GetLease(), harness.offer.GetJob().GetAttempt()) == nil {
+		t.Fatal("negotiated reconnect upload disrupted the active execution")
 	}
 }
 
