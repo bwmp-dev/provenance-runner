@@ -34,6 +34,7 @@ type liveExecutionObserver struct {
 	usageSequence uint64
 	dropped       uint64
 	usage         execution.ResourceUsage
+	durable       *restartEvidenceStore
 }
 
 func newLiveExecutionObserver(client *Client, specification *runnerv1.JobSpecification) *liveExecutionObserver {
@@ -41,12 +42,14 @@ func newLiveExecutionObserver(client *Client, specification *runnerv1.JobSpecifi
 		client:  client,
 		lease:   proto.Clone(specification.GetLease()).(*runnerv1.LeaseIdentity),
 		attempt: proto.Clone(specification.GetAttempt()).(*runnerv1.AttemptIdentity),
+		durable: client.activeRestartEvidence(),
 	}
 }
 
 func (observer *liveExecutionObserver) ObserveLog(entry execution.LiveLogEntry) {
 	observer.mu.Lock()
 	defer observer.mu.Unlock()
+	observer.durable.observeLog(entry)
 	stream := runnerv1.LogStream_LOG_STREAM_UNSPECIFIED
 	switch entry.Stream {
 	case "stdout":
@@ -114,6 +117,7 @@ func (observer *liveExecutionObserver) ObserveUsage(measured execution.ResourceU
 	observer.mu.Lock()
 	defer observer.mu.Unlock()
 	mergeResourceUsage(&observer.usage, measured)
+	observer.durable.observeUsage(observer.usage)
 	event := observer.nextUsageEventLocked()
 	if event == nil {
 		return
@@ -130,6 +134,7 @@ func (observer *liveExecutionObserver) finalUsageEvent(measured execution.Resour
 	observer.mu.Lock()
 	defer observer.mu.Unlock()
 	mergeResourceUsage(&observer.usage, measured)
+	observer.durable.observeUsage(observer.usage)
 	event := observer.nextUsageEventLocked()
 	if event != nil {
 		event.terminal = true

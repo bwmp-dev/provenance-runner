@@ -89,6 +89,9 @@ type Client struct {
 	activeUpload *activeCompleteLogUpload
 	logUploader  completeLogUploader
 
+	restartEvidenceMu sync.Mutex
+	restartEvidence   *restartEvidenceStore
+
 	deferredMu           sync.Mutex
 	deferredWorkerEvents []workerEvent
 }
@@ -150,6 +153,14 @@ func newClientWithWorker(config Config, connector streamConnector, worker Remote
 		workerEvents:     make(chan workerEvent, 64),
 		logUploader:      newHTTPCompleteLogUploader(),
 	}
+	restartEvidence, err := openRestartEvidenceStore(config.journalFile, journal.snapshot().Active)
+	if err != nil {
+		if config.credentialStore != nil {
+			_ = config.credentialStore.Close()
+		}
+		return nil, err
+	}
+	client.restartEvidence = restartEvidence
 	client.recovering = journal.snapshot().Active != nil
 	return client, nil
 }
@@ -159,8 +170,13 @@ func (c *Client) Close() error {
 		return nil
 	}
 	var result error
+	c.restartEvidenceMu.Lock()
+	if c.restartEvidence != nil {
+		result = c.restartEvidence.close()
+	}
+	c.restartEvidenceMu.Unlock()
 	if c.close != nil {
-		result = c.close()
+		result = errors.Join(result, c.close())
 		c.close = nil
 	}
 	if c.config.credentialStore != nil {

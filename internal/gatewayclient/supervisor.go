@@ -168,6 +168,9 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 	if err != nil {
 		return err
 	}
+	if err := s.client.beginRestartEvidence(offer.GetJob().GetLease(), offer.GetJob().GetAttempt()); err != nil {
+		return permanent("initialize restart evidence: %v", err)
+	}
 	accepted := &runnerv1.LeaseAccepted{
 		Lease:      proto.Clone(offer.GetJob().GetLease()).(*runnerv1.LeaseIdentity),
 		Attempt:    proto.Clone(offer.GetJob().GetAttempt()).(*runnerv1.AttemptIdentity),
@@ -188,6 +191,9 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 		return nil
 	})
 	acceptedState := s.client.journal.snapshot()
+	if err != nil && acceptedState.Active == nil {
+		return errors.Join(err, s.client.clearRestartEvidence())
+	}
 	if acceptedState.Active != nil && activeMatchesIdentity(acceptedState.Active, offer.GetJob().GetLease(), offer.GetJob().GetAttempt()) {
 		s.client.setCompleteLogTarget(offer.GetJob(), target)
 	} else {
@@ -329,6 +335,7 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 			s.client.recovering = false
 			s.rememberSettledMessage(pending, state.Active.Phase)
 			s.discardDeferred(errors.New("gateway reconciled the lease as terminal"))
+			err = s.client.clearRestartEvidence()
 		}
 		return err
 	}
@@ -402,6 +409,7 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 			s.client.clearCompleteLogTarget()
 			s.rememberSettledMessage(pending, state.Active.Phase)
 			s.discardDeferred(errors.New("job reached a terminal state"))
+			err = s.client.clearRestartEvidence()
 		}
 		return err
 	default:
@@ -549,7 +557,7 @@ func (s *clientSession) applyLateReconciliation(reconciliation *runnerv1.LeaseRe
 		s.client.clearCompleteLogTarget()
 		s.rememberSettledEvent(pending, state.Active.Phase)
 		s.discardDeferred(errors.New("gateway reconciled the lease as terminal"))
-		return nil
+		return s.client.clearRestartEvidence()
 	}
 	if reconciliation.GetCancellationId() != "" {
 		if err := s.applyAuthoritativeReconciliation(reconciliation); err != nil {
@@ -1174,6 +1182,12 @@ func (s *clientSession) queueLeaseExpired(now time.Time) error {
 }
 
 func (s *clientSession) queueRestartFailure(now time.Time) error {
+	if s.client.activeRestartEvidence() != nil {
+		// Recovery evidence remains durable until the gateway supplies a fresh,
+		// attempt-scoped upload capability. Never replace it with a terminal
+		// event that omits the complete log or cumulative measured usage.
+		return nil
+	}
 	lease, attempt, err := activeIdentity(s.client.journal.snapshot())
 	if err != nil {
 		return err
