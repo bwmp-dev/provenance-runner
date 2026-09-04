@@ -630,6 +630,56 @@ func TestPIDReserveFormulaFailsClosed(t *testing.T) {
 }
 
 func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
+	t.Run("systemd setup failure is infrastructure", func(t *testing.T) {
+		provider, runner, _ := testProvider(t)
+		provider.config.CgroupDriver = CgroupDriverSystemdUser
+		provider.config.SystemdRunPath = "/usr/bin/systemd-run"
+		provider.config.systemdLauncher = "/opt/provenance/provenance-runner"
+		provider.config.SystemdCgroupRoot = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"
+		exitCode := 1
+		runner.run = func(context.Context, command) commandResult {
+			return commandResult{ExitCode: &exitCode, Err: errors.New("systemd scope unavailable")}
+		}
+		prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+		outcome, err := prepared.Execute(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "systemd user scope did not launch runsc") || outcome.Failure != nil {
+			t.Fatalf("Execute() = %#v, %v", outcome, err)
+		}
+	})
+
+	t.Run("systemd launched workload exit remains workload failure", func(t *testing.T) {
+		provider, runner, _ := testProvider(t)
+		provider.config.CgroupDriver = CgroupDriverSystemdUser
+		provider.config.SystemdRunPath = "/usr/bin/systemd-run"
+		provider.config.systemdLauncher = "/opt/provenance/provenance-runner"
+		provider.config.SystemdCgroupRoot = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"
+		exitCode := 1
+		runner.run = func(_ context.Context, invocation command) commandResult {
+			var marker, scopeRoot, unit string
+			for index, argument := range invocation.Args {
+				if argument == "--marker" && index+1 < len(invocation.Args) {
+					marker = invocation.Args[index+1]
+				}
+				if argument == "--scope-root" && index+1 < len(invocation.Args) {
+					scopeRoot = invocation.Args[index+1]
+				}
+				if argument == "--unit" && index+1 < len(invocation.Args) {
+					unit = invocation.Args[index+1]
+				}
+			}
+			content := "systemd-user-scope:" + systemdCgroupPath(scopeRoot, unit) + "\n"
+			if err := os.WriteFile(marker, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return commandResult{ExitCode: &exitCode, Err: errors.New("exit status 1")}
+		}
+		prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+		outcome, err := prepared.Execute(context.Background())
+		if err != nil || outcome.Failure == nil || outcome.Failure.Classification != execution.ClassificationWorkloadFailure {
+			t.Fatalf("Execute() = %#v, %v", outcome, err)
+		}
+	})
+
 	t.Run("workload exit two without outer denial", func(t *testing.T) {
 		provider, runner, _ := testProvider(t)
 		exitCode := 2
@@ -829,12 +879,21 @@ func TestNewProviderValidatesTrustedConfiguration(t *testing.T) {
 	}
 	base := Config{RunscPath: "runsc", RootFS: rootFS, RootFSIdentity: "test-rootfs", runtimeIdentity: "test-runsc", InputsRoot: inputs, StateRoot: filepath.Join(root, "state"), BundleRoot: filepath.Join(root, "bundles")}
 	for name, mutate := range map[string]func(*Config){
-		"missing runsc":            func(config *Config) { config.RunscPath = "" },
-		"missing rootfs":           func(config *Config) { config.RootFS = filepath.Join(root, "missing") },
-		"missing inputs":           func(config *Config) { config.InputsRoot = filepath.Join(root, "missing") },
-		"empty state":              func(config *Config) { config.StateRoot = "" },
-		"empty bundles":            func(config *Config) { config.BundleRoot = "" },
-		"bad platform":             func(config *Config) { config.Platform = "ptrace" },
+		"missing runsc":     func(config *Config) { config.RunscPath = "" },
+		"missing rootfs":    func(config *Config) { config.RootFS = filepath.Join(root, "missing") },
+		"missing inputs":    func(config *Config) { config.InputsRoot = filepath.Join(root, "missing") },
+		"empty state":       func(config *Config) { config.StateRoot = "" },
+		"empty bundles":     func(config *Config) { config.BundleRoot = "" },
+		"bad platform":      func(config *Config) { config.Platform = "ptrace" },
+		"bad cgroup driver": func(config *Config) { config.CgroupDriver = "unknown" },
+		"runsc with systemd path": func(config *Config) {
+			config.CgroupDriver = CgroupDriverRunsc
+			config.SystemdRunPath = "/usr/bin/systemd-run"
+		},
+		"systemd without identity": func(config *Config) {
+			config.CgroupDriver = CgroupDriverSystemdUser
+			config.SystemdRunPath = "/usr/bin/systemd-run"
+		},
 		"missing rootfs identity":  func(config *Config) { config.RootFSIdentity = "" },
 		"missing runtime identity": func(config *Config) { config.runtimeIdentity = "" },
 	} {

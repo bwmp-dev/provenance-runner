@@ -160,13 +160,16 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 		return fail(err)
 	}
 	sandbox, err := gvisor.New(gvisor.Config{
-		RunscPath:      runscPath,
-		RootFS:         rootFS,
-		RootFSIdentity: rootFSIdentity,
-		StateRoot:      stateRoot,
-		BundleRoot:     bundleRoot,
-		InputsRoot:     workspaceRoot,
-		Platform:       lookup("PROVENANCE_GVISOR_PLATFORM"),
+		RunscPath:         runscPath,
+		CgroupDriver:      lookup("PROVENANCE_GVISOR_CGROUP_DRIVER"),
+		SystemdRunPath:    lookup("PROVENANCE_SYSTEMD_RUN_PATH"),
+		SystemdCgroupRoot: lookup("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
+		RootFS:            rootFS,
+		RootFSIdentity:    rootFSIdentity,
+		StateRoot:         stateRoot,
+		BundleRoot:        bundleRoot,
+		InputsRoot:        workspaceRoot,
+		Platform:          lookup("PROVENANCE_GVISOR_PLATFORM"),
 	})
 	if err != nil {
 		return fail(err)

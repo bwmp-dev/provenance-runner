@@ -19,6 +19,13 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 )
 
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == SystemdLauncherCommand {
+		os.Exit(RunSystemdLauncher(os.Args[2:], os.Stderr))
+	}
+	os.Exit(m.Run())
+}
+
 func TestRunscSmoke(t *testing.T) {
 	if os.Getenv("PROVENANCE_RUNSC_SMOKE") != "1" {
 		t.Skip("set PROVENANCE_RUNSC_SMOKE=1 to opt in to the real sandbox smoke test")
@@ -46,13 +53,16 @@ func TestRunscSmoke(t *testing.T) {
 	stateRoot := filepath.Join(temporaryRoot, "state")
 	bundleRoot := filepath.Join(temporaryRoot, "bundles")
 	providerConfig := Config{
-		RunscPath:      resolvedRunsc,
-		RootFS:         rootFS,
-		RootFSIdentity: "smoke-rootfs",
-		StateRoot:      stateRoot,
-		BundleRoot:     bundleRoot,
-		InputsRoot:     inputsRoot,
-		Platform:       "systrap",
+		RunscPath:         resolvedRunsc,
+		CgroupDriver:      os.Getenv("PROVENANCE_GVISOR_CGROUP_DRIVER"),
+		SystemdRunPath:    os.Getenv("PROVENANCE_SYSTEMD_RUN_PATH"),
+		SystemdCgroupRoot: os.Getenv("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
+		RootFS:            rootFS,
+		RootFSIdentity:    "smoke-rootfs",
+		StateRoot:         stateRoot,
+		BundleRoot:        bundleRoot,
+		InputsRoot:        inputsRoot,
+		Platform:          "systrap",
 	}
 	provider, err := New(providerConfig)
 	if err != nil {
@@ -60,6 +70,46 @@ func TestRunscSmoke(t *testing.T) {
 	}
 	if err := provider.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if provider.config.CgroupDriver == CgroupDriverSystemdUser {
+		t.Run("systemd user scope applies exact limits", func(t *testing.T) {
+			config := configuration{
+				Command:     "/bin/sh",
+				Arguments:   []string{"-c", `trap '' TERM; while :; do sleep 1; done`},
+				Network:     "none",
+				MemoryBytes: 128 << 20,
+				CPUMillis:   500,
+				PIDs:        64,
+				DiskBytes:   8 << 20,
+			}
+			prepared := prepareSmokeEnvironment(t, provider, "smoke", config)
+			defer cleanupSmokeEnvironment(t, prepared)
+			ctx, cancel := context.WithCancel(context.Background())
+			result := make(chan error, 1)
+			go func() {
+				_, err := prepared.Execute(ctx)
+				result <- err
+			}()
+			scope := systemdCgroupPath(provider.config.SystemdCgroupRoot, prepared.containerID)
+			waitForExactSystemdLimits(t, scope, map[string]string{
+				"memory.max":      "134217728",
+				"memory.swap.max": "0",
+				"cpu.max":         "50000 100000",
+				"pids.max":        "81",
+			})
+			cancel()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Execute() after cancellation = %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("systemd-scoped smoke did not stop after cancellation")
+			}
+			cleanupSmokeEnvironment(t, prepared)
+			assertNoSandboxResidue(t, provider, prepared.containerID)
+			waitForScopeRemoval(t, scope)
+		})
 	}
 
 	t.Run("contained execution and cleanup", func(t *testing.T) {
@@ -196,7 +246,14 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		containerID := prepared.containerID
 		var runOutput bytes.Buffer
-		run := exec.Command(provider.config.RunscPath, provider.runArguments("run", "--bundle="+prepared.bundle, containerID)...)
+		invocation, err := provider.wrapRunCommand(command{
+			Path: provider.config.RunscPath,
+			Args: provider.runArguments("run", "--bundle="+prepared.bundle, containerID),
+		}, prepared.cgroupLimits, containerID, filepath.Join(prepared.bundle, systemdLaunchMarker))
+		if err != nil {
+			t.Fatalf("configure abandoned runsc command: %v", err)
+		}
+		run := exec.Command(invocation.Path, invocation.Args...)
 		run.Stdout = &runOutput
 		run.Stderr = &runOutput
 		if err := run.Start(); err != nil {
@@ -235,6 +292,38 @@ func TestRunscSmoke(t *testing.T) {
 		assertNoSandboxResidue(t, restarted, containerID)
 		cleanupNeeded = false
 	})
+}
+
+func waitForExactSystemdLimits(t *testing.T, scope string, expected map[string]string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		matched := true
+		for name, want := range expected {
+			data, err := os.ReadFile(filepath.Join(scope, name))
+			if err != nil || strings.TrimSpace(string(data)) != want {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("systemd scope %q did not expose exact resource limits", scope)
+}
+
+func waitForScopeRemoval(t *testing.T, scope string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(scope); errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("systemd scope %q remained after collection", scope)
 }
 
 func prepareSmokeEnvironment(t *testing.T, provider *Provider, jobID string, config configuration) *preparedEnvironment {

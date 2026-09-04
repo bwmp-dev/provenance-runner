@@ -17,11 +17,15 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/gatewayclient"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
+	"github.com/bwmp-dev/provenance-runner/internal/provider/gvisor"
 )
 
 const maximumJobBytes = 1 << 20
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == gvisor.SystemdLauncherCommand {
+		os.Exit(gvisor.RunSystemdLauncher(os.Args[2:], os.Stderr))
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	os.Exit(runContext(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))

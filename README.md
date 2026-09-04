@@ -90,6 +90,20 @@ The alpha Paper provider accepts only probe `0.1.0` built from Provenance commit
 
 Optional limits are `PROVENANCE_MAX_ARTIFACT_BYTES`, `PROVENANCE_MAX_DEPENDENCY_BYTES`, `PROVENANCE_MAX_PREPARATION_BYTES`, and `PROVENANCE_MAX_CACHE_BYTES`. `PROVENANCE_GVISOR_PLATFORM` may be `systrap` (the default) or `kvm`. Implementation hard limits still apply.
 
+The default `PROVENANCE_GVISOR_CGROUP_DRIVER=runsc` lets `runsc` create the
+job cgroup and is intended for a privileged, explicitly delegated host. A
+non-root service managed by a systemd user manager must instead set
+`PROVENANCE_GVISOR_CGROUP_DRIVER=systemd-user` and
+`PROVENANCE_SYSTEMD_CGROUP_ROOT` to that manager's existing `app.slice`
+cgroup. The runner then launches each sandbox in a uniquely named transient
+user scope with the exact memory, CPU, swap, and outer PID limits, tells
+`runsc` not to mutate the host cgroup tree, and samples usage from that scope.
+`PROVENANCE_SYSTEMD_RUN_PATH` may pin an alternate `systemd-run` executable;
+its bytes and the runner launcher bytes are included in the environment
+identity. The service account must
+have an active user manager (normally through login lingering), and the
+configured cgroup root must already exist below `/sys/fs/cgroup`.
+
 Only one Paper CLI process may use a gVisor bundle root at a time. The runner holds an operating-system-backed exclusive lock for the full invocation so startup reconciliation cannot remove another invocation's prepared or running bundle. Lock contention fails runner initialization rather than waiting indefinitely.
 
 ## Paper local-job input

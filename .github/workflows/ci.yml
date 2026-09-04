@@ -137,3 +137,173 @@ jobs:
             exit 1
           fi
           sudo rm --recursive --force -- "${PROVENANCE_INSTALL_ROOT}"
+
+  systemd-user-smoke:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Configure pinned dedicated-host SSH identity
+        shell: bash
+        env:
+          PRODUCTION_RUNNER_SSH_KEY: ${{ secrets.PLAN0506_PRODUCTION_RUNNER_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${PRODUCTION_RUNNER_SSH_KEY}"
+          ssh_root="${RUNNER_TEMP}/provenance-runner-ssh"
+          identity="${ssh_root}/id_ed25519"
+          config="${ssh_root}/config"
+          known_hosts="${ssh_root}/known_hosts"
+          install -d -m 0700 "${ssh_root}"
+          printf '%s\n' "${PRODUCTION_RUNNER_SSH_KEY}" > "${identity}"
+          chmod 0600 "${identity}"
+          ssh-keygen -y -f "${identity}" > "${identity}.pub"
+          test "$(ssh-keygen -lf "${identity}.pub" -E sha256 | awk '{print $2}')" = "SHA256:Z9DNvPZH7acr9Sz9VjBq+Lv+ukBQHhnU2YqtLeCmwJY"
+          printf '%s\n' '135.148.121.196 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFLnmu5PDwUSJ0HwG54kufzRF9tOHLNCfG4PZwOwINj+' > "${known_hosts}"
+          chmod 0600 "${known_hosts}"
+          printf '%s\n' \
+            'Host provenance-runner' \
+            '  HostName 135.148.121.196' \
+            '  User provenance' \
+            "  IdentityFile ${identity}" \
+            '  IdentitiesOnly yes' \
+            '  BatchMode yes' \
+            '  PreferredAuthentications publickey' \
+            '  PasswordAuthentication no' \
+            '  KbdInteractiveAuthentication no' \
+            '  StrictHostKeyChecking yes' \
+            "  UserKnownHostsFile ${known_hosts}" \
+            '  HostKeyAlias 135.148.121.196' \
+            '  UpdateHostKeys no' \
+            '  ForwardAgent no' \
+            '  ForwardX11 no' \
+            '  ClearAllForwardings yes' \
+            '  PermitLocalCommand no' \
+            '  RequestTTY no' \
+            '  ProxyJump none' \
+            '  ControlMaster no' \
+            > "${config}"
+          chmod 0600 "${config}"
+          ssh -G -F "${config}" provenance-runner >/dev/null
+          echo "PROVENANCE_SSH_CONFIG=${config}" >> "${GITHUB_ENV}"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build exact systemd-user smoke binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse HEAD)"
+          [[ "${candidate}" =~ ^[0-9a-f]{40}$ ]]
+          binary="${RUNNER_TEMP}/gvisor-systemd-user-smoke.test"
+          evidence="${RUNNER_TEMP}/systemd-user-smoke-${candidate}"
+          mkdir -m 0700 "${evidence}"
+          go test -c -trimpath -o "${binary}" ./internal/provider/gvisor
+          binary_sha="$(sha256sum "${binary}" | cut -d' ' -f1)"
+          remote_dir="/var/lib/provenance-plan0506/ci-smoke/${candidate}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          jq -n \
+            --arg candidateSha "${candidate}" \
+            --arg binarySha256 "${binary_sha}" \
+            --arg workflowRun "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{candidateSha:$candidateSha,binarySha256:$binarySha256,workflowRun:$workflowRun,hostAlias:"provenance-runner",expectedUser:"provenance",expectedUid:1001,expectedCgroupDriver:"systemd-user",expectedCgroupRoot:"/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"}' \
+            > "${evidence}/metadata.json"
+          echo "SYSTEMD_SMOKE_BINARY=${binary}" >> "${GITHUB_ENV}"
+          echo "SYSTEMD_SMOKE_EVIDENCE=${evidence}" >> "${GITHUB_ENV}"
+          echo "SYSTEMD_SMOKE_REMOTE_DIR=${remote_dir}" >> "${GITHUB_ENV}"
+      - name: Run exact non-root smoke on dedicated host
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${SYSTEMD_SMOKE_REMOTE_DIR}" =~ ^/var/lib/provenance-plan0506/ci-smoke/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          ssh_options=(
+            -F "${PROVENANCE_SSH_CONFIG}"
+            -o BatchMode=yes
+            -o ClearAllForwardings=yes
+            -o ExitOnForwardFailure=yes
+            -o ForwardAgent=no
+            -o ForwardX11=no
+            -o PermitLocalCommand=no
+            -o RequestTTY=no
+            -o StrictHostKeyChecking=yes
+          )
+          ssh "${ssh_options[@]}" provenance-runner \
+            'set -euo pipefail
+             . /etc/os-release
+             jq -n --arg host "$(hostname)" --arg user "$(id -un)" --argjson uid "$(id -u)" --arg os "$ID" --arg version "$VERSION_ID" --arg runscSha256 "$(sha256sum /opt/provenance-plan0506/bin/runsc | cut -d" " -f1)" --arg wrapperSha256 "$(sha256sum /opt/provenance-plan0506/bin/runsc-provenance | cut -d" " -f1)" "{host:\$host,user:\$user,uid:\$uid,os:\$os,version:\$version,runscSha256:\$runscSha256,wrapperSha256:\$wrapperSha256}"' \
+            > "${SYSTEMD_SMOKE_EVIDENCE}/host-preflight.json"
+          jq -e '.host == "vps-03bb1cbf" and .user == "provenance" and .uid == 1001 and .runscSha256 == "456ea862b62b48bb7ff27ae38c262b52315bf3d68ea0733164e4817cadc518a1" and .wrapperSha256 == "6e19e2c19e39f7b394ba71af24192de5d145c8f794ff0ab63f450d5bed136d7d"' \
+            "${SYSTEMD_SMOKE_EVIDENCE}/host-preflight.json" >/dev/null
+          ssh "${ssh_options[@]}" provenance-runner \
+            "set -eu; test ! -e '${SYSTEMD_SMOKE_REMOTE_DIR}'; install -d -m 0700 /var/lib/provenance-plan0506/ci-smoke '${SYSTEMD_SMOKE_REMOTE_DIR}'"
+          scp "${ssh_options[@]}" -- "${SYSTEMD_SMOKE_BINARY}" \
+            "provenance-runner:${SYSTEMD_SMOKE_REMOTE_DIR}/gvisor-smoke.test"
+          ssh "${ssh_options[@]}" provenance-runner \
+            "set -euo pipefail
+             test \"\$(id -un)\" = provenance
+             test \"\$(id -u)\" = 1001
+             chmod 0500 '${SYSTEMD_SMOKE_REMOTE_DIR}/gvisor-smoke.test'
+             systemctl --user start app.slice
+             exec systemd-run --user --scope --collect --quiet --slice=app.slice --unit=provenance-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} env \
+               PROVENANCE_RUNSC_SMOKE=1 \
+               PROVENANCE_RUNSC_PATH=/opt/provenance-plan0506/bin/runsc-provenance \
+               PROVENANCE_RUNSC_ROOTFS=/var/lib/provenance-plan0506/bootstrap-smoke/alpine-rootfs \
+               PROVENANCE_GVISOR_CGROUP_DRIVER=systemd-user \
+               PROVENANCE_SYSTEMD_RUN_PATH=/usr/bin/systemd-run \
+               PROVENANCE_SYSTEMD_CGROUP_ROOT=/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice \
+               PROVENANCE_CGROUP_PARENT=/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice \
+               '${SYSTEMD_SMOKE_REMOTE_DIR}/gvisor-smoke.test' \
+                 -test.v -test.run '^TestRunscSmoke$' -test.count=1 -test.timeout=120s" \
+            | tee "${SYSTEMD_SMOKE_EVIDENCE}/smoke.log"
+          grep -F -- '--- PASS: TestRunscSmoke/systemd_user_scope_applies_exact_limits' \
+            "${SYSTEMD_SMOKE_EVIDENCE}/smoke.log" >/dev/null
+          jq -n \
+            --arg cgroupDriver "systemd-user" \
+            --arg cgroupRoot "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice" \
+            --arg assertion "TestRunscSmoke/systemd_user_scope_applies_exact_limits" \
+            '{cgroupDriver:$cgroupDriver,cgroupRoot:$cgroupRoot,verifiedAssertion:$assertion}' \
+            > "${SYSTEMD_SMOKE_EVIDENCE}/execution.json"
+          ssh "${ssh_options[@]}" provenance-runner \
+            'set -euo pipefail
+             . /etc/os-release
+             residual_scopes="$(systemctl --user list-units --all --plain --no-legend "provenance-*.scope" | awk "{print \$1}" | wc -l)"
+             jq -n --arg host "$(hostname)" --arg user "$(id -un)" --argjson uid "$(id -u)" --arg os "$ID" --arg version "$VERSION_ID" --arg runscSha256 "$(sha256sum /opt/provenance-plan0506/bin/runsc | cut -d" " -f1)" --arg wrapperSha256 "$(sha256sum /opt/provenance-plan0506/bin/runsc-provenance | cut -d" " -f1)" --arg completedAt "$(date -u +%FT%TZ)" --argjson residualScopes "$residual_scopes" "{host:\$host,user:\$user,uid:\$uid,os:\$os,version:\$version,runscSha256:\$runscSha256,wrapperSha256:\$wrapperSha256,completedAt:\$completedAt,residualScopes:\$residualScopes}"' \
+            > "${SYSTEMD_SMOKE_EVIDENCE}/host.json"
+          jq -e '.host == "vps-03bb1cbf" and .user == "provenance" and .uid == 1001 and .runscSha256 == "456ea862b62b48bb7ff27ae38c262b52315bf3d68ea0733164e4817cadc518a1" and .wrapperSha256 == "6e19e2c19e39f7b394ba71af24192de5d145c8f794ff0ab63f450d5bed136d7d" and .residualScopes == 0' \
+            "${SYSTEMD_SMOKE_EVIDENCE}/host.json" >/dev/null
+          (cd "${SYSTEMD_SMOKE_EVIDENCE}" && sha256sum execution.json host-preflight.json host.json metadata.json smoke.log > manifest.sha256)
+      - name: Upload exact-head systemd-user smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: systemd-user-smoke-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ env.SYSTEMD_SMOKE_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Remove exact remote smoke directory
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SYSTEMD_SMOKE_REMOTE_DIR:-}" ]]; then
+            exit 0
+          fi
+          [[ "${SYSTEMD_SMOKE_REMOTE_DIR}" =~ ^/var/lib/provenance-plan0506/ci-smoke/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          ssh -F "${PROVENANCE_SSH_CONFIG}" \
+            -o BatchMode=yes -o ClearAllForwardings=yes -o ExitOnForwardFailure=yes \
+            -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no \
+            -o RequestTTY=no -o StrictHostKeyChecking=yes provenance-runner \
+            "find '${SYSTEMD_SMOKE_REMOTE_DIR}' -type f -exec chmod u+rw {} + 2>/dev/null || true; rm -rf -- '${SYSTEMD_SMOKE_REMOTE_DIR}'"
+
+      - name: Remove ephemeral SSH material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh_root="${RUNNER_TEMP}/provenance-runner-ssh"
+          test "${ssh_root}" = "${RUNNER_TEMP}/provenance-runner-ssh"
+          rm -rf -- "${ssh_root}"

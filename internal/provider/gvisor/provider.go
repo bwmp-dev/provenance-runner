@@ -26,6 +26,8 @@ import (
 
 const (
 	ProviderName                       = "gvisor"
+	CgroupDriverRunsc                  = "runsc"
+	CgroupDriverSystemdUser            = "systemd-user"
 	containerUID                uint32 = 65532
 	containerGID                uint32 = 65532
 	cleanupTimeout                     = 10 * time.Second
@@ -44,14 +46,19 @@ const runscFailureExitCode = 128
 var safeJobID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 type Config struct {
-	RunscPath       string
-	RootFS          string
-	StateRoot       string
-	BundleRoot      string
-	InputsRoot      string
-	Platform        string
-	RootFSIdentity  string
-	runtimeIdentity string
+	RunscPath         string
+	CgroupDriver      string
+	SystemdRunPath    string
+	SystemdCgroupRoot string
+	RootFS            string
+	StateRoot         string
+	BundleRoot        string
+	InputsRoot        string
+	Platform          string
+	RootFSIdentity    string
+	runtimeIdentity   string
+	cgroupIdentity    string
+	systemdLauncher   string
 }
 
 type Provider struct {
@@ -80,6 +87,37 @@ func New(config Config) (*Provider, error) {
 		return nil, fmt.Errorf("create gVisor provider: identify runsc: %w", err)
 	}
 	config.runtimeIdentity = runtimeIdentity
+	if config.CgroupDriver == "" {
+		config.CgroupDriver = CgroupDriverRunsc
+	}
+	if config.CgroupDriver == CgroupDriverSystemdUser {
+		systemdRunPath := config.SystemdRunPath
+		if systemdRunPath == "" {
+			systemdRunPath = "systemd-run"
+		}
+		resolvedSystemdRun, err := exec.LookPath(systemdRunPath)
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: find systemd-run: %w", err)
+		}
+		config.SystemdRunPath = resolvedSystemdRun
+		systemdRunIdentity, err := executableIdentity(resolvedSystemdRun)
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: identify systemd-run: %w", err)
+		}
+		launcher, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: identify systemd launcher: %w", err)
+		}
+		config.systemdLauncher, err = filepath.EvalSymlinks(launcher)
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: resolve systemd launcher: %w", err)
+		}
+		launcherIdentity, err := executableIdentity(config.systemdLauncher)
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: hash systemd launcher: %w", err)
+		}
+		config.cgroupIdentity = "systemd-run:" + systemdRunIdentity + "/launcher:" + launcherIdentity
+	}
 	return newProvider(config, execCommandRunner{})
 }
 
@@ -95,6 +133,26 @@ func newProvider(config Config, runner commandRunner) (*Provider, error) {
 	}
 	if config.Platform != "systrap" && config.Platform != "kvm" {
 		return nil, fmt.Errorf("create gVisor provider: unsupported platform %q", config.Platform)
+	}
+	if config.CgroupDriver == "" {
+		config.CgroupDriver = CgroupDriverRunsc
+	}
+	switch config.CgroupDriver {
+	case CgroupDriverRunsc:
+		if config.SystemdRunPath != "" || config.SystemdCgroupRoot != "" || config.cgroupIdentity != "" {
+			return nil, errors.New("create gVisor provider: systemd cgroup settings require the systemd-user driver")
+		}
+	case CgroupDriverSystemdUser:
+		if config.SystemdRunPath == "" || config.cgroupIdentity == "" || config.systemdLauncher == "" {
+			return nil, errors.New("create gVisor provider: systemd-user driver requires an identified systemd-run executable")
+		}
+		var err error
+		config.SystemdCgroupRoot, err = existingCgroupRoot(config.SystemdCgroupRoot)
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("create gVisor provider: unsupported cgroup driver %q", config.CgroupDriver)
 	}
 	if config.RootFSIdentity == "" || len(config.RootFSIdentity) > 256 || strings.ContainsAny(config.RootFSIdentity, "\r\n") {
 		return nil, errors.New("create gVisor provider: root filesystem identity is required")
@@ -140,7 +198,48 @@ func (*Provider) Name() string {
 }
 
 func (p *Provider) Identity() string {
-	return fmt.Sprintf("gvisor/%s/rootfs:%s/runsc:%s", p.config.Platform, p.config.RootFSIdentity, p.config.runtimeIdentity)
+	identity := fmt.Sprintf("gvisor/%s/rootfs:%s/runsc:%s", p.config.Platform, p.config.RootFSIdentity, p.config.runtimeIdentity)
+	if p.config.CgroupDriver == CgroupDriverSystemdUser {
+		identity += "/cgroup:systemd-user/" + p.config.cgroupIdentity
+	}
+	return identity
+}
+
+func existingCgroupRoot(path string) (string, error) {
+	return existingCgroupRootAt(path, "/sys/fs/cgroup", currentUnifiedCgroup)
+}
+
+func existingCgroupRootAt(path, mount string, current func() (string, bool)) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", errors.New("systemd cgroup root must be an absolute directory")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve systemd cgroup root: %w", err)
+	}
+	mount = filepath.Clean(mount)
+	if resolved == mount || !strings.HasPrefix(resolved, mount+string(filepath.Separator)) {
+		return "", errors.New("systemd cgroup root must be a descendant of /sys/fs/cgroup")
+	}
+	if filepath.Base(resolved) != "app.slice" {
+		return "", errors.New("systemd cgroup root must be the active user manager app.slice")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("inspect systemd cgroup root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("systemd cgroup root must be a directory")
+	}
+	relative, ok := current()
+	if !ok {
+		return "", errors.New("cannot identify the runner's unified cgroup")
+	}
+	currentPath := filepath.Clean(filepath.Join(mount, relative))
+	if currentPath != resolved && !strings.HasPrefix(currentPath, resolved+string(filepath.Separator)) {
+		return "", errors.New("runner process is outside the configured user manager app.slice")
+	}
+	return resolved, nil
 }
 
 func executableIdentity(path string) (string, error) {
@@ -498,6 +597,11 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		evidence:              collector,
 		structuredEventFile:   e.structuredEventFile,
 		structuredEventPrefix: e.structuredEventPrefix,
+		cgroupLimits: cgroupLimits{
+			memoryBytes: e.config.MemoryBytes,
+			cpuMillis:   e.config.CPUMillis,
+			pids:        e.config.PIDs,
+		},
 	}
 	if err := prepared.writeMetadata(); err != nil {
 		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
@@ -525,25 +629,29 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 }
 
 type preparedEnvironment struct {
-	mu                        sync.Mutex
-	usageMu                   sync.Mutex
-	provider                  *Provider
-	containerID               string
-	bundle                    string
-	evidence                  *evidence.Collector
-	cleaned                   bool
-	observer                  execution.ExecutionObserver
-	usage                     execution.ResourceUsage
-	structuredEventPath       string
-	structuredEventChannel    *structuredEventChannel
-	structuredEventFile       *execution.StructuredEventFile
-	structuredEventPrefix     string
-	structuredEventErr        string
-	eventChannelMaximumBytes  int64
-	eventChannelBufferedBytes int64
-	eventChannelResourceBytes int64
-	eventChannelOverflowed    bool
-	eventChannelRemoved       bool
+	mu                         sync.Mutex
+	usageMu                    sync.Mutex
+	provider                   *Provider
+	containerID                string
+	bundle                     string
+	evidence                   *evidence.Collector
+	cleaned                    bool
+	observer                   execution.ExecutionObserver
+	usage                      execution.ResourceUsage
+	outerPIDDenials            uint64
+	pidDenialEvidenceAvailable bool
+	scopeCgroupObserved        bool
+	structuredEventPath        string
+	structuredEventChannel     *structuredEventChannel
+	structuredEventFile        *execution.StructuredEventFile
+	structuredEventPrefix      string
+	structuredEventErr         string
+	cgroupLimits               cgroupLimits
+	eventChannelMaximumBytes   int64
+	eventChannelBufferedBytes  int64
+	eventChannelResourceBytes  int64
+	eventChannelOverflowed     bool
+	eventChannelRemoved        bool
 }
 
 func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
@@ -584,12 +692,19 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	stopSampling := make(chan struct{})
 	samplingDone := make(chan struct{})
 	go e.sampleUsageUntil(stopSampling, samplingDone)
-	result := e.provider.runner.Run(ctx, command{
+	launchMarker := filepath.Join(e.bundle, systemdLaunchMarker)
+	runCommand, err := e.provider.wrapRunCommand(command{
 		Path:   e.provider.config.RunscPath,
 		Args:   e.provider.runArguments("run", "--bundle="+e.bundle, e.containerID),
 		Stdout: stdout,
 		Stderr: stderr,
-	})
+	}, e.cgroupLimits, e.containerID, launchMarker)
+	if err != nil {
+		close(stopSampling)
+		<-samplingDone
+		return execution.ExecutionOutcome{}, fmt.Errorf("configure gVisor cgroup command: %w", err)
+	}
+	result := e.provider.runner.Run(ctx, runCommand)
 	close(stopSampling)
 	<-samplingDone
 	e.sampleUsage()
@@ -605,7 +720,23 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 		}
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, ctx.Err()
 	}
-	outerPIDDenials, denialEvidenceAvailable := readOuterPIDDenials(e.containerID)
+	if e.provider.config.CgroupDriver == CgroupDriverSystemdUser {
+		expectedScope := systemdCgroupPath(e.provider.config.SystemdCgroupRoot, e.containerID)
+		if err := validateSystemdLaunchMarker(launchMarker, expectedScope); err != nil {
+			return execution.ExecutionOutcome{ExitCode: result.ExitCode}, fmt.Errorf("systemd user scope did not launch runsc: %w", errors.Join(result.Err, err))
+		}
+		e.usageMu.Lock()
+		e.scopeCgroupObserved = true
+		e.usageMu.Unlock()
+	}
+	e.usageMu.Lock()
+	outerPIDDenials := e.outerPIDDenials
+	denialEvidenceAvailable := e.pidDenialEvidenceAvailable
+	scopeCgroupObserved := e.scopeCgroupObserved
+	e.usageMu.Unlock()
+	if e.provider.config.CgroupDriver == CgroupDriverSystemdUser && !scopeCgroupObserved {
+		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, errors.New("systemd user scope was never observed")
+	}
 	return classifyRunResult(result, outerPIDDenials, denialEvidenceAvailable)
 }
 
@@ -798,6 +929,9 @@ func (p *Provider) runArguments(arguments ...string) []string {
 		"--allow-suid=false",
 		"--platform=" + p.config.Platform,
 		"--cpu-num-from-quota=true",
+	}
+	if p.config.CgroupDriver == CgroupDriverSystemdUser {
+		global = append(global, "--ignore-cgroups=true")
 	}
 	return append(global, arguments...)
 }
