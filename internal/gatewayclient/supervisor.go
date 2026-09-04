@@ -1255,7 +1255,15 @@ func (s *clientSession) acceptRestartCompleteLogUpload(reconciliation *runnerv1.
 	if state.Active == nil || !activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt()) {
 		return permanent("reconciliation complete log upload does not match the active attempt")
 	}
-	target, rejection := validateCompleteLogUpload(upload, now, now, now)
+	specification := new(runnerv1.JobSpecification)
+	if err := proto.Unmarshal(state.Active.Specification, specification); err != nil || !proto.Equal(specification.GetLease(), reconciliation.GetLease()) || !proto.Equal(specification.GetAttempt(), reconciliation.GetAttempt()) {
+		return permanent("reconciliation complete log upload identity does not exactly match the active job")
+	}
+	leaseExpiresAt := reconciliation.GetLease().GetExpiresAt().AsTime()
+	if !leaseExpiresAt.After(now) {
+		return permanent("reconciliation complete log upload lease is expired")
+	}
+	target, rejection := validateCompleteLogUpload(upload, now, leaseExpiresAt, leaseExpiresAt)
 	if rejection != nil || target == nil {
 		return permanent("reconciliation complete log upload is malformed or expired")
 	}

@@ -265,6 +265,15 @@ func TestRestartRecoveryRejectsInvalidOrSubstitutedUploadResponses(t *testing.T)
 		{name: "expired", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
 			ack.Reconciliations[0].CompleteLogUpload.ExpiresAt = timestamppb.New(now)
 		}},
+		{name: "upload expires with lease", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
+			ack.Reconciliations[0].CompleteLogUpload.ExpiresAt = ack.Reconciliations[0].Lease.ExpiresAt
+		}},
+		{name: "substituted lease expiry", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
+			ack.Reconciliations[0].Lease.ExpiresAt = timestamppb.New(now.Add(7 * time.Minute))
+		}},
+		{name: "expired lease", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
+			ack.Reconciliations[0].Lease.ExpiresAt = timestamppb.New(now)
+		}},
 		{name: "non active", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
 			ack.Reconciliations[0].Status = runnerv1.LeaseStatus_LEASE_STATUS_ACCEPTED
 		}},
