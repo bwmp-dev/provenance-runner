@@ -10,10 +10,18 @@ import (
 )
 
 func TestCgroupUsageRootsIncludeDelegatedSibling(t *testing.T) {
-	roots := cgroupUsageRoots("/provenance-ci-1/runner", "container")
+	roots := cgroupUsageRoots("/provenance-ci-1/runner", "container", "")
 	want := "/sys/fs/cgroup/provenance-ci-1/provenance/container"
 	if len(roots) != 3 || roots[1] != want {
 		t.Fatalf("roots = %#v, want delegated sibling %q", roots, want)
+	}
+}
+
+func TestCgroupUsageRootsPreferConfiguredSystemdScope(t *testing.T) {
+	roots := cgroupUsageRoots("/unrelated/runner", "provenance-abc", "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice")
+	want := "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/provenance-abc.scope"
+	if len(roots) != 4 || roots[0] != want {
+		t.Fatalf("roots = %#v, want configured systemd scope %q first", roots, want)
 	}
 }
 

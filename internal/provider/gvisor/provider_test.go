@@ -829,12 +829,21 @@ func TestNewProviderValidatesTrustedConfiguration(t *testing.T) {
 	}
 	base := Config{RunscPath: "runsc", RootFS: rootFS, RootFSIdentity: "test-rootfs", runtimeIdentity: "test-runsc", InputsRoot: inputs, StateRoot: filepath.Join(root, "state"), BundleRoot: filepath.Join(root, "bundles")}
 	for name, mutate := range map[string]func(*Config){
-		"missing runsc":            func(config *Config) { config.RunscPath = "" },
-		"missing rootfs":           func(config *Config) { config.RootFS = filepath.Join(root, "missing") },
-		"missing inputs":           func(config *Config) { config.InputsRoot = filepath.Join(root, "missing") },
-		"empty state":              func(config *Config) { config.StateRoot = "" },
-		"empty bundles":            func(config *Config) { config.BundleRoot = "" },
-		"bad platform":             func(config *Config) { config.Platform = "ptrace" },
+		"missing runsc":     func(config *Config) { config.RunscPath = "" },
+		"missing rootfs":    func(config *Config) { config.RootFS = filepath.Join(root, "missing") },
+		"missing inputs":    func(config *Config) { config.InputsRoot = filepath.Join(root, "missing") },
+		"empty state":       func(config *Config) { config.StateRoot = "" },
+		"empty bundles":     func(config *Config) { config.BundleRoot = "" },
+		"bad platform":      func(config *Config) { config.Platform = "ptrace" },
+		"bad cgroup driver": func(config *Config) { config.CgroupDriver = "unknown" },
+		"runsc with systemd path": func(config *Config) {
+			config.CgroupDriver = CgroupDriverRunsc
+			config.SystemdRunPath = "/usr/bin/systemd-run"
+		},
+		"systemd without identity": func(config *Config) {
+			config.CgroupDriver = CgroupDriverSystemdUser
+			config.SystemdRunPath = "/usr/bin/systemd-run"
+		},
 		"missing rootfs identity":  func(config *Config) { config.RootFSIdentity = "" },
 		"missing runtime identity": func(config *Config) { config.runtimeIdentity = "" },
 	} {

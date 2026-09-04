@@ -46,13 +46,16 @@ func TestRunscSmoke(t *testing.T) {
 	stateRoot := filepath.Join(temporaryRoot, "state")
 	bundleRoot := filepath.Join(temporaryRoot, "bundles")
 	providerConfig := Config{
-		RunscPath:      resolvedRunsc,
-		RootFS:         rootFS,
-		RootFSIdentity: "smoke-rootfs",
-		StateRoot:      stateRoot,
-		BundleRoot:     bundleRoot,
-		InputsRoot:     inputsRoot,
-		Platform:       "systrap",
+		RunscPath:         resolvedRunsc,
+		CgroupDriver:      os.Getenv("PROVENANCE_GVISOR_CGROUP_DRIVER"),
+		SystemdRunPath:    os.Getenv("PROVENANCE_SYSTEMD_RUN_PATH"),
+		SystemdCgroupRoot: os.Getenv("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
+		RootFS:            rootFS,
+		RootFSIdentity:    "smoke-rootfs",
+		StateRoot:         stateRoot,
+		BundleRoot:        bundleRoot,
+		InputsRoot:        inputsRoot,
+		Platform:          "systrap",
 	}
 	provider, err := New(providerConfig)
 	if err != nil {
@@ -196,7 +199,14 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		containerID := prepared.containerID
 		var runOutput bytes.Buffer
-		run := exec.Command(provider.config.RunscPath, provider.runArguments("run", "--bundle="+prepared.bundle, containerID)...)
+		invocation, err := provider.wrapRunCommand(command{
+			Path: provider.config.RunscPath,
+			Args: provider.runArguments("run", "--bundle="+prepared.bundle, containerID),
+		}, prepared.cgroupLimits, containerID)
+		if err != nil {
+			t.Fatalf("configure abandoned runsc command: %v", err)
+		}
+		run := exec.Command(invocation.Path, invocation.Args...)
 		run.Stdout = &runOutput
 		run.Stderr = &runOutput
 		if err := run.Start(); err != nil {

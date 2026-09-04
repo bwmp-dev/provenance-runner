@@ -30,12 +30,19 @@ func (e *preparedEnvironment) sampleUsageUntil(stop <-chan struct{}, done chan<-
 }
 
 func (e *preparedEnvironment) sampleUsage() {
-	usage, ok := readCgroupUsage(e.containerID)
-	if !ok {
+	usage, ok := readCgroupUsage(e.containerID, e.provider.config.SystemdCgroupRoot)
+	denials, denialEvidenceAvailable := readOuterPIDDenials(e.containerID, e.provider.config.SystemdCgroupRoot)
+	if !ok && !denialEvidenceAvailable {
 		return
 	}
 	e.usageMu.Lock()
-	changed := mergeMeasuredUsage(&e.usage, usage)
+	changed := ok && mergeMeasuredUsage(&e.usage, usage)
+	if denialEvidenceAvailable {
+		e.pidDenialEvidenceAvailable = true
+		if denials > e.outerPIDDenials {
+			e.outerPIDDenials = denials
+		}
+	}
 	observer := e.observer
 	current := e.usage
 	e.usageMu.Unlock()
@@ -63,12 +70,12 @@ func mergeMeasuredUsage(current *execution.ResourceUsage, measured execution.Res
 	return changed
 }
 
-func readCgroupUsage(containerID string) (execution.ResourceUsage, bool) {
+func readCgroupUsage(containerID, systemdCgroupRoot string) (execution.ResourceUsage, bool) {
 	relative, ok := currentUnifiedCgroup()
 	if !ok {
 		return execution.ResourceUsage{}, false
 	}
-	for _, root := range cgroupUsageRoots(relative, containerID) {
+	for _, root := range cgroupUsageRoots(relative, containerID, systemdCgroupRoot) {
 		if !strings.HasPrefix(root, "/sys/fs/cgroup/") {
 			continue
 		}
@@ -79,12 +86,12 @@ func readCgroupUsage(containerID string) (execution.ResourceUsage, bool) {
 	return execution.ResourceUsage{}, false
 }
 
-func readOuterPIDDenials(containerID string) (uint64, bool) {
+func readOuterPIDDenials(containerID, systemdCgroupRoot string) (uint64, bool) {
 	relative, ok := currentUnifiedCgroup()
 	if !ok {
 		return 0, false
 	}
-	for _, root := range cgroupUsageRoots(relative, containerID) {
+	for _, root := range cgroupUsageRoots(relative, containerID, systemdCgroupRoot) {
 		if !strings.HasPrefix(root, "/sys/fs/cgroup/") {
 			continue
 		}
@@ -110,12 +117,16 @@ func readPIDMaxEvents(path string) (uint64, bool) {
 	return 0, false
 }
 
-func cgroupUsageRoots(relative, containerID string) []string {
-	return []string{
+func cgroupUsageRoots(relative, containerID, systemdCgroupRoot string) []string {
+	roots := []string{
 		filepath.Clean(filepath.Join("/sys/fs/cgroup", relative, "provenance", containerID)),
 		filepath.Clean(filepath.Join("/sys/fs/cgroup", filepath.Dir(relative), "provenance", containerID)),
 		filepath.Clean(filepath.Join("/sys/fs/cgroup", "provenance", containerID)),
 	}
+	if systemdCgroupRoot != "" {
+		roots = append([]string{systemdCgroupPath(systemdCgroupRoot, containerID)}, roots...)
+	}
+	return roots
 }
 
 func readCgroupUsageRoot(root string) (execution.ResourceUsage, bool) {
