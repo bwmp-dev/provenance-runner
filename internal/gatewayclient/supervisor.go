@@ -297,19 +297,14 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 	if err := validateReconciliation(reconciliation); err != nil {
 		return permanent("event acknowledgement: %v", err)
 	}
+	if reconciliation.GetCompleteLogUpload() != nil {
+		return permanent("event acknowledgement must not contain a complete log upload")
+	}
 	pendingLease, pendingAttempt := runnerMessageIdentity(pending)
 	if pendingLease == nil || pendingAttempt == nil || !sameLeaseAttempt(pendingLease, pendingAttempt, reconciliation.GetLease(), reconciliation.GetAttempt()) {
 		return permanent("event acknowledgement reconciliation identity does not match the pending event")
 	}
 	activeMatches := state.Active != nil && activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt())
-	if reconciliation.GetCompleteLogUpload() != nil {
-		if !activeMatches {
-			return permanent("event acknowledgement complete log upload does not match the active attempt")
-		}
-		if err := s.acceptRestartCompleteLogUpload(reconciliation, now); err != nil {
-			return err
-		}
-	}
 	if err := validatePendingReconciliation(pending, reconciliation, state); err != nil {
 		return permanent("event acknowledgement: %v", err)
 	}

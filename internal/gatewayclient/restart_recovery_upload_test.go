@@ -164,6 +164,25 @@ func TestRestartRecoveryUploadsDurableEvidenceAndJournalsCanonicalTerminalBefore
 	}
 }
 
+func TestRestartRecoveryRejectsCapabilityInEventAcknowledgement(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	uploader := new(restartRecoveryUploader)
+	harness := newRestartRecoveryHarness(t, now, uploader)
+	if err := harness.session.queueRenewal(now); err != nil {
+		t.Fatal(err)
+	}
+	renewal := harness.sent[len(harness.sent)-1]
+	pending := bytes.Clone(harness.client.journal.snapshot().PendingMessage)
+	acknowledgement := eventAcknowledgement(now, "renewal-ack", renewal, runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, runnerv1.JobPhase_JOB_PHASE_RUNNING).GetEventAcknowledgement()
+	acknowledgement.Reconciliation.CompleteLogUpload = validCompleteLogUpload(now)
+	if err := harness.session.handleEventAcknowledgement(acknowledgement, now); err == nil || !strings.Contains(err.Error(), "must not contain") {
+		t.Fatalf("event acknowledgement capability error = %v", err)
+	}
+	if uploader.calls != 0 || harness.client.completeLogTarget(harness.offer.GetJob().GetLease(), harness.offer.GetJob().GetAttempt()) != nil || !bytes.Equal(pending, harness.client.journal.snapshot().PendingMessage) {
+		t.Fatalf("invalid event acknowledgement mutated recovery state: calls=%d", uploader.calls)
+	}
+}
+
 func TestRestartRecoveryUploadFailureRequiresFreshCapabilityAndRetainsEvidence(t *testing.T) {
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 	uploader := &restartRecoveryUploader{failures: 1}
