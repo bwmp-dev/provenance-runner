@@ -8,8 +8,9 @@ import (
 
 func TestWrapRunCommandUsesBoundedUserScope(t *testing.T) {
 	provider := &Provider{config: Config{
-		CgroupDriver:   CgroupDriverSystemdUser,
-		SystemdRunPath: "/usr/bin/systemd-run",
+		CgroupDriver:    CgroupDriverSystemdUser,
+		SystemdRunPath:  "/usr/bin/systemd-run",
+		systemdLauncher: "/opt/provenance/provenance-runner",
 	}}
 	invocation := command{
 		Path: "/opt/provenance/runsc",
@@ -19,7 +20,7 @@ func TestWrapRunCommandUsesBoundedUserScope(t *testing.T) {
 		memoryBytes: 128 << 20,
 		cpuMillis:   500,
 		pids:        64,
-	}, "provenance-0123456789abcdef0123456789abcdef")
+	}, "provenance-0123456789abcdef0123456789abcdef", "/var/lib/provenance/bundle/.provenance-systemd-launched")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +38,11 @@ func TestWrapRunCommandUsesBoundedUserScope(t *testing.T) {
 		"--property=CPUQuota=50.0%",
 		"--property=TasksMax=81",
 		"--",
+		"/opt/provenance/provenance-runner",
+		"__gvisor-systemd-launch",
+		"--marker",
+		"/var/lib/provenance/bundle/.provenance-systemd-launched",
+		"--",
 		"/opt/provenance/runsc",
 		"--network=none",
 		"run",
@@ -50,7 +56,7 @@ func TestWrapRunCommandUsesBoundedUserScope(t *testing.T) {
 func TestWrapRunCommandLeavesRunscDriverUntouched(t *testing.T) {
 	provider := &Provider{config: Config{CgroupDriver: CgroupDriverRunsc}}
 	original := command{Path: "runsc", Args: []string{"run", "container"}}
-	wrapped, err := provider.wrapRunCommand(original, cgroupLimits{}, "container")
+	wrapped, err := provider.wrapRunCommand(original, cgroupLimits{}, "container", "")
 	if err != nil || !reflect.DeepEqual(wrapped, original) {
 		t.Fatalf("wrapped command = %#v, %v", wrapped, err)
 	}
@@ -58,8 +64,9 @@ func TestWrapRunCommandLeavesRunscDriverUntouched(t *testing.T) {
 
 func TestWrapRunCommandRejectsUnsafeScopeInputs(t *testing.T) {
 	provider := &Provider{config: Config{
-		CgroupDriver:   CgroupDriverSystemdUser,
-		SystemdRunPath: "/usr/bin/systemd-run",
+		CgroupDriver:    CgroupDriverSystemdUser,
+		SystemdRunPath:  "/usr/bin/systemd-run",
+		systemdLauncher: "/opt/provenance/provenance-runner",
 	}}
 	valid := cgroupLimits{memoryBytes: 16 << 20, cpuMillis: 10, pids: 1}
 	for _, test := range []struct {
@@ -72,7 +79,7 @@ func TestWrapRunCommandRejectsUnsafeScopeInputs(t *testing.T) {
 		{name: "invalid pids", limits: cgroupLimits{memoryBytes: 16 << 20, cpuMillis: 10}, container: "provenance-0123456789abcdef0123456789abcdef"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := provider.wrapRunCommand(command{Path: "runsc"}, test.limits, test.container); err == nil {
+			if _, err := provider.wrapRunCommand(command{Path: "runsc"}, test.limits, test.container, "/bundle/.provenance-systemd-launched"); err == nil {
 				t.Fatal("wrapRunCommand() error = nil")
 			}
 		})
@@ -94,9 +101,9 @@ func TestSystemdDriverIdentityBindsCgroupHelper(t *testing.T) {
 		RootFSIdentity:  "sha256:rootfs",
 		runtimeIdentity: "sha256:runsc",
 		CgroupDriver:    CgroupDriverSystemdUser,
-		cgroupIdentity:  "sha256:systemd-run",
+		cgroupIdentity:  "systemd-run:sha256:systemd-run/launcher:sha256:runner",
 	}}
-	want := "gvisor/systrap/rootfs:sha256:rootfs/runsc:sha256:runsc/cgroup:systemd-user/systemd-run:sha256:systemd-run"
+	want := "gvisor/systrap/rootfs:sha256:rootfs/runsc:sha256:runsc/cgroup:systemd-user/systemd-run:sha256:systemd-run/launcher:sha256:runner"
 	if got := provider.Identity(); got != want {
 		t.Fatalf("Identity() = %q, want %q", got, want)
 	}

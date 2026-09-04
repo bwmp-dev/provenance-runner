@@ -19,6 +19,13 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 )
 
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == SystemdLauncherCommand {
+		os.Exit(RunSystemdLauncher(os.Args[2:], os.Stderr))
+	}
+	os.Exit(m.Run())
+}
+
 func TestRunscSmoke(t *testing.T) {
 	if os.Getenv("PROVENANCE_RUNSC_SMOKE") != "1" {
 		t.Skip("set PROVENANCE_RUNSC_SMOKE=1 to opt in to the real sandbox smoke test")
@@ -202,7 +209,7 @@ func TestRunscSmoke(t *testing.T) {
 		invocation, err := provider.wrapRunCommand(command{
 			Path: provider.config.RunscPath,
 			Args: provider.runArguments("run", "--bundle="+prepared.bundle, containerID),
-		}, prepared.cgroupLimits, containerID)
+		}, prepared.cgroupLimits, containerID, filepath.Join(prepared.bundle, systemdLaunchMarker))
 		if err != nil {
 			t.Fatalf("configure abandoned runsc command: %v", err)
 		}

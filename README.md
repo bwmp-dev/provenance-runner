@@ -99,7 +99,8 @@ cgroup. The runner then launches each sandbox in a uniquely named transient
 user scope with the exact memory, CPU, swap, and outer PID limits, tells
 `runsc` not to mutate the host cgroup tree, and samples usage from that scope.
 `PROVENANCE_SYSTEMD_RUN_PATH` may pin an alternate `systemd-run` executable;
-its bytes are included in the environment identity. The service account must
+its bytes and the runner launcher bytes are included in the environment
+identity. The service account must
 have an active user manager (normally through login lingering), and the
 configured cgroup root must already exist below `/sys/fs/cgroup`.
 

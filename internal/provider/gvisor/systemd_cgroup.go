@@ -2,6 +2,7 @@ package gvisor
 
 import (
 	"errors"
+	"path/filepath"
 	"strconv"
 )
 
@@ -11,12 +12,15 @@ type cgroupLimits struct {
 	pids        int64
 }
 
-func (p *Provider) wrapRunCommand(invocation command, limits cgroupLimits, containerID string) (command, error) {
+func (p *Provider) wrapRunCommand(invocation command, limits cgroupLimits, containerID, marker string) (command, error) {
 	if p.config.CgroupDriver != CgroupDriverSystemdUser {
 		return invocation, nil
 	}
 	if !validContainerID(containerID) {
 		return command{}, errors.New("invalid container ID for systemd scope")
+	}
+	if !filepath.IsAbs(marker) || filepath.Base(marker) != systemdLaunchMarker {
+		return command{}, errors.New("invalid systemd launch marker path")
 	}
 	if limits.memoryBytes < 16<<20 || limits.cpuMillis < 10 {
 		return command{}, errors.New("invalid resource limits for systemd scope")
@@ -39,6 +43,11 @@ func (p *Provider) wrapRunCommand(invocation command, limits cgroupLimits, conta
 		"--property=MemorySwapMax=0",
 		"--property=CPUQuota=" + cpuQuota,
 		"--property=TasksMax=" + strconv.FormatInt(outerPIDs, 10),
+		"--",
+		p.config.systemdLauncher,
+		SystemdLauncherCommand,
+		"--marker",
+		marker,
 		"--",
 		invocation.Path,
 	}

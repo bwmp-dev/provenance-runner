@@ -58,6 +58,7 @@ type Config struct {
 	RootFSIdentity    string
 	runtimeIdentity   string
 	cgroupIdentity    string
+	systemdLauncher   string
 }
 
 type Provider struct {
@@ -99,10 +100,23 @@ func New(config Config) (*Provider, error) {
 			return nil, fmt.Errorf("create gVisor provider: find systemd-run: %w", err)
 		}
 		config.SystemdRunPath = resolvedSystemdRun
-		config.cgroupIdentity, err = executableIdentity(resolvedSystemdRun)
+		systemdRunIdentity, err := executableIdentity(resolvedSystemdRun)
 		if err != nil {
 			return nil, fmt.Errorf("create gVisor provider: identify systemd-run: %w", err)
 		}
+		launcher, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: identify systemd launcher: %w", err)
+		}
+		config.systemdLauncher, err = filepath.EvalSymlinks(launcher)
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: resolve systemd launcher: %w", err)
+		}
+		launcherIdentity, err := executableIdentity(config.systemdLauncher)
+		if err != nil {
+			return nil, fmt.Errorf("create gVisor provider: hash systemd launcher: %w", err)
+		}
+		config.cgroupIdentity = "systemd-run:" + systemdRunIdentity + "/launcher:" + launcherIdentity
 	}
 	return newProvider(config, execCommandRunner{})
 }
@@ -129,7 +143,7 @@ func newProvider(config Config, runner commandRunner) (*Provider, error) {
 			return nil, errors.New("create gVisor provider: systemd cgroup settings require the systemd-user driver")
 		}
 	case CgroupDriverSystemdUser:
-		if config.SystemdRunPath == "" || config.cgroupIdentity == "" {
+		if config.SystemdRunPath == "" || config.cgroupIdentity == "" || config.systemdLauncher == "" {
 			return nil, errors.New("create gVisor provider: systemd-user driver requires an identified systemd-run executable")
 		}
 		var err error
@@ -186,7 +200,7 @@ func (*Provider) Name() string {
 func (p *Provider) Identity() string {
 	identity := fmt.Sprintf("gvisor/%s/rootfs:%s/runsc:%s", p.config.Platform, p.config.RootFSIdentity, p.config.runtimeIdentity)
 	if p.config.CgroupDriver == CgroupDriverSystemdUser {
-		identity += "/cgroup:systemd-user/systemd-run:" + p.config.cgroupIdentity
+		identity += "/cgroup:systemd-user/" + p.config.cgroupIdentity
 	}
 	return identity
 }
@@ -672,12 +686,13 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	stopSampling := make(chan struct{})
 	samplingDone := make(chan struct{})
 	go e.sampleUsageUntil(stopSampling, samplingDone)
+	launchMarker := filepath.Join(e.bundle, systemdLaunchMarker)
 	runCommand, err := e.provider.wrapRunCommand(command{
 		Path:   e.provider.config.RunscPath,
 		Args:   e.provider.runArguments("run", "--bundle="+e.bundle, e.containerID),
 		Stdout: stdout,
 		Stderr: stderr,
-	}, e.cgroupLimits, e.containerID)
+	}, e.cgroupLimits, e.containerID, launchMarker)
 	if err != nil {
 		close(stopSampling)
 		<-samplingDone
@@ -698,6 +713,11 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 			return execution.ExecutionOutcome{ExitCode: result.ExitCode}, errors.Join(ctx.Err(), fmt.Errorf("kill cancelled gVisor container: %w", killResult.Err))
 		}
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, ctx.Err()
+	}
+	if e.provider.config.CgroupDriver == CgroupDriverSystemdUser {
+		if err := validateSystemdLaunchMarker(launchMarker); err != nil {
+			return execution.ExecutionOutcome{ExitCode: result.ExitCode}, fmt.Errorf("systemd user scope did not launch runsc: %w", errors.Join(result.Err, err))
+		}
 	}
 	e.usageMu.Lock()
 	outerPIDDenials := e.outerPIDDenials

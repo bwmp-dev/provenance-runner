@@ -630,6 +630,45 @@ func TestPIDReserveFormulaFailsClosed(t *testing.T) {
 }
 
 func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
+	t.Run("systemd setup failure is infrastructure", func(t *testing.T) {
+		provider, runner, _ := testProvider(t)
+		provider.config.CgroupDriver = CgroupDriverSystemdUser
+		provider.config.SystemdRunPath = "/usr/bin/systemd-run"
+		provider.config.systemdLauncher = "/opt/provenance/provenance-runner"
+		exitCode := 1
+		runner.run = func(context.Context, command) commandResult {
+			return commandResult{ExitCode: &exitCode, Err: errors.New("systemd scope unavailable")}
+		}
+		prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+		outcome, err := prepared.Execute(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "systemd user scope did not launch runsc") || outcome.Failure != nil {
+			t.Fatalf("Execute() = %#v, %v", outcome, err)
+		}
+	})
+
+	t.Run("systemd launched workload exit remains workload failure", func(t *testing.T) {
+		provider, runner, _ := testProvider(t)
+		provider.config.CgroupDriver = CgroupDriverSystemdUser
+		provider.config.SystemdRunPath = "/usr/bin/systemd-run"
+		provider.config.systemdLauncher = "/opt/provenance/provenance-runner"
+		exitCode := 1
+		runner.run = func(_ context.Context, invocation command) commandResult {
+			for index, argument := range invocation.Args {
+				if argument == "--marker" && index+1 < len(invocation.Args) {
+					if err := os.WriteFile(invocation.Args[index+1], []byte("systemd-user-scope\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			return commandResult{ExitCode: &exitCode, Err: errors.New("exit status 1")}
+		}
+		prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+		outcome, err := prepared.Execute(context.Background())
+		if err != nil || outcome.Failure == nil || outcome.Failure.Classification != execution.ClassificationWorkloadFailure {
+			t.Fatalf("Execute() = %#v, %v", outcome, err)
+		}
+	})
+
 	t.Run("workload exit two without outer denial", func(t *testing.T) {
 		provider, runner, _ := testProvider(t)
 		exitCode := 2
