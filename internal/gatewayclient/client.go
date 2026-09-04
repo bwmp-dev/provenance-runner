@@ -89,6 +89,9 @@ type Client struct {
 	activeUpload *activeCompleteLogUpload
 	logUploader  completeLogUploader
 
+	restartEvidenceMu sync.Mutex
+	restartEvidence   *restartEvidenceStore
+
 	deferredMu           sync.Mutex
 	deferredWorkerEvents []workerEvent
 }
@@ -150,6 +153,14 @@ func newClientWithWorker(config Config, connector streamConnector, worker Remote
 		workerEvents:     make(chan workerEvent, 64),
 		logUploader:      newHTTPCompleteLogUploader(),
 	}
+	restartEvidence, err := openRestartEvidenceStore(config.journalFile, journal.snapshot().Active)
+	if err != nil {
+		if config.credentialStore != nil {
+			_ = config.credentialStore.Close()
+		}
+		return nil, err
+	}
+	client.restartEvidence = restartEvidence
 	client.recovering = journal.snapshot().Active != nil
 	return client, nil
 }
@@ -159,8 +170,13 @@ func (c *Client) Close() error {
 		return nil
 	}
 	var result error
+	c.restartEvidenceMu.Lock()
+	if c.restartEvidence != nil {
+		result = c.restartEvidence.close()
+	}
+	c.restartEvidenceMu.Unlock()
 	if c.close != nil {
-		result = c.close()
+		result = errors.Join(result, c.close())
 		c.close = nil
 	}
 	if c.config.credentialStore != nil {
@@ -302,6 +318,10 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	if err != nil {
 		return false, err
 	}
+	// A reconciliation upload is scoped to the authenticated stream that
+	// delivered it, even when the execution worker survived a transport-only
+	// reconnect. Preserve only the original offer target across reconnects.
+	c.clearRecoveryCompleteLogTarget()
 	if err := c.reconcileCredentialRotationAfterAuthentication(); err != nil {
 		return true, permanent("credential rotation reconnect state failed")
 	}
@@ -315,15 +335,17 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		return true, err
 	}
 	jobCorrelationV1 := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
+	restartUploadRecovery := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY)
 	session := &clientSession{
-		client:           c,
-		authenticated:    authenticated,
-		send:             send,
-		jobCorrelationV1: jobCorrelationV1,
-		seen:             make(map[string][sha256.Size]byte),
-		rootContext:      ctx,
-		cancelSession:    cancel,
-		generation:       generation,
+		client:                c,
+		authenticated:         authenticated,
+		send:                  send,
+		jobCorrelationV1:      jobCorrelationV1,
+		restartUploadRecovery: restartUploadRecovery,
+		seen:                  make(map[string][sha256.Size]byte),
+		rootContext:           ctx,
+		cancelSession:         cancel,
+		generation:            generation,
 	}
 	if err := session.rememberGatewayMessage(first); err != nil {
 		return true, err
@@ -486,7 +508,16 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	if c.config.credentialStore != nil {
 		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION)
 	}
-	features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
+	features = append(features,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1,
+	)
+	// An active journal without a trusted evidence store is an upgrade or
+	// fail-closed recovery case. Do not negotiate an upload capability that this
+	// process cannot safely consume; it will report the legacy bounded terminal
+	// result after authoritative reconciliation instead.
+	if c.journal.snapshot().Active == nil || c.activeRestartEvidence() != nil {
+		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY)
+	}
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,
 		ProtocolVersions: []string{ProtocolVersion},

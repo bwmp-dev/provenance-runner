@@ -20,7 +20,8 @@ func validateAdvertisedFeatures(features []runnerv1.ProtocolFeature) error {
 		switch feature {
 		case runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS,
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION,
-			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1:
+			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1,
+			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY:
 		default:
 			return errors.New("runner capabilities contain an unknown protocol feature")
 		}

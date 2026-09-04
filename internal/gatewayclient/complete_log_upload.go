@@ -45,6 +45,7 @@ type activeCompleteLogUpload struct {
 	leaseID   string
 	attemptID string
 	target    *completeLogTarget
+	recovery  bool
 }
 
 type completeLogUploader interface {
@@ -52,12 +53,20 @@ type completeLogUploader interface {
 }
 
 func (c *Client) setCompleteLogTarget(job *runnerv1.JobSpecification, target *completeLogTarget) {
+	c.setCompleteLogTargetKind(job, target, false)
+}
+
+func (c *Client) setRecoveryCompleteLogTarget(job *runnerv1.JobSpecification, target *completeLogTarget) {
+	c.setCompleteLogTargetKind(job, target, true)
+}
+
+func (c *Client) setCompleteLogTargetKind(job *runnerv1.JobSpecification, target *completeLogTarget, recovery bool) {
 	c.uploadMu.Lock()
 	defer c.uploadMu.Unlock()
 	c.activeUpload = nil
 	if target != nil && job != nil && job.GetLease() != nil && job.GetAttempt() != nil {
 		copyTarget := *target
-		c.activeUpload = &activeCompleteLogUpload{leaseID: job.GetLease().GetLeaseId(), attemptID: job.GetAttempt().GetAttemptId(), target: &copyTarget}
+		c.activeUpload = &activeCompleteLogUpload{leaseID: job.GetLease().GetLeaseId(), attemptID: job.GetAttempt().GetAttemptId(), target: &copyTarget, recovery: recovery}
 	}
 }
 
@@ -74,6 +83,14 @@ func (c *Client) completeLogTarget(lease *runnerv1.LeaseIdentity, attempt *runne
 func (c *Client) clearCompleteLogTarget() {
 	c.uploadMu.Lock()
 	c.activeUpload = nil
+	c.uploadMu.Unlock()
+}
+
+func (c *Client) clearRecoveryCompleteLogTarget() {
+	c.uploadMu.Lock()
+	if c.activeUpload != nil && c.activeUpload.recovery {
+		c.activeUpload = nil
+	}
 	c.uploadMu.Unlock()
 }
 
@@ -189,6 +206,9 @@ var nonPublicUploadPrefixes = []netip.Prefix{
 func validateCompleteLogUpload(upload *runnerv1.ObjectUpload, now, offerExpiresAt, leaseExpiresAt time.Time) (*completeLogTarget, *OfferRejection) {
 	if upload == nil {
 		return nil, nil
+	}
+	if len(upload.ProtoReflect().GetUnknown()) != 0 {
+		return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload contains unsupported fields")
 	}
 	if len(upload.GetUri()) == 0 || len(upload.GetUri()) > maximumUploadURIBytes || !utf8.ValidString(upload.GetUri()) {
 		return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload URI is missing or invalid")

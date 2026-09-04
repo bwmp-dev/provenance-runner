@@ -54,12 +54,12 @@ func rotationClient(t *testing.T, credential []byte) (*Client, string) {
 
 func TestCredentialRotationCapabilityRequiresDurableStore(t *testing.T) {
 	legacy := newClient(validConfig(), nil)
-	if features := legacy.capabilities().GetFeatures(); len(features) != 2 || features[0] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS || features[1] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1 {
+	if features := legacy.capabilities().GetFeatures(); len(features) != 3 || features[0] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS || features[1] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1 || features[2] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY {
 		t.Fatalf("legacy features = %v", features)
 	}
 	capable, _ := rotationClient(t, canonicalCredential(1))
 	features := capable.capabilities().GetFeatures()
-	if len(features) != 3 || features[1] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION || features[2] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1 {
+	if len(features) != 4 || features[1] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION || features[2] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1 || features[3] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY {
 		t.Fatalf("rotation-capable features = %v", features)
 	}
 	directory := t.TempDir()
@@ -76,7 +76,7 @@ func TestCredentialRotationCapabilityRequiresDurableStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer incapable.Close()
-	if features := incapable.capabilities().GetFeatures(); len(features) != 2 || features[0] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS || features[1] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1 {
+	if features := incapable.capabilities().GetFeatures(); len(features) != 3 || features[0] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS || features[1] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1 || features[2] != runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY {
 		t.Fatalf("incapable store changed legacy features = %v", features)
 	}
 }

@@ -206,6 +206,25 @@ func TestCompleteLogUploaderFailsClosedOnRedirectShortReadAndArchiveMismatch(t *
 	}
 }
 
+func TestReconnectClearsOnlyStreamScopedCompleteLogTarget(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	client := newClient(validConfig(), nil)
+	job := validLeaseOffer(now).GetJob()
+	target := &completeLogTarget{uri: "https://logs.example/staging/log.gz?signature=private", objectKey: "staging/log.gz", expiresAt: now.Add(time.Minute)}
+
+	client.setCompleteLogTarget(job, target)
+	client.clearRecoveryCompleteLogTarget()
+	if client.completeLogTarget(job.GetLease(), job.GetAttempt()) == nil {
+		t.Fatal("original offer target was cleared across a transport reconnect")
+	}
+
+	client.setRecoveryCompleteLogTarget(job, target)
+	client.clearRecoveryCompleteLogTarget()
+	if client.completeLogTarget(job.GetLease(), job.GetAttempt()) != nil {
+		t.Fatal("stream-scoped recovery target survived a transport reconnect")
+	}
+}
+
 func testCompleteLog(t *testing.T, content []byte) *execution.CompleteLog {
 	t.Helper()
 	archive, err := os.CreateTemp(t.TempDir(), "complete-log-*.gz")
