@@ -148,6 +148,36 @@ fixture_case_identity() {
   [[ "$fixture" == fork-pid-bomb ]] && printf '%s-run-%s\n' "$fixture" "$repetition" || printf '%s\n' "$fixture"
 }
 
+complete_cgroup_sample() {
+  local field
+  for field in "$@"; do
+    [[ -n "$field" ]] || return 1
+  done
+}
+
+incomplete_cgroup_sample_is_teardown() {
+  local runner_pid=$1 result=$2
+  if ! kill -0 "$runner_pid" 2>/dev/null; then
+    return 0
+  fi
+  [[ -s "$result" ]] && jq -e '
+    (.classification | type)=="string" and
+    .cleanup.attempted==true and
+    (.cleanup.succeeded | type)=="boolean" and
+    (.usage.wallTimeMilliseconds | type)=="number"
+  ' "$result" >/dev/null 2>&1
+}
+
+wait_for_incomplete_cgroup_teardown() {
+  local runner_pid=$1 result=$2
+  local attempt
+  for attempt in {1..20}; do
+    incomplete_cgroup_sample_is_teardown "$runner_pid" "$result" && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 run_contract_tests() {
   for command_name in awk grep head jq mktemp seq; do
     command -v "$command_name" >/dev/null || {
@@ -155,7 +185,7 @@ run_contract_tests() {
       return 2
     }
   done
-  local test_root good_result good_samples good_summary good_disk_result good_disk_log rejection_status
+  local test_root good_result good_samples good_summary good_disk_result good_disk_log rejection_status terminal_result
   test_root=$(mktemp -d "${TMPDIR:-/tmp}/plan03-contract-test.XXXXXX")
   trap 'rm --recursive --force -- "$test_root"' RETURN
   good_result="$test_root/good-result.json"
@@ -163,6 +193,7 @@ run_contract_tests() {
   good_summary="$test_root/good-summary.ndjson"
   good_disk_result="$test_root/good-disk-result.json"
   good_disk_log="$test_root/good-disk.log"
+  terminal_result="$test_root/terminal-result.json"
 
   jq -n '{classification:"passed",phase:"completed",failure:null,execution:{exitCode:0},completeLog:{state:"complete",truncated:false},cleanup:{succeeded:true},structuredEvents:[
     {sequence:1,kind:"METADATA_INSPECTION",payload:{}},
@@ -338,6 +369,27 @@ run_contract_tests() {
   [[ $(fixture_case_identity fork-pid-bomb 1) == fork-pid-bomb-run-1 ]]
   [[ $(fixture_case_identity fork-pid-bomb 2) == fork-pid-bomb-run-2 ]]
   [[ $(fixture_case_identity fork-pid-bomb 3) == fork-pid-bomb-run-3 ]]
+  complete_cgroup_sample max current events cpu stat max current events
+  if complete_cgroup_sample max current events cpu stat max "" events; then
+    printf 'cgroup sample completeness accepted a missing controller field\n' >&2
+    return 1
+  fi
+  if incomplete_cgroup_sample_is_teardown "$$" "$test_root/missing-result.json"; then
+    printf 'live runner was classified as teardown\n' >&2
+    return 1
+  fi
+  jq -n '{classification:"passed",cleanup:{attempted:true,succeeded:true},usage:{wallTimeMilliseconds:1}}' > "$terminal_result"
+  if ! incomplete_cgroup_sample_is_teardown "$$" "$terminal_result"; then
+    printf 'terminal result did not establish the teardown boundary\n' >&2
+    return 1
+  fi
+  (:) &
+  local completed_pid=$!
+  wait "$completed_pid"
+  if ! incomplete_cgroup_sample_is_teardown "$completed_pid" "$test_root/missing-result.json"; then
+    printf 'completed runner was not classified as teardown\n' >&2
+    return 1
+  fi
   grep -Fq 'assert_no_residue "$case_identity" "$samples"' "$repository_root/scripts/plan03-acceptance.sh"
   grep -Fq 'write_pid_verification "$case_identity" "$repetition"' "$repository_root/scripts/plan03-acceptance.sh"
   printf 'Plan 03 PID acceptance contracts passed\n'
@@ -545,9 +597,10 @@ export PROVENANCE_GVISOR_BUNDLE_ROOT="$PLAN03_WORK_ROOT/bundles"
 export PROVENANCE_LOCAL_EXECUTE_ALLOW_HOSTILE_FIXTURES=true
 
 sample_resources() {
-  local fixture=$1 runner_pid=$2 destination=$3
+  local fixture=$1 runner_pid=$2 destination=$3 result=$4 teardown_record=$5
   local leaf="" container_id="" memory_max memory_current memory_events cpu_max cpu_stat pids_max pids_current pids_events
   local sandbox_pids_current="" sandbox_cpu_usage="" sandbox_memory_usage="" sandbox_network_interfaces='[]' sample_number=0 stats_json
+  local discarded_incomplete_samples=0 teardown_reason=none
   while kill -0 "$runner_pid" 2>/dev/null; do
     leaf=$(find "$job_cgroup_root" -mindepth 1 -type d -name 'provenance-*' -print -quit 2>/dev/null || true)
     if [[ -n "$leaf" ]]; then
@@ -560,9 +613,20 @@ sample_resources() {
       pids_max=$(sed -n '1p' "$leaf/pids.max" 2>/dev/null || true)
       pids_current=$(sed -n '1p' "$leaf/pids.current" 2>/dev/null || true)
       pids_events=$(sed -n '1,$p' "$leaf/pids.events" 2>/dev/null | tr '\n' ';' || true)
-      if [[ -z "$memory_max" || -z "$cpu_max" || -z "$pids_max" ]]; then
-        sleep 0.05
-        continue
+      if ! complete_cgroup_sample \
+        "$memory_max" "$memory_current" "$memory_events" \
+        "$cpu_max" "$cpu_stat" \
+        "$pids_max" "$pids_current" "$pids_events"; then
+        # Cleanup may remove the cgroup just before the runner writes its final
+        # result and exits. Accept only that bounded terminal window, retain
+        # the discard count, and fail loudly for every mid-run partial read.
+        if wait_for_incomplete_cgroup_teardown "$runner_pid" "$result"; then
+          discarded_incomplete_samples=1
+          teardown_reason=terminal
+          break
+        fi
+        printf '%s observed an incomplete cgroup sample while runner pid %s was alive\n' "$fixture" "$runner_pid" >&2
+        return 1
       fi
       if (( sample_number % 5 == 0 )); then
         # Never carry a successful runsc reading across a later failed stats
@@ -603,6 +667,12 @@ sample_resources() {
     sample_number=$((sample_number + 1))
     sleep 0.05
   done
+  jq -cn \
+    --arg fixture "$fixture" \
+    --arg reason "$teardown_reason" \
+    --argjson discarded "$discarded_incomplete_samples" \
+    '{fixture:$fixture,discardedIncompleteSamples:$discarded,reason:$reason}' \
+    > "$teardown_record"
 }
 
 assert_no_residue() {
@@ -984,6 +1054,7 @@ while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classificat
     stderr_file="$PLAN03_EVIDENCE_ROOT/results/$case_identity.stderr"
     complete_log="$PLAN03_EVIDENCE_ROOT/results/$case_identity.log.gz"
     samples="$PLAN03_EVIDENCE_ROOT/resources/$case_identity.ndjson"
+    teardown_record="$PLAN03_EVIDENCE_ROOT/resources/$case_identity-teardown.json"
     : > "$samples"
 
     bash -c 'kill -STOP $$; exec "$@"' bash \
@@ -999,13 +1070,17 @@ while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classificat
     [[ "$state" == T ]] || { printf '%s did not reach the launch gate\n' "$case_identity" >&2; exit 1; }
     printf '%s\n' "$runner_pid" > "$PLAN03_CGROUP_PARENT/runner/cgroup.procs"
     kill -CONT "$runner_pid"
-    sample_resources "$case_identity" "$runner_pid" "$samples" &
+    sample_resources "$case_identity" "$runner_pid" "$samples" "$result" "$teardown_record" &
     monitor_pid=$!
     set +e
     wait "$runner_pid"
     status=$?
     set -e
     wait "$monitor_pid"
+    jq -e '
+      (.discardedIncompleteSamples==0 and .reason=="none") or
+      (.discardedIncompleteSamples==1 and .reason=="terminal")
+    ' "$teardown_record" >/dev/null
 
     expected_status=1
     [[ "$classification" == passed ]] && expected_status=0
