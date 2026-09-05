@@ -49,6 +49,22 @@ require_directory() {
   }
 }
 
+prepare_directory() {
+  local path=$1
+  local mode=$2
+  if [[ -L "$path" || ( -e "$path" && ! -d "$path" ) ]]; then
+    printf 'refusing unsafe existing root filesystem mount target: %s\n' "$path" >&2
+    exit 1
+  fi
+  if [[ ! -e "$path" ]]; then
+    local parent
+    parent=$(dirname -- "$path")
+    [[ "$parent" == "$rootfs" ]] || require_directory "$parent" 700
+    install --directory --mode="$mode" --owner="$rootfs_uid" --group="$rootfs_gid" -- "$path"
+  fi
+  require_directory "$path" "$mode"
+}
+
 require_event_placeholder() {
   local path=$rootfs/tmp/provenance-probe-events.ndjson
   [[ ! -L "$path" && -f "$path" ]] || {
@@ -104,12 +120,8 @@ case "$action" in
       rootfs_tree_sha256
       exit 0
     fi
-    for target in inputs runtime workspace; do
-      [[ ! -e "$rootfs/$target" && ! -L "$rootfs/$target" ]] || {
-        printf 'refusing to replace existing derived root filesystem target: %s\n' "$rootfs/$target" >&2
-        exit 1
-      }
-      install --directory --mode=0700 --owner="$rootfs_uid" --group="$rootfs_gid" -- "$rootfs/$target"
+    for target in proc dev dev/pts inputs runtime workspace; do
+      prepare_directory "$rootfs/$target" 700
     done
     [[ ! -L "$rootfs/tmp" && -d "$rootfs/tmp" ]] || {
       printf 'root filesystem /tmp is not a non-symbolic-link directory\n' >&2
@@ -118,11 +130,13 @@ case "$action" in
     chown "$rootfs_uid:$rootfs_gid" -- "$rootfs/tmp"
     chmod 1700 -- "$rootfs/tmp"
     event_target=$rootfs/tmp/provenance-probe-events.ndjson
-    [[ ! -e "$event_target" && ! -L "$event_target" ]] || {
-      printf 'refusing to replace existing structured-event mount target: %s\n' "$event_target" >&2
+    if [[ -L "$event_target" || ( -e "$event_target" && ! -f "$event_target" ) ]]; then
+      printf 'refusing unsafe existing structured-event mount target: %s\n' "$event_target" >&2
       exit 1
-    }
-    install --mode=0600 --owner="$rootfs_uid" --group="$rootfs_gid" /dev/null "$event_target"
+    fi
+    if [[ ! -e "$event_target" ]]; then
+      install --mode=0600 --owner="$rootfs_uid" --group="$rootfs_gid" /dev/null "$event_target"
+    fi
     require_layout
     before=$(rootfs_tree_sha256)
     mount --bind -- "$rootfs" "$rootfs"
