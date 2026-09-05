@@ -29,10 +29,7 @@ var fixedRootFSMountTargets = []rootFSMountTarget{
 	{destination: "/proc", kind: rootFSMountDirectory, mode: 0o700},
 	{destination: "/dev", kind: rootFSMountDirectory, mode: 0o700},
 	{destination: "/dev/pts", kind: rootFSMountDirectory, mode: 0o700},
-	// runsc resolves the configured working directory before installing its
-	// mounts. The sandbox identity therefore needs traversal permission on the
-	// otherwise empty, read-only host mount target.
-	{destination: "/workspace", kind: rootFSMountDirectory, mode: 0o711},
+	{destination: "/workspace", kind: rootFSMountDirectory, mode: 0o700},
 	{destination: "/tmp", kind: rootFSMountDirectory, mode: os.ModeSticky | 0o700},
 	{destination: "/inputs", kind: rootFSMountDirectory, mode: 0o700},
 	{destination: "/runtime", kind: rootFSMountDirectory, mode: 0o700},
@@ -60,8 +57,8 @@ func validateRootFS(rootFS string, mounts []execution.ReadOnlyMount, eventFile *
 		return errors.New("root filesystem must be a non-symbolic-link directory")
 	}
 	rootMode := rootInfo.Mode() & (os.ModePerm | rootFSSpecialPermissions)
-	if rootMode != 0o700 {
-		return fmt.Errorf("root filesystem mode is %s, want %s", rootMode, os.FileMode(0o700))
+	if rootMode != 0o711 {
+		return fmt.Errorf("root filesystem mode is %s, want %s", rootMode, os.FileMode(0o711))
 	}
 	rootUID, rootGID, err := rootFSOwnership(rootFS)
 	if err != nil {
@@ -70,6 +67,16 @@ func validateRootFS(rootFS string, mounts []execution.ReadOnlyMount, eventFile *
 	currentUID, currentGID := rootFSCurrentIdentity()
 	if rootUID != currentUID || rootGID != currentGID {
 		return fmt.Errorf("root filesystem owner is %d:%d, want runner identity %d:%d", rootUID, rootGID, currentUID, currentGID)
+	}
+	shellMode, shellRegular, err := rootFSGuestShellMode(rootFS)
+	if err != nil {
+		return fmt.Errorf("inspect sandbox /bin/sh: %w", err)
+	}
+	if !shellRegular {
+		return errors.New("sandbox /bin/sh must resolve within the root filesystem to a regular file")
+	}
+	if shellMode.Perm()&0o005 != 0o005 {
+		return fmt.Errorf("sandbox /bin/sh mode is %s; guest identity requires other read and execute permissions", shellMode.Perm())
 	}
 
 	targets := append([]rootFSMountTarget(nil), fixedRootFSMountTargets...)

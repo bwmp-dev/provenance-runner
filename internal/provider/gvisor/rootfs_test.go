@@ -60,6 +60,22 @@ func TestValidateRootFSRequiresPreprovisionedReadOnlyMountTargets(t *testing.T) 
 	}
 }
 
+func TestValidateRootFSResolvesAbsoluteGuestShellSymlinkInsideRoot(t *testing.T) {
+	rootFS := preparedRootFSFixture(t)
+	if err := os.Remove(filepath.Join(rootFS, "bin", "sh")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootFS, "bin", "busybox"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/busybox", filepath.Join(rootFS, "bin", "sh")); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRootFS(rootFS, nil, nil, func(string) error { return nil }); err != nil {
+		t.Fatalf("validateRootFS() error = %v", err)
+	}
+}
+
 func TestValidateRootFSRejectsUnsafeMountTargets(t *testing.T) {
 	newSource := func(t *testing.T, directory bool) string {
 		t.Helper()
@@ -91,6 +107,15 @@ func TestValidateRootFSRejectsUnsafeMountTargets(t *testing.T) {
 				}
 			},
 			wantMessage: "root filesystem mode",
+		},
+		"guest shell not accessible": {
+			prepare: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.Chmod(filepath.Join(root, "bin", "sh"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMessage: "guest identity requires other read and execute permissions",
 		},
 		"missing fixed destination": {
 			prepare: func(t *testing.T, root string) {
@@ -169,10 +194,10 @@ func TestValidateRootFSRejectsUnsafeMountTargets(t *testing.T) {
 			},
 			wantMessage: `mount target "/runtime" mode`,
 		},
-		"non-traversable workspace": {
+		"overexposed workspace": {
 			prepare: func(t *testing.T, root string) {
 				t.Helper()
-				if err := os.Chmod(filepath.Join(root, "workspace"), 0o700); err != nil {
+				if err := os.Chmod(filepath.Join(root, "workspace"), 0o711); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -243,7 +268,13 @@ func TestPrepareAndExecuteFailClosedWhenRootFSValidationChanges(t *testing.T) {
 func preparedRootFSFixture(t *testing.T) string {
 	t.Helper()
 	rootFS := t.TempDir()
-	if err := os.Chmod(rootFS, 0o700); err != nil {
+	if err := os.Chmod(rootFS, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(rootFS, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootFS, "bin", "sh"), nil, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, target := range []string{"proc", "dev", "dev/pts"} {
@@ -251,13 +282,10 @@ func preparedRootFSFixture(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	for _, target := range []string{"inputs", "runtime"} {
+	for _, target := range []string{"workspace", "inputs", "runtime"} {
 		if err := os.Mkdir(filepath.Join(rootFS, target), 0o700); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := os.Mkdir(filepath.Join(rootFS, "workspace"), 0o711); err != nil {
-		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(rootFS, "tmp"), os.ModeSticky|0o700); err != nil {
 		t.Fatal(err)

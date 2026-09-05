@@ -54,8 +54,8 @@ require_rootfs() {
     printf 'root filesystem is not a non-symbolic-link directory: %s\n' "$rootfs" >&2
     exit 1
   }
-  [[ $(stat -c '%a' -- "$rootfs") == 700 ]] || {
-    printf 'root filesystem %s has mode %s, want 700\n' "$rootfs" "$(stat -c '%a' -- "$rootfs")" >&2
+  [[ $(stat -c '%a' -- "$rootfs") == 711 ]] || {
+    printf 'root filesystem %s has mode %s, want 711\n' "$rootfs" "$(stat -c '%a' -- "$rootfs")" >&2
     exit 1
   }
   [[ $(stat -c '%u:%g' -- "$rootfs") == "$rootfs_uid:$rootfs_gid" ]] || {
@@ -104,8 +104,9 @@ prepare_directory() {
   require_directory "$path" "$mode"
 }
 
-validate_optional_empty_directory() {
+normalize_optional_empty_directory() {
   local path=$1
+  local mode=$2
   [[ ! -L "$path" ]] || {
     printf 'refusing symbolic-link inherited root filesystem entry: %s\n' "$path" >&2
     exit 1
@@ -116,14 +117,14 @@ validate_optional_empty_directory() {
     exit 1
   }
   require_expected_children "$path"
-  [[ $(stat -c '%u:%g' -- "$path") == "$rootfs_uid:$rootfs_gid" ]] || {
-    printf 'inherited root filesystem entry %s has owner %s, want %s:%s\n' "$path" "$(stat -c '%u:%g' -- "$path")" "$rootfs_uid" "$rootfs_gid" >&2
-    exit 1
-  }
+  chown "$rootfs_uid:$rootfs_gid" -- "$path"
+  chmod "$mode" -- "$path"
+  require_directory "$path" "$mode"
 }
 
-validate_optional_empty_file() {
+normalize_optional_empty_file() {
   local path=$1
+  local mode=$2
   [[ ! -L "$path" ]] || {
     printf 'refusing symbolic-link inherited root filesystem entry: %s\n' "$path" >&2
     exit 1
@@ -133,10 +134,8 @@ validate_optional_empty_file() {
     printf 'refusing nonempty or wrong-type inherited root filesystem entry: %s\n' "$path" >&2
     exit 1
   }
-  [[ $(stat -c '%u:%g' -- "$path") == "$rootfs_uid:$rootfs_gid" ]] || {
-    printf 'inherited root filesystem entry %s has owner %s, want %s:%s\n' "$path" "$(stat -c '%u:%g' -- "$path")" "$rootfs_uid" "$rootfs_gid" >&2
-    exit 1
-  }
+  chown "$rootfs_uid:$rootfs_gid" -- "$path"
+  chmod "$mode" -- "$path"
 }
 
 require_event_placeholder() {
@@ -166,7 +165,7 @@ require_layout() {
   done
   require_directory "$rootfs/inputs" 700
   require_directory "$rootfs/runtime" 700
-  require_directory "$rootfs/workspace" 711
+  require_directory "$rootfs/workspace" 700
   require_directory "$rootfs/tmp" 1700
   require_event_placeholder
 }
@@ -183,6 +182,27 @@ require_read_only_mount() {
     }
 }
 
+require_no_descendant_mounts() {
+  local target
+  while IFS= read -r target; do
+    [[ "$target" == "$rootfs" ]] && continue
+    printf 'refusing to release root filesystem with descendant mount: %s\n' "$target" >&2
+    exit 1
+  done < <(findmnt --submounts --raw --noheadings --output TARGET --mountpoint "$rootfs")
+}
+
+report_rootfs_holders() {
+  local reference target
+  for reference in /proc/[0-9]*/cwd /proc/[0-9]*/root /proc/[0-9]*/exe /proc/[0-9]*/fd/*; do
+    target=$(readlink -- "$reference" 2>/dev/null) || continue
+    case "$target" in
+      "$rootfs"|"$rootfs"/*)
+        printf 'root filesystem holder reference: %s -> %s\n' "$reference" "$target" >&2
+        ;;
+    esac
+  done
+}
+
 case "$action" in
   prepare)
     [[ $(id -u) -eq 0 ]] || {
@@ -195,16 +215,20 @@ case "$action" in
       rootfs_tree_sha256
       exit 0
     fi
+    # Normalize exported image content for the unprivileged guest without
+    # retaining any group/other write bit from the source archive.
+    chmod --recursive go-rwx -- "$rootfs"
+    chmod --recursive a+rX -- "$rootfs"
     chown "$rootfs_uid:$rootfs_gid" -- "$rootfs"
-    chmod 0700 -- "$rootfs"
+    chmod 0711 -- "$rootfs"
     prepare_directory "$rootfs/proc" 700
     prepare_directory "$rootfs/dev" 700 console pts shm
     prepare_directory "$rootfs/dev/pts" 700
-    validate_optional_empty_directory "$rootfs/dev/shm"
-    validate_optional_empty_file "$rootfs/dev/console"
+    normalize_optional_empty_directory "$rootfs/dev/shm" 700
+    normalize_optional_empty_file "$rootfs/dev/console" 700
     prepare_directory "$rootfs/inputs" 700
     prepare_directory "$rootfs/runtime" 700
-    prepare_directory "$rootfs/workspace" 711
+    prepare_directory "$rootfs/workspace" 700
     [[ ! -L "$rootfs/tmp" && -d "$rootfs/tmp" ]] || {
       printf 'root filesystem /tmp is not a non-symbolic-link directory\n' >&2
       exit 1
@@ -253,6 +277,7 @@ case "$action" in
       exit 2
     }
     require_read_only_mount
+    require_no_descendant_mounts
     released=false
     for _ in $(seq 1 100); do
       if umount -- "$rootfs" 2>/dev/null; then
@@ -263,6 +288,8 @@ case "$action" in
     done
     if [[ "$released" != true ]]; then
       printf 'root filesystem remains busy after bounded release retries: %s\n' "$rootfs" >&2
+      findmnt --submounts --raw --noheadings --output TARGET,OPTIONS --mountpoint "$rootfs" >&2 || true
+      report_rootfs_holders
       umount -- "$rootfs"
     fi
     if mountpoint --quiet -- "$rootfs"; then
