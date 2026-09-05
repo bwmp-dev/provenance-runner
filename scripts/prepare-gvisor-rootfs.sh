@@ -138,30 +138,6 @@ normalize_optional_empty_file() {
   chmod "$mode" -- "$path"
 }
 
-normalize_sandbox_network_identity_file() {
-  local path=$1
-  [[ ! -L "$rootfs/etc" && -d "$rootfs/etc" ]] || {
-    printf 'root filesystem /etc is not a non-symbolic-link directory\n' >&2
-    exit 1
-  }
-  [[ ! -L "$path" ]] || {
-    printf 'sandbox network identity entry is a symbolic link: %s\n' "$path" >&2
-    exit 1
-  }
-  [[ -e "$path" ]] || return 0
-  [[ -f "$path" ]] || {
-    printf 'sandbox network identity entry is not a regular file: %s\n' "$path" >&2
-    exit 1
-  }
-  [[ $(stat -c '%h' -- "$path") == 1 ]] || {
-    printf 'refusing multiply-linked sandbox network identity entry: %s\n' "$path" >&2
-    exit 1
-  }
-  truncate --size=0 -- "$path"
-  chown "$rootfs_uid:$rootfs_gid" -- "$path"
-  chmod 0755 -- "$path"
-}
-
 require_event_placeholder() {
   local path=$rootfs/tmp/provenance-probe-events.ndjson
   [[ ! -L "$path" && -f "$path" ]] || {
@@ -192,6 +168,11 @@ require_layout() {
   require_directory "$rootfs/workspace" 700
   require_directory "$rootfs/tmp" 1700
   require_event_placeholder
+  unexpected_special=$(find "$rootfs" -xdev -perm /7000 ! -path "$rootfs/tmp" -print -quit)
+  [[ -z "$unexpected_special" ]] || {
+    printf 'unexpected setuid, setgid, or sticky root filesystem entry: %s\n' "$unexpected_special" >&2
+    exit 1
+  }
 }
 
 require_read_only_mount() {
@@ -240,17 +221,12 @@ case "$action" in
       exit 0
     fi
     # Normalize exported image content for the unprivileged guest without
-    # retaining any group/other write bit from the source archive.
+    # retaining group/other write or privilege-bearing special mode bits.
     chmod --recursive go-rwx -- "$rootfs"
+    chmod --recursive a-s,o-t -- "$rootfs"
     chmod --recursive a+rX -- "$rootfs"
     chown "$rootfs_uid:$rootfs_gid" -- "$rootfs"
     chmod 0711 -- "$rootfs"
-    # Docker injects host-specific data into these files when exporting a
-    # created container. The sandbox has no network, so canonical empty files
-    # avoid binding rootfs identity to a Docker daemon or container ID.
-    for network_identity_file in hostname hosts resolv.conf; do
-      normalize_sandbox_network_identity_file "$rootfs/etc/$network_identity_file"
-    done
     prepare_directory "$rootfs/proc" 700
     prepare_directory "$rootfs/dev" 700 console pts shm
     prepare_directory "$rootfs/dev/pts" 700
