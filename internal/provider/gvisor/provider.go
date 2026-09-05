@@ -677,6 +677,9 @@ func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserve
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return execution.ExecutionOutcome{}, err
+	}
 	if e.provider.validateRootFSLayout != nil {
 		if err := e.provider.validateRootFSLayout(e.provider.config.RootFS, e.rootFSMounts, e.structuredEventFile); err != nil {
 			return execution.ExecutionOutcome{}, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_rootfs_invalid", err)
@@ -722,21 +725,12 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 		<-samplingDone
 		return execution.ExecutionOutcome{}, fmt.Errorf("configure gVisor cgroup command: %w", err)
 	}
-	result := e.provider.runner.Run(ctx, runCommand)
+	result, cancellationErr := e.runContainer(ctx, runCommand, cleanupTimeout)
 	close(stopSampling)
 	<-samplingDone
 	e.sampleUsage()
-	if ctx.Err() != nil {
-		killContext, cancelKill := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-		defer cancelKill()
-		killResult := e.provider.runner.Run(killContext, command{
-			Path: e.provider.config.RunscPath,
-			Args: e.provider.runArguments("kill", "--all", e.containerID, "KILL"),
-		})
-		if killResult.Err != nil {
-			return execution.ExecutionOutcome{ExitCode: result.ExitCode}, errors.Join(ctx.Err(), fmt.Errorf("kill cancelled gVisor container: %w", killResult.Err))
-		}
-		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, ctx.Err()
+	if cancellationErr != nil {
+		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, cancellationErr
 	}
 	if e.provider.config.CgroupDriver == CgroupDriverSystemdUser {
 		expectedScope := systemdCgroupPath(e.provider.config.SystemdCgroupRoot, e.containerID)
@@ -756,6 +750,88 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, errors.New("systemd user scope was never observed")
 	}
 	return classifyRunResult(result, outerPIDDenials, denialEvidenceAvailable)
+}
+
+// runContainer keeps the blocking run command attached while cancellation is
+// delivered to the exact sandbox. This matters for systemd-user scopes: if the
+// systemd-run intermediary is cancelled first, its scoped runsc descendant can
+// outlive the process that the command runner is able to reap.
+func (e *preparedEnvironment) runContainer(ctx context.Context, invocation command, terminationTimeout time.Duration) (commandResult, error) {
+	if err := ctx.Err(); err != nil {
+		return commandResult{}, err
+	}
+
+	runContext, cancelRun := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRun()
+	runDone := make(chan commandResult, 1)
+	go func() {
+		runDone <- e.provider.runner.Run(runContext, invocation)
+	}()
+
+	select {
+	case result := <-runDone:
+		return result, ctx.Err()
+	case <-ctx.Done():
+	}
+
+	terminationContext, cancelTermination := context.WithTimeout(context.WithoutCancel(ctx), terminationTimeout)
+	defer cancelTermination()
+	killCommand := command{
+		Path: e.provider.config.RunscPath,
+		Args: e.provider.runArguments("kill", "--all", e.containerID, "KILL"),
+	}
+	var killErr error
+	for {
+		killResult := e.provider.runner.Run(terminationContext, killCommand)
+		killErr = killResult.Err
+		if killErr == nil {
+			break
+		}
+		select {
+		case result := <-runDone:
+			return result, errors.Join(ctx.Err(), fmt.Errorf("kill cancelled gVisor container: %w", killErr))
+		case <-terminationContext.Done():
+			cancelRun()
+			result, reaped := waitForRunResult(runDone, terminationTimeout)
+			var reapErr error
+			if !reaped {
+				reapErr = fmt.Errorf("reap cancelled gVisor run command: %w", context.DeadlineExceeded)
+			}
+			return result, errors.Join(
+				ctx.Err(),
+				fmt.Errorf("kill cancelled gVisor container: %w", killErr),
+				fmt.Errorf("wait for cancelled gVisor container: %w", terminationContext.Err()),
+				reapErr,
+			)
+		case <-time.After(teardownPollInterval):
+		}
+	}
+
+	select {
+	case result := <-runDone:
+		return result, ctx.Err()
+	case <-terminationContext.Done():
+		// The exact sandbox was killed first. Cancelling the intermediary is now
+		// safe; make one bounded attempt to reap the direct child before returning.
+		cancelRun()
+		result, reaped := waitForRunResult(runDone, terminationTimeout)
+		var reapErr error
+		if !reaped {
+			reapErr = fmt.Errorf("reap cancelled gVisor run command: %w", context.DeadlineExceeded)
+		}
+		return result, errors.Join(ctx.Err(), fmt.Errorf("wait for cancelled gVisor container: %w", terminationContext.Err()), reapErr)
+	}
+}
+
+func waitForRunResult(runDone <-chan commandResult, timeout time.Duration) (commandResult, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-runDone:
+		return result, true
+	case <-timer.C:
+		return commandResult{}, false
+	}
 }
 
 func classifyRunResult(result commandResult, outerPIDDenials uint64, denialEvidenceAvailable bool) (execution.ExecutionOutcome, error) {
@@ -905,6 +981,9 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 		})
 		if result.Err != nil {
 			return fmt.Errorf("delete gVisor container: %w", result.Err)
+		}
+		if err := e.provider.confirmContainerTeardown(ctx, e.containerID); err != nil {
+			return fmt.Errorf("confirm gVisor container deletion: %w", err)
 		}
 	}
 	if err := e.evidence.Close(); err != nil {

@@ -720,19 +720,42 @@ func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
 
 func TestCancellationKillsContainerAndCleanupDeletesIt(t *testing.T) {
 	provider, runner, _ := testProvider(t)
+	runStarted := make(chan struct{})
+	runExited := make(chan struct{})
+	releaseRun := make(chan struct{})
+	var releaseOnce sync.Once
 	runner.run = func(ctx context.Context, invocation command) commandResult {
-		if commandVerb(invocation.Args) == "run" {
-			<-ctx.Done()
-			return commandResult{Err: ctx.Err()}
+		switch commandVerb(invocation.Args) {
+		case "run":
+			close(runStarted)
+			select {
+			case <-releaseRun:
+			case <-ctx.Done():
+			}
+			close(runExited)
+			return commandResult{Err: errors.New("sandbox killed")}
+		case "kill":
+			releaseOnce.Do(func() { close(releaseRun) })
 		}
 		return successResult()
 	}
 	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
 	ctx, cancel := context.WithCancel(context.Background())
+	executeDone := make(chan error, 1)
+	go func() {
+		_, err := prepared.Execute(ctx)
+		executeDone <- err
+	}()
+	<-runStarted
 	cancel()
-	_, err := prepared.Execute(ctx)
+	err := <-executeDone
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-runExited:
+	default:
+		t.Fatal("Execute() returned before the blocking run command exited")
 	}
 	if err := prepared.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
@@ -747,12 +770,122 @@ func TestCancellationKillsContainerAndCleanupDeletesIt(t *testing.T) {
 	}
 }
 
+func TestExecuteWithAlreadyCancelledContextDoesNotLaunch(t *testing.T) {
+	provider, runner, _ := testProvider(t)
+	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := prepared.Execute(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	if commands := runner.commands(); len(commands) != 0 {
+		t.Fatalf("runtime commands = %#v, want no launch", commands)
+	}
+	if _, err := os.Stat(filepath.Join(prepared.bundle, attemptName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("run-attempt marker exists without a launch: %v", err)
+	}
+}
+
+func TestCancellationRetriesKillUntilTheLaunchingSandboxIsAddressable(t *testing.T) {
+	provider, runner, _ := testProvider(t)
+	runStarted := make(chan struct{})
+	releaseRun := make(chan struct{})
+	killAttempts := 0
+	runner.run = func(ctx context.Context, invocation command) commandResult {
+		switch commandVerb(invocation.Args) {
+		case "run":
+			close(runStarted)
+			select {
+			case <-releaseRun:
+			case <-ctx.Done():
+			}
+			return commandResult{Err: errors.New("sandbox killed")}
+		case "kill":
+			killAttempts++
+			if killAttempts == 1 {
+				return commandResult{Err: errors.New("sandbox state is not visible yet")}
+			}
+			close(releaseRun)
+		}
+		return successResult()
+	}
+	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := prepared.Execute(ctx)
+		done <- err
+	}()
+	<-runStarted
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	if verbs := commandVerbs(runner.commands()); !reflect.DeepEqual(verbs, []string{"run", "kill", "kill"}) {
+		t.Fatalf("runtime verbs = %#v", verbs)
+	}
+}
+
+func TestRunContainerFailsClosedWhenKilledRunDoesNotExit(t *testing.T) {
+	provider, runner, _ := testProvider(t)
+	runStarted := make(chan struct{})
+	runExited := make(chan struct{})
+	releaseRun := make(chan struct{})
+	runner.run = func(_ context.Context, invocation command) commandResult {
+		if commandVerb(invocation.Args) == "run" {
+			close(runStarted)
+			<-releaseRun
+			close(runExited)
+			return commandResult{Err: errors.New("run command remained hung")}
+		}
+		return successResult()
+	}
+	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+	if err := prepared.markRunAttempted(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := prepared.runContainer(ctx, command{Path: "runsc", Args: []string{"run", prepared.containerID}}, 30*time.Millisecond)
+		done <- err
+	}()
+	<-runStarted
+	cancel()
+	err := <-done
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "wait for cancelled gVisor container") || !strings.Contains(err.Error(), "reap cancelled gVisor run command") {
+		t.Fatalf("runContainer() error = %v", err)
+	}
+	close(releaseRun)
+	select {
+	case <-runExited:
+	case <-time.After(time.Second):
+		t.Fatal("hung fake run command did not exit after release")
+	}
+	if _, err := os.Stat(prepared.bundle); err != nil {
+		t.Fatalf("bundle was not preserved after uncertain termination: %v", err)
+	}
+	if verbs := commandVerbs(runner.commands()); !reflect.DeepEqual(verbs, []string{"run", "kill"}) {
+		t.Fatalf("runtime verbs = %#v", verbs)
+	}
+}
+
 func TestExecutorWallTimeoutKillsAndCleansContainer(t *testing.T) {
 	provider, runner, _ := testProvider(t)
+	releaseRun := make(chan struct{})
+	var releaseOnce sync.Once
 	runner.run = func(ctx context.Context, invocation command) commandResult {
-		if commandVerb(invocation.Args) == "run" {
-			<-ctx.Done()
-			return commandResult{Err: ctx.Err()}
+		switch commandVerb(invocation.Args) {
+		case "run":
+			select {
+			case <-releaseRun:
+			case <-ctx.Done():
+			}
+			return commandResult{Err: errors.New("sandbox killed")}
+		case "kill":
+			releaseOnce.Do(func() { close(releaseRun) })
 		}
 		return successResult()
 	}
@@ -820,6 +953,35 @@ func TestCleanupRetainsBundleForRetryWhenDeleteFails(t *testing.T) {
 	}
 	if deleteAttempts != 2 {
 		t.Errorf("delete attempts = %d", deleteAttempts)
+	}
+}
+
+func TestCleanupRetainsBundleWhileExactRuntimeResidueRemains(t *testing.T) {
+	provider, _, _ := testProvider(t)
+	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+	if err := prepared.markRunAttempted(); err != nil {
+		t.Fatal(err)
+	}
+	residue := filepath.Join(provider.config.StateRoot, "runsc-"+prepared.containerID+".sock")
+	if err := os.WriteFile(residue, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	if err := prepared.Cleanup(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cleanup() error = %v, want deadline exceeded", err)
+	}
+	if _, err := os.Stat(prepared.bundle); err != nil {
+		t.Fatalf("bundle removed while runtime residue remained: %v", err)
+	}
+	if prepared.cleaned {
+		t.Fatal("prepared environment marked clean while runtime residue remained")
+	}
+	if err := os.Remove(residue); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup() retry error = %v", err)
 	}
 }
 
@@ -1056,20 +1218,32 @@ func commandVerbs(commands []command) []string {
 
 func TestExecuteCancellationDoesNotWaitForParentDeadlineDuringKill(t *testing.T) {
 	provider, runner, _ := testProvider(t)
+	runStarted := make(chan struct{})
+	releaseRun := make(chan struct{})
 	runner.run = func(ctx context.Context, invocation command) commandResult {
-		if commandVerb(invocation.Args) == "run" {
-			<-ctx.Done()
-			return commandResult{Err: ctx.Err()}
-		}
-		if ctx.Err() != nil {
-			t.Errorf("detached kill context error = %v", ctx.Err())
+		switch commandVerb(invocation.Args) {
+		case "run":
+			close(runStarted)
+			<-releaseRun
+			return commandResult{Err: errors.New("sandbox killed")}
+		case "kill":
+			if ctx.Err() != nil {
+				t.Errorf("detached kill context error = %v", ctx.Err())
+			}
+			close(releaseRun)
 		}
 		return successResult()
 	}
 	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
-	defer cancel()
-	_, _ = prepared.Execute(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_, _ = prepared.Execute(ctx)
+		close(done)
+	}()
+	<-runStarted
+	cancel()
+	<-done
 	if !slices.Contains(commandVerbs(runner.commands()), "kill") {
 		t.Error("kill was not attempted")
 	}
