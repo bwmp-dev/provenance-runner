@@ -1,17 +1,13 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
 
 permissions:
   contents: read
 
 jobs:
   test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +27,6 @@ jobs:
         run: go build ./cmd/provenance-runner
 
   gvisor-smoke:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64]
     concurrency:
       group: "${{ github.repository }}-privileged-gvisor"
@@ -152,7 +147,6 @@ jobs:
           sudo rm --recursive --force -- "${PROVENANCE_INSTALL_ROOT}"
 
   systemd-user-smoke:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 15
     steps:

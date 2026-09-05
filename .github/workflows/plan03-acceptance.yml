@@ -1,20 +1,6 @@
 name: Plan 03 acceptance
 
 on:
-  pull_request:
-    # CI and the short gVisor smoke cover every PR. Automatically run this
-    # retained-evidence gate when the local execution stack changes. Known
-    # remote-only packages are excluded explicitly so new packages fail safe.
-    paths:
-      - ".github/workflows/plan03-acceptance.yml"
-      - "cmd/**"
-      - "internal/**"
-      - "!internal/buildinfo/**"
-      - "!internal/enrollment/**"
-      - "!internal/gatewayclient/**"
-      - "!internal/runneridentity/**"
-      - "scripts/plan03-acceptance.sh"
-      - "testdata/plan03/**"
   workflow_dispatch:
 
 permissions:
@@ -34,7 +20,6 @@ env:
 
 jobs:
   paper-gvisor-exit-gate:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64]
     concurrency:
       group: "${{ github.repository }}-privileged-gvisor"
@@ -45,7 +30,7 @@ jobs:
       - name: Check out runner candidate
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
 
       - name: Record exact candidate
         shell: bash

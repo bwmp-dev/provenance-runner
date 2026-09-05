@@ -7,7 +7,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -18,9 +17,8 @@ import (
 const runnerModule = "github.com/bwmp-dev/provenance-runner"
 
 const (
-	sameRepositoryPullRequestGuard = "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
-	selfHostedLinuxX64             = "runs-on: [self-hosted, linux, x64]"
-	privilegedGVisorGroup          = `group: "${{ github.repository }}-privileged-gvisor"`
+	selfHostedLinuxX64    = "runs-on: [self-hosted, linux, x64]"
+	privilegedGVisorGroup = `group: "${{ github.repository }}-privileged-gvisor"`
 )
 
 var plan03RemoteOnlyPackages = map[string]map[string]bool{
@@ -38,10 +36,10 @@ func TestPlan03RemoteOnlyPackagesStayOutsideLocalExecution(t *testing.T) {
 	t.Parallel()
 
 	repositoryRoot := plan03RepositoryRoot(t)
+	assertNoPublicPullRequestWorkflows(t, repositoryRoot)
 	assertPlan03WorkflowTriggers(t, repositoryRoot)
 	assertNormalCITriggers(t, repositoryRoot)
 	assertSelfHostedJobPolicy(t, repositoryRoot)
-	assertPlan03WorkflowExclusions(t, repositoryRoot)
 	assertCoveredInternalPackagesDoNotImportRemoteOnly(t, repositoryRoot)
 	assertCommandUsesRemoteOnlyPackagesInAllowedFunctions(t, repositoryRoot)
 }
@@ -53,9 +51,9 @@ func assertPlan03WorkflowTriggers(t *testing.T, repositoryRoot string) {
 	if err != nil {
 		t.Fatalf("open Plan 03 workflow: %v", err)
 	}
-	pullRequest, push, workflowDispatch := topLevelWorkflowTriggers(t, workflow)
-	if !pullRequest || push || !workflowDispatch {
-		t.Fatalf("Plan 03 triggers: pull_request=%t push=%t workflow_dispatch=%t", pullRequest, push, workflowDispatch)
+	pullRequest, pullRequestTarget, push, workflowDispatch := topLevelWorkflowTriggers(t, workflow)
+	if pullRequest || pullRequestTarget || push || !workflowDispatch {
+		t.Fatalf("Plan 03 triggers: pull_request=%t pull_request_target=%t push=%t workflow_dispatch=%t", pullRequest, pullRequestTarget, push, workflowDispatch)
 	}
 	if !strings.Contains(string(workflow), selfHostedLinuxX64) {
 		t.Fatal("Plan 03 gate must run on the self-hosted Linux x64 pool")
@@ -69,12 +67,29 @@ func assertNormalCITriggers(t *testing.T, repositoryRoot string) {
 	if err != nil {
 		t.Fatalf("open normal CI workflow: %v", err)
 	}
-	pullRequest, push, workflowDispatch := topLevelWorkflowTriggers(t, workflow)
-	if !pullRequest || !push || workflowDispatch {
-		t.Fatalf("normal CI triggers: pull_request=%t push=%t workflow_dispatch=%t", pullRequest, push, workflowDispatch)
+	pullRequest, pullRequestTarget, push, workflowDispatch := topLevelWorkflowTriggers(t, workflow)
+	if pullRequest || pullRequestTarget || !push || workflowDispatch {
+		t.Fatalf("normal CI triggers: pull_request=%t pull_request_target=%t push=%t workflow_dispatch=%t", pullRequest, pullRequestTarget, push, workflowDispatch)
 	}
-	if !strings.Contains(string(workflow), "push:\n    branches:\n      - main") {
-		t.Fatal("normal CI must run automatically on pushes to main")
+	triggerBlock := workflowTriggerBlock(t, workflow)
+	if strings.Contains(triggerBlock, "branches:") || strings.Contains(triggerBlock, "branches-ignore:") ||
+		strings.Contains(triggerBlock, "paths:") || strings.Contains(triggerBlock, "paths-ignore:") {
+		t.Fatal("normal CI push trigger must cover every trusted upstream branch and path")
+	}
+}
+
+func assertNoPublicPullRequestWorkflows(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(repositoryRoot, ".github", "workflows", "*.yml"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("enumerate workflows: paths=%v err=%v", paths, err)
+	}
+	for _, path := range paths {
+		workflow := readPlan03ContractFile(t, path)
+		pullRequest, pullRequestTarget, _, _ := topLevelWorkflowTriggers(t, []byte(workflow))
+		if pullRequest || pullRequestTarget {
+			t.Errorf("public pull-request trigger can schedule workflow %s", filepath.Base(path))
+		}
 	}
 }
 
@@ -90,8 +105,8 @@ func assertSelfHostedJobPolicy(t *testing.T, repositoryRoot string) {
 		if !ok {
 			t.Fatalf("normal CI lacks %q job", name)
 		}
-		if !strings.Contains(job, sameRepositoryPullRequestGuard) || !strings.Contains(job, selfHostedLinuxX64) {
-			t.Fatalf("normal CI job %q is not same-repository-only on self-hosted Linux x64", name)
+		if !strings.Contains(job, selfHostedLinuxX64) {
+			t.Fatalf("normal CI job %q is not on self-hosted Linux x64", name)
 		}
 	}
 	if strings.Contains(ciJobs["test"], "concurrency:") {
@@ -105,8 +120,8 @@ func assertSelfHostedJobPolicy(t *testing.T, repositoryRoot string) {
 		t.Fatalf("Plan 03 job set = %v", sortedKeys(plan03Jobs))
 	}
 	gate := plan03Jobs["paper-gvisor-exit-gate"]
-	if !strings.Contains(gate, sameRepositoryPullRequestGuard) || !strings.Contains(gate, selfHostedLinuxX64) {
-		t.Fatal("Plan 03 gate is not same-repository-only on self-hosted Linux x64")
+	if !strings.Contains(gate, selfHostedLinuxX64) {
+		t.Fatal("Plan 03 gate is not on self-hosted Linux x64")
 	}
 	assertPrivilegedGVisorConcurrency(t, "Plan 03 gate", gate)
 }
@@ -179,7 +194,34 @@ func sortedKeys(values map[string]string) []string {
 	return keys
 }
 
-func topLevelWorkflowTriggers(t *testing.T, workflow []byte) (pullRequest, push, workflowDispatch bool) {
+func workflowTriggerBlock(t *testing.T, workflow []byte) string {
+	t.Helper()
+	var block strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(string(workflow)))
+	inOn := false
+	for scanner.Scan() {
+		rawLine := scanner.Text()
+		line := strings.TrimSpace(rawLine)
+		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		if !inOn {
+			if line == "on:" && indent == 0 {
+				inOn = true
+			}
+			continue
+		}
+		if indent == 0 && line != "" && !strings.HasPrefix(line, "#") {
+			break
+		}
+		block.WriteString(rawLine)
+		block.WriteByte('\n')
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read workflow trigger block: %v", err)
+	}
+	return block.String()
+}
+
+func topLevelWorkflowTriggers(t *testing.T, workflow []byte) (pullRequest, pullRequestTarget, push, workflowDispatch bool) {
 	t.Helper()
 	scanner := bufio.NewScanner(strings.NewReader(string(workflow)))
 	inOn := false
@@ -202,6 +244,8 @@ func topLevelWorkflowTriggers(t *testing.T, workflow []byte) (pullRequest, push,
 		switch line {
 		case "pull_request:":
 			pullRequest = true
+		case "pull_request_target:":
+			pullRequestTarget = true
 		case "push:":
 			push = true
 		case "workflow_dispatch:":
@@ -211,7 +255,7 @@ func topLevelWorkflowTriggers(t *testing.T, workflow []byte) (pullRequest, push,
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("read workflow triggers: %v", err)
 	}
-	return pullRequest, push, workflowDispatch
+	return pullRequest, pullRequestTarget, push, workflowDispatch
 }
 
 func plan03RepositoryRoot(t *testing.T) string {
@@ -221,84 +265,6 @@ func plan03RepositoryRoot(t *testing.T) string {
 		t.Fatal("resolve trigger-scope test path")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
-}
-
-func assertPlan03WorkflowExclusions(t *testing.T, repositoryRoot string) {
-	t.Helper()
-	workflowPath := filepath.Join(repositoryRoot, ".github", "workflows", "plan03-acceptance.yml")
-	workflow, err := os.ReadFile(workflowPath)
-	if err != nil {
-		t.Fatalf("open Plan 03 workflow: %v", err)
-	}
-
-	want := remoteOnlyDirectories()
-	var got []string
-	var paths []string
-	scanner := bufio.NewScanner(strings.NewReader(string(workflow)))
-	inPullRequest := false
-	inPaths := false
-	for scanner.Scan() {
-		rawLine := scanner.Text()
-		line := strings.TrimSpace(rawLine)
-		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
-		if line == "pull_request:" && indent == 2 {
-			inPullRequest = true
-			continue
-		}
-		if inPullRequest && line == "paths:" && indent == 4 {
-			inPaths = true
-			continue
-		}
-		if inPaths && indent <= 4 && line != "" && !strings.HasPrefix(line, "#") {
-			break
-		}
-		if !inPaths || !strings.HasPrefix(line, `- "`) || !strings.HasSuffix(line, `"`) {
-			continue
-		}
-		path := strings.TrimSuffix(strings.TrimPrefix(line, `- "`), `"`)
-		paths = append(paths, path)
-		const prefix = `- "!internal/`
-		const suffix = `/**"`
-		if strings.HasPrefix(line, prefix) && strings.HasSuffix(line, suffix) {
-			got = append(got, strings.TrimSuffix(strings.TrimPrefix(line, prefix), suffix))
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		t.Fatalf("read Plan 03 workflow: %v", err)
-	}
-	sort.Strings(got)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Plan 03 remote-only workflow exclusions = %v, want %v", got, want)
-	}
-	requiredPaths := []string{
-		".github/workflows/plan03-acceptance.yml",
-		"cmd/**",
-		"internal/**",
-		"scripts/plan03-acceptance.sh",
-		"testdata/plan03/**",
-	}
-	pathIndexes := make(map[string]int, len(paths))
-	for index, path := range paths {
-		if _, duplicate := pathIndexes[path]; duplicate {
-			t.Fatalf("Plan 03 pull-request path %q appears more than once", path)
-		}
-		pathIndexes[path] = index
-	}
-	for _, requiredPath := range requiredPaths {
-		if _, present := pathIndexes[requiredPath]; !present {
-			t.Errorf("Plan 03 pull-request paths do not include %q", requiredPath)
-		}
-	}
-	internalIndex, present := pathIndexes["internal/**"]
-	if !present {
-		return
-	}
-	for _, directory := range want {
-		exclusion := "!internal/" + directory + "/**"
-		if exclusionIndex, present := pathIndexes[exclusion]; !present || exclusionIndex <= internalIndex {
-			t.Errorf("Plan 03 exclusion %q must appear after internal/**", exclusion)
-		}
-	}
 }
 
 func remoteOnlyDirectories() []string {
