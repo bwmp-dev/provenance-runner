@@ -169,6 +169,15 @@ func TestValidateRootFSRejectsUnsafeMountTargets(t *testing.T) {
 			},
 			wantMessage: `mount target "/runtime" mode`,
 		},
+		"non-traversable workspace": {
+			prepare: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.Chmod(filepath.Join(root, "workspace"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMessage: `mount target "/workspace" mode`,
+		},
 		"writable nested mount": {
 			prepare: func(t *testing.T, root string) {
 				t.Helper()
@@ -242,10 +251,13 @@ func preparedRootFSFixture(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	for _, target := range []string{"workspace", "inputs", "runtime"} {
+	for _, target := range []string{"inputs", "runtime"} {
 		if err := os.Mkdir(filepath.Join(rootFS, target), 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Mkdir(filepath.Join(rootFS, "workspace"), 0o711); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(rootFS, "tmp"), os.ModeSticky|0o700); err != nil {
 		t.Fatal(err)

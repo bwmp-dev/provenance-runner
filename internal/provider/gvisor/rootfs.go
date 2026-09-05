@@ -29,7 +29,10 @@ var fixedRootFSMountTargets = []rootFSMountTarget{
 	{destination: "/proc", kind: rootFSMountDirectory, mode: 0o700},
 	{destination: "/dev", kind: rootFSMountDirectory, mode: 0o700},
 	{destination: "/dev/pts", kind: rootFSMountDirectory, mode: 0o700},
-	{destination: "/workspace", kind: rootFSMountDirectory, mode: 0o700},
+	// runsc resolves the configured working directory before installing its
+	// mounts. The sandbox identity therefore needs traversal permission on the
+	// otherwise empty, read-only host mount target.
+	{destination: "/workspace", kind: rootFSMountDirectory, mode: 0o711},
 	{destination: "/tmp", kind: rootFSMountDirectory, mode: os.ModeSticky | 0o700},
 	{destination: "/inputs", kind: rootFSMountDirectory, mode: 0o700},
 	{destination: "/runtime", kind: rootFSMountDirectory, mode: 0o700},

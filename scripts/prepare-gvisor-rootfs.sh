@@ -104,9 +104,8 @@ prepare_directory() {
   require_directory "$path" "$mode"
 }
 
-normalize_optional_empty_directory() {
+validate_optional_empty_directory() {
   local path=$1
-  local mode=$2
   [[ ! -L "$path" ]] || {
     printf 'refusing symbolic-link inherited root filesystem entry: %s\n' "$path" >&2
     exit 1
@@ -117,14 +116,14 @@ normalize_optional_empty_directory() {
     exit 1
   }
   require_expected_children "$path"
-  chown "$rootfs_uid:$rootfs_gid" -- "$path"
-  chmod "$mode" -- "$path"
-  require_directory "$path" "$mode"
+  [[ $(stat -c '%u:%g' -- "$path") == "$rootfs_uid:$rootfs_gid" ]] || {
+    printf 'inherited root filesystem entry %s has owner %s, want %s:%s\n' "$path" "$(stat -c '%u:%g' -- "$path")" "$rootfs_uid" "$rootfs_gid" >&2
+    exit 1
+  }
 }
 
-normalize_optional_empty_file() {
+validate_optional_empty_file() {
   local path=$1
-  local mode=$2
   [[ ! -L "$path" ]] || {
     printf 'refusing symbolic-link inherited root filesystem entry: %s\n' "$path" >&2
     exit 1
@@ -134,8 +133,10 @@ normalize_optional_empty_file() {
     printf 'refusing nonempty or wrong-type inherited root filesystem entry: %s\n' "$path" >&2
     exit 1
   }
-  chown "$rootfs_uid:$rootfs_gid" -- "$path"
-  chmod "$mode" -- "$path"
+  [[ $(stat -c '%u:%g' -- "$path") == "$rootfs_uid:$rootfs_gid" ]] || {
+    printf 'inherited root filesystem entry %s has owner %s, want %s:%s\n' "$path" "$(stat -c '%u:%g' -- "$path")" "$rootfs_uid" "$rootfs_gid" >&2
+    exit 1
+  }
 }
 
 require_event_placeholder() {
@@ -165,7 +166,7 @@ require_layout() {
   done
   require_directory "$rootfs/inputs" 700
   require_directory "$rootfs/runtime" 700
-  require_directory "$rootfs/workspace" 700
+  require_directory "$rootfs/workspace" 711
   require_directory "$rootfs/tmp" 1700
   require_event_placeholder
 }
@@ -199,11 +200,11 @@ case "$action" in
     prepare_directory "$rootfs/proc" 700
     prepare_directory "$rootfs/dev" 700 console pts shm
     prepare_directory "$rootfs/dev/pts" 700
-    normalize_optional_empty_directory "$rootfs/dev/shm" 700
-    normalize_optional_empty_file "$rootfs/dev/console" 700
+    validate_optional_empty_directory "$rootfs/dev/shm"
+    validate_optional_empty_file "$rootfs/dev/console"
     prepare_directory "$rootfs/inputs" 700
     prepare_directory "$rootfs/runtime" 700
-    prepare_directory "$rootfs/workspace" 700
+    prepare_directory "$rootfs/workspace" 711
     [[ ! -L "$rootfs/tmp" && -d "$rootfs/tmp" ]] || {
       printf 'root filesystem /tmp is not a non-symbolic-link directory\n' >&2
       exit 1
@@ -252,10 +253,21 @@ case "$action" in
       exit 2
     }
     require_read_only_mount
-    umount -- "$rootfs"
-    mountpoint --quiet -- "$rootfs" && {
+    released=false
+    for _ in $(seq 1 100); do
+      if umount -- "$rootfs" 2>/dev/null; then
+        released=true
+        break
+      fi
+      sleep 0.1
+    done
+    if [[ "$released" != true ]]; then
+      printf 'root filesystem remains busy after bounded release retries: %s\n' "$rootfs" >&2
+      umount -- "$rootfs"
+    fi
+    if mountpoint --quiet -- "$rootfs"; then
       printf 'root filesystem remains mounted after release: %s\n' "$rootfs" >&2
       exit 1
-    }
+    fi
     ;;
 esac
