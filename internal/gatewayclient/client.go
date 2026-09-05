@@ -525,7 +525,7 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 		Architecture:     runnerv1.Architecture_ARCHITECTURE_AMD64,
 		Sandboxes:        []runnerv1.SandboxKind{runnerv1.SandboxKind_SANDBOX_KIND_GVISOR},
 		Providers:        []runnerv1.ServerProvider{runnerv1.ServerProvider_SERVER_PROVIDER_PAPER},
-		Capacity:         c.capacity(),
+		Capacity:         c.advertisedCapacity(),
 		Policy: &runnerv1.RunnerPolicy{
 			Sandboxes:              []runnerv1.SandboxKind{runnerv1.SandboxKind_SANDBOX_KIND_GVISOR},
 			MaximumNetwork:         &runnerv1.NetworkPolicy{Mode: runnerv1.NetworkMode_NETWORK_MODE_NONE},
@@ -536,18 +536,22 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	}
 }
 
-func (c *Client) capacity() *runnerv1.Capacity {
-	available := uint32(1)
-	if c.draining.Load() || c.journal.snapshot().Active != nil || c.isWorkerRunning() {
-		available = 0
-	}
+func (c *Client) advertisedCapacity() *runnerv1.Capacity {
 	return &runnerv1.Capacity{
 		ConcurrentJobs: 1,
-		AvailableJobs:  available,
+		AvailableJobs:  1,
 		CpuMillis:      c.config.Resources.CPUMillis,
 		MemoryBytes:    c.config.Resources.MemoryBytes,
 		DiskBytes:      c.config.Resources.DiskBytes,
 	}
+}
+
+func (c *Client) capacity() *runnerv1.Capacity {
+	capacity := c.advertisedCapacity()
+	if c.draining.Load() || c.journal.snapshot().Active != nil || c.isWorkerRunning() {
+		capacity.AvailableJobs = 0
+	}
+	return capacity
 }
 
 func (c *Client) validateAuthenticated(message *runnerv1.GatewayMessage, now time.Time) (*runnerv1.Authenticated, error) {

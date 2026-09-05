@@ -257,8 +257,10 @@ func TestReconnectReplaysPendingEventBeforeZeroLeaseHeartbeat(t *testing.T) {
 				if err := stream.Send(authenticated); err != nil {
 					return err
 				}
-				if _, err := stream.Recv(); err != nil {
-					return err
+				capabilities, err := stream.Recv()
+				if err != nil || capabilities.GetCapabilities() == nil ||
+					capabilities.GetCapabilities().GetCapacity().GetAvailableJobs() != 1 {
+					return fmt.Errorf("pending %s capabilities did not advertise configured capacity: %#v, %v", test.name, capabilities, err)
 				}
 				replayed, err := stream.Recv()
 				if err != nil || !test.matches(replayed) {
