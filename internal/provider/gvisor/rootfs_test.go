@@ -265,6 +265,35 @@ func TestPrepareAndExecuteFailClosedWhenRootFSValidationChanges(t *testing.T) {
 	}
 }
 
+func TestPrepareFailsBeforeBundleAndEvidenceCreationWhenRootFSIsInvalid(t *testing.T) {
+	provider, runner, _ := testProvider(t)
+	provider.validateRootFSLayout = func(string, []execution.ReadOnlyMount, *execution.StructuredEventFile) error {
+		return errors.New("root filesystem is writable")
+	}
+	// Evidence collector creation needs a working temporary directory. Keeping
+	// TMPDIR absent proves the rootfs failure returns before collector creation.
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "absent"))
+
+	environment := resolveEnvironment(t, provider, validConfiguration(), 1024)
+	prepared, err := environment.Prepare(t.Context())
+	if prepared != nil {
+		t.Fatalf("Prepare() returned environment %#v after root filesystem validation failure", prepared)
+	}
+	if err == nil || !strings.Contains(err.Error(), "gvisor_rootfs_invalid") || !strings.Contains(err.Error(), "root filesystem is writable") {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if commands := runner.commands(); len(commands) != 0 {
+		t.Fatalf("runtime invoked after root filesystem validation failure: %#v", commands)
+	}
+	entries, readErr := os.ReadDir(provider.config.BundleRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("bundle state created after root filesystem validation failure: %#v", entries)
+	}
+}
+
 func preparedRootFSFixture(t *testing.T) string {
 	t.Helper()
 	rootFS := t.TempDir()
