@@ -157,7 +157,7 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 	if s.client.worker == nil {
 		return s.rejectOffer(offer, runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED, "worker_unavailable: remote execution is unavailable")
 	}
-	if rejection := validateOfferWithFeatures(offer, s.client.config, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity); rejection != nil {
+	if rejection := validateOffer(offer, s.client.config, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity); rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}
 	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime(), s.objectUploadIdentity)

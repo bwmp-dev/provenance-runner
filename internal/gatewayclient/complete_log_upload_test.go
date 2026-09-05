@@ -100,6 +100,18 @@ func TestValidateCompleteLogUploadRejectsUnsafeExplicitObjectKey(t *testing.T) {
 	}
 }
 
+func TestValidateCompleteLogUploadAcceptsExplicitObjectKeySizeBoundaries(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	for _, key := range []string{"a", strings.Repeat("a", maximumObjectKeyBytes)} {
+		upload := &runnerv1.ObjectUpload{Uri: "https://logs.example/bucket/opaque-path?signature=private",
+			ContentType: completeLogUploadContentType, ExpiresAt: timestamppb.New(now.Add(9 * time.Minute)), ObjectKey: key}
+		target, rejection := validateCompleteLogUpload(upload, now, now.Add(time.Minute), now.Add(5*time.Minute), true)
+		if rejection != nil || target == nil || target.objectKey != key {
+			t.Fatalf("boundary key length %d validation = target %#v rejection %#v", len(key), target, rejection)
+		}
+	}
+}
+
 func TestValidateCompleteLogUploadPreservesLegacyUnnegotiatedIdentity(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	tests := []struct {

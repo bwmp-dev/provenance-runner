@@ -203,21 +203,21 @@ func TestJobCorrelationNegotiationFailsClosed(t *testing.T) {
 	config := validOfferConfig()
 
 	legacy := validLeaseOffer(now)
-	if rejection := validateOffer(legacy, config, now, 10*time.Minute, false); rejection != nil {
+	if rejection := validateOffer(legacy, config, now, 10*time.Minute, false, false); rejection != nil {
 		t.Fatalf("legacy carrier-free offer rejected: %#v", rejection)
 	}
 	legacy.Job.JobCorrelation = validJobCorrelation(legacy)
-	if rejection := validateOffer(legacy, config, now, 10*time.Minute, false); rejection == nil || rejection.Code != "unexpected_job_correlation" {
+	if rejection := validateOffer(legacy, config, now, 10*time.Minute, false, false); rejection == nil || rejection.Code != "unexpected_job_correlation" {
 		t.Fatalf("unadvertised carrier rejection = %#v", rejection)
 	}
 
 	missing := validLeaseOffer(now)
-	if rejection := validateOffer(missing, config, now, 10*time.Minute, true); rejection == nil || rejection.Code != "missing_job_correlation" {
+	if rejection := validateOffer(missing, config, now, 10*time.Minute, true, false); rejection == nil || rejection.Code != "missing_job_correlation" {
 		t.Fatalf("missing negotiated carrier rejection = %#v", rejection)
 	}
 	valid := validLeaseOffer(now)
 	valid.Job.JobCorrelation = validJobCorrelation(valid)
-	if rejection := validateOffer(valid, config, now, 10*time.Minute, true); rejection != nil {
+	if rejection := validateOffer(valid, config, now, 10*time.Minute, true, false); rejection != nil {
 		t.Fatalf("valid negotiated carrier rejected: %#v", rejection)
 	}
 }
@@ -258,8 +258,8 @@ func TestJobCorrelationCanonicalBoundaries(t *testing.T) {
 			offer := validLeaseOffer(now)
 			offer.Job.JobCorrelation = validJobCorrelation(offer)
 			test.mutate(offer.Job)
-			first := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, true)
-			second := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, true)
+			first := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, true, false)
+			second := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, true, false)
 			if first == nil || second == nil || first.Code != "invalid_job_correlation" || *first != *second {
 				t.Fatalf("stable correlation rejection = %#v / %#v", first, second)
 			}
@@ -274,16 +274,16 @@ func TestJobCorrelationDoesNotReplaceAuthorizationScope(t *testing.T) {
 	offer := validLeaseOffer(now)
 	offer.Job.OrganizationScope = organizationScope(config.ExpectedScope.OrganizationID)
 	offer.Job.JobCorrelation = validJobCorrelation(offer)
-	if rejection := validateOffer(offer, config, now, 10*time.Minute, true); rejection != nil {
+	if rejection := validateOffer(offer, config, now, 10*time.Minute, true, false); rejection != nil {
 		t.Fatalf("matching scope/correlation rejected: %#v", rejection)
 	}
 	offer.Job.OrganizationScope = organizationScope("60000000-0000-4000-8000-000000000002")
-	if rejection := validateOffer(offer, config, now, 10*time.Minute, true); rejection == nil || rejection.Code != "scope_mismatch" {
+	if rejection := validateOffer(offer, config, now, 10*time.Minute, true, false); rejection == nil || rejection.Code != "scope_mismatch" {
 		t.Fatalf("authorization scope was not authoritative: %#v", rejection)
 	}
 	offer.Job.OrganizationScope = organizationScope(config.ExpectedScope.OrganizationID)
 	offer.Job.JobCorrelation.OrganizationId = "60000000-0000-4000-8000-000000000002"
-	if rejection := validateOffer(offer, config, now, 10*time.Minute, true); rejection == nil || rejection.Code != "job_correlation_scope_mismatch" {
+	if rejection := validateOffer(offer, config, now, 10*time.Minute, true, false); rejection == nil || rejection.Code != "job_correlation_scope_mismatch" {
 		t.Fatalf("correlation tenant conflict rejection = %#v", rejection)
 	}
 }
