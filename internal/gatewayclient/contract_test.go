@@ -18,6 +18,7 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 	}{
 		{(&runnerv1.Capabilities{}).ProtoReflect().Descriptor(), "features", 16},
 		{(&runnerv1.DependencyInput{}).ProtoReflect().Descriptor(), "plugin_name", 10},
+		{(&runnerv1.ObjectUpload{}).ProtoReflect().Descriptor(), "object_key", 10},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "target_plugin_name", 20},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "job_correlation", 21},
 		{(&runnerv1.LeaseReconciliation{}).ProtoReflect().Descriptor(), "complete_log_upload", 16},
@@ -46,10 +47,13 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY.Number() != 4 {
 		t.Fatalf("restart upload recovery feature = %d, want 4", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY.Number())
 	}
+	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY.Number() != 5 {
+		t.Fatalf("object upload identity feature = %d, want 5", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY.Number())
+	}
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	const authority = "v0.0.0-20260904093248-8668dc9317b1"
+	const authority = "v0.0.0-20260905212614-84070765b1b2"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)

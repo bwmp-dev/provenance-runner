@@ -14,11 +14,10 @@ import (
 
 func TestValidateOfferAcceptsBoundedPaperOfferWithoutMutation(t *testing.T) {
 	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
-	client := newClient(validOfferConfig(), nil)
 	offer := validLeaseOffer(now)
 	original := proto.Clone(offer)
 
-	if rejection := client.validateOffer(offer, now, 10*time.Minute, false); rejection != nil {
+	if rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, false, false); rejection != nil {
 		t.Fatalf("validateOffer() rejection = %#v", rejection)
 	}
 	if !proto.Equal(offer, original) {
@@ -110,8 +109,8 @@ func TestValidateOfferReturnsStableBoundedRejections(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			offer := validLeaseOffer(now)
 			test.mutate(offer)
-			first := validateOffer(offer, config, now, 10*time.Minute, false)
-			second := validateOffer(offer, config, now, 10*time.Minute, false)
+			first := validateOffer(offer, config, now, 10*time.Minute, false, true)
+			second := validateOffer(offer, config, now, 10*time.Minute, false, true)
 			if first == nil || second == nil {
 				t.Fatalf("validateOffer() = %#v / %#v", first, second)
 			}
@@ -133,7 +132,7 @@ func TestValidateOfferAcceptsBoundedCompleteLogUploadWithoutMutation(t *testing.
 	offer := validLeaseOffer(now)
 	offer.Job.CompleteLogUpload = validCompleteLogUpload(now)
 	original := proto.Clone(offer)
-	if rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, false); rejection != nil {
+	if rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, false, true); rejection != nil {
 		t.Fatalf("validateOffer() rejection = %#v", rejection)
 	}
 	if !proto.Equal(offer, original) {
@@ -141,11 +140,45 @@ func TestValidateOfferAcceptsBoundedCompleteLogUploadWithoutMutation(t *testing.
 	}
 }
 
+func TestValidateOfferEnforcesNegotiatedObjectUploadIdentity(t *testing.T) {
+	now := time.Date(2026, time.September, 5, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		negotiated    bool
+		objectKey     string
+		wantRejection bool
+	}{
+		{name: "negotiated authoritative identity", negotiated: true, objectKey: "staging/execution/attempt/log.gz"},
+		{name: "negotiated missing identity", negotiated: true, wantRejection: true},
+		{name: "negotiated malformed identity", negotiated: true, objectKey: "staging/../attempt/log.gz", wantRejection: true},
+		{name: "unnegotiated legacy upload", negotiated: false},
+		{name: "unnegotiated authoritative identity", negotiated: false, objectKey: "staging/execution/attempt/log.gz", wantRejection: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			offer := validLeaseOffer(now)
+			offer.Job.CompleteLogUpload = validCompleteLogUpload(now)
+			offer.Job.CompleteLogUpload.ObjectKey = test.objectKey
+			rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, false, test.negotiated)
+			if test.wantRejection {
+				if rejection == nil || rejection.Code != "invalid_complete_log_upload" {
+					t.Fatalf("validation rejection = %#v", rejection)
+				}
+				return
+			}
+			if rejection != nil {
+				t.Fatalf("validation rejection = %#v", rejection)
+			}
+		})
+	}
+}
+
 func validCompleteLogUpload(now time.Time) *runnerv1.ObjectUpload {
 	return &runnerv1.ObjectUpload{
-		Uri:         "https://logs.example/staging/execution/attempt/log.gz?signature=secret",
+		Uri:         "https://logs.example/bucket/path-that-is-not-the-object-key?signature=secret",
 		ContentType: completeLogUploadContentType,
 		ExpiresAt:   timestamppb.New(now.Add(9 * time.Minute)),
+		ObjectKey:   "staging/execution/attempt/log.gz",
 	}
 }
 
@@ -155,13 +188,13 @@ func TestValidateOfferBoundsMessageAndDependenciesBeforeAllocation(t *testing.T)
 
 	oversized := validLeaseOffer(now)
 	oversized.Job.NormalizedConfigurationJson = make([]byte, MaximumMessageBytes+1)
-	if rejection := validateOffer(oversized, config, now, 10*time.Minute, false); rejection == nil || rejection.Code != "offer_too_large" {
+	if rejection := validateOffer(oversized, config, now, 10*time.Minute, false, false); rejection == nil || rejection.Code != "offer_too_large" {
 		t.Fatalf("oversized rejection = %#v", rejection)
 	}
 
 	tooMany := validLeaseOffer(now)
 	tooMany.Job.Hashes.Dependencies = make([]*runnerv1.DependencyDigest, maximumOfferDependencies+1)
-	if rejection := validateOffer(tooMany, config, now, 10*time.Minute, false); rejection == nil || rejection.Code != "too_many_dependencies" {
+	if rejection := validateOffer(tooMany, config, now, 10*time.Minute, false, false); rejection == nil || rejection.Code != "too_many_dependencies" {
 		t.Fatalf("dependency bound rejection = %#v", rejection)
 	}
 
@@ -185,7 +218,7 @@ func TestValidateOfferBoundsMessageAndDependenciesBeforeAllocation(t *testing.T)
 			},
 		})
 	}
-	if rejection := validateOffer(boundary, config, now, 10*time.Minute, false); rejection != nil {
+	if rejection := validateOffer(boundary, config, now, 10*time.Minute, false, false); rejection != nil {
 		t.Fatalf("dependency boundary rejected: %#v", rejection)
 	}
 }
@@ -196,11 +229,11 @@ func TestValidateOfferEnforcesExactOrganizationScope(t *testing.T) {
 	config.ExpectedScope = ExpectedScope{Kind: ScopeOrganization, OrganizationID: "40000000-0000-0000-0000-000000000001"}
 	offer := validLeaseOffer(now)
 	offer.Job.OrganizationScope = organizationScope(config.ExpectedScope.OrganizationID)
-	if rejection := validateOffer(offer, config, now, 10*time.Minute, false); rejection != nil {
+	if rejection := validateOffer(offer, config, now, 10*time.Minute, false, false); rejection != nil {
 		t.Fatalf("matching organization rejected: %#v", rejection)
 	}
 	offer.Job.OrganizationScope = platformScope()
-	if rejection := validateOffer(offer, config, now, 10*time.Minute, false); rejection == nil || rejection.Code != "scope_mismatch" {
+	if rejection := validateOffer(offer, config, now, 10*time.Minute, false, false); rejection == nil || rejection.Code != "scope_mismatch" {
 		t.Fatalf("platform scope rejection = %#v", rejection)
 	}
 }

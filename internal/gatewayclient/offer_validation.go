@@ -44,14 +44,9 @@ func (r *OfferRejection) Error() string {
 
 // validateOffer keeps hostile job validation separate from state transitions so
 // no offer is persisted or acknowledged before every bounded check succeeds.
-func (c *Client) validateOffer(offer *runnerv1.LeaseOffer, now time.Time, leaseDuration time.Duration, jobCorrelationV1 bool) *OfferRejection {
-	if c == nil {
-		return rejectUnsupported("invalid_offer", "lease offer cannot be validated")
-	}
-	return validateOffer(offer, c.config, now, leaseDuration, jobCorrelationV1)
-}
-
-func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, jobCorrelationV1 bool) *OfferRejection {
+// Protocol feature semantics are explicit at every call site; security-relevant
+// validation must never silently fall back to a legacy protocol mode.
+func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, jobCorrelationV1, objectUploadIdentity bool) *OfferRejection {
 	if offer == nil || offer.GetJob() == nil {
 		return rejectUnsupported("invalid_offer", "lease offer job is required")
 	}
@@ -101,7 +96,7 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if rejection := validateOfferDownloads(job, offerExpiresAt, leaseExpiresAt); rejection != nil {
 		return rejection
 	}
-	if _, rejection := validateCompleteLogUpload(job.GetCompleteLogUpload(), now, offerExpiresAt, leaseExpiresAt); rejection != nil {
+	if _, rejection := validateCompleteLogUpload(job.GetCompleteLogUpload(), now, offerExpiresAt, leaseExpiresAt, objectUploadIdentity); rejection != nil {
 		return rejection
 	}
 	return nil

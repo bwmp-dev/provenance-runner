@@ -41,18 +41,117 @@ func TestValidateCompleteLogUploadRejectsHostPathContentTypeAndExpiryBoundaries(
 		{name: "literal IP", mutate: func(upload *runnerv1.ObjectUpload) { upload.Uri = "https://192.0.2.10/log.gz" }},
 		{name: "invalid hostname", mutate: func(upload *runnerv1.ObjectUpload) { upload.Uri = "https://-logs.example/log.gz" }},
 		{name: "non TLS port", mutate: func(upload *runnerv1.ObjectUpload) { upload.Uri = "https://logs.example:8443/log.gz" }},
-		{name: "dot segment", mutate: func(upload *runnerv1.ObjectUpload) { upload.Uri = "https://logs.example/staging/%2e%2e/log.gz" }},
 		{name: "content type", mutate: func(upload *runnerv1.ObjectUpload) { upload.ContentType = "application/zstd" }},
 		{name: "expiry at lease", mutate: func(upload *runnerv1.ObjectUpload) { upload.ExpiresAt = timestamppb.New(leaseExpiry) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			upload := &runnerv1.ObjectUpload{Uri: "https://logs.example/staging/log.gz?signature=private", ContentType: completeLogUploadContentType, ExpiresAt: timestamppb.New(now.Add(9 * time.Minute))}
+			upload := &runnerv1.ObjectUpload{Uri: "https://logs.example/staging/log.gz?signature=private", ContentType: completeLogUploadContentType, ExpiresAt: timestamppb.New(now.Add(9 * time.Minute)), ObjectKey: "staging/log.gz"}
 			test.mutate(upload)
-			if target, rejection := validateCompleteLogUpload(upload, now, offerExpiry, leaseExpiry); target != nil || rejection == nil || rejection.Code != "invalid_complete_log_upload" {
+			if target, rejection := validateCompleteLogUpload(upload, now, offerExpiry, leaseExpiry, true); target != nil || rejection == nil || rejection.Code != "invalid_complete_log_upload" {
 				t.Fatalf("validation = target %#v rejection %#v", target, rejection)
 			}
 		})
+	}
+}
+
+func TestValidateCompleteLogUploadUsesExplicitIdentityForVirtualHostedAndPathStyleURLs(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	const objectKey = "execution-log-staging/organization/execution/attempt.gz"
+	for _, uri := range []string{
+		"https://provenance-logs.s3.example/execution-log-staging/organization/execution/attempt.gz?signature=private",
+		"https://s3.example/provenance-logs/execution-log-staging/organization/execution/attempt.gz?signature=private",
+		"https://s3.example/opaque%2Fpath-that-is-not-the-object-key?signature=private",
+	} {
+		upload := &runnerv1.ObjectUpload{Uri: uri, ContentType: completeLogUploadContentType,
+			ExpiresAt: timestamppb.New(now.Add(9 * time.Minute)), ObjectKey: objectKey}
+		target, rejection := validateCompleteLogUpload(upload, now, now.Add(time.Minute), now.Add(5*time.Minute), true)
+		if rejection != nil || target == nil || target.uri != uri || target.objectKey != objectKey {
+			t.Fatalf("validation = target %#v rejection %#v", target, rejection)
+		}
+	}
+}
+
+func TestValidateCompleteLogUploadRejectsUnsafeExplicitObjectKey(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "missing"},
+		{name: "absolute", key: "/staging/execution/log.gz"},
+		{name: "dot segment", key: "staging/./log.gz"},
+		{name: "parent segment", key: "staging/../log.gz"},
+		{name: "empty segment", key: "staging//log.gz"},
+		{name: "trailing slash", key: "staging/log.gz/"},
+		{name: "backslash", key: `staging\log.gz`},
+		{name: "control", key: "staging/log\n.gz"},
+		{name: "invalid UTF-8", key: string([]byte{'s', 't', 'a', 'g', 'i', 'n', 'g', '/', 0xff})},
+		{name: "oversized", key: strings.Repeat("a", maximumObjectKeyBytes+1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upload := &runnerv1.ObjectUpload{Uri: "https://logs.example/bucket/opaque-path?signature=private",
+				ContentType: completeLogUploadContentType, ExpiresAt: timestamppb.New(now.Add(9 * time.Minute)), ObjectKey: test.key}
+			if target, rejection := validateCompleteLogUpload(upload, now, now.Add(time.Minute), now.Add(5*time.Minute), true); target != nil || rejection == nil || rejection.Code != "invalid_complete_log_upload" {
+				t.Fatalf("validation = target %#v rejection %#v", target, rejection)
+			}
+		})
+	}
+}
+
+func TestValidateCompleteLogUploadAcceptsExplicitObjectKeySizeBoundaries(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	for _, key := range []string{"a", strings.Repeat("a", maximumObjectKeyBytes)} {
+		upload := &runnerv1.ObjectUpload{Uri: "https://logs.example/bucket/opaque-path?signature=private",
+			ContentType: completeLogUploadContentType, ExpiresAt: timestamppb.New(now.Add(9 * time.Minute)), ObjectKey: key}
+		target, rejection := validateCompleteLogUpload(upload, now, now.Add(time.Minute), now.Add(5*time.Minute), true)
+		if rejection != nil || target == nil || target.objectKey != key {
+			t.Fatalf("boundary key length %d validation = target %#v rejection %#v", len(key), target, rejection)
+		}
+	}
+}
+
+func TestValidateCompleteLogUploadPreservesLegacyUnnegotiatedIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		uri  string
+		key  string
+	}{
+		{name: "virtual hosted", uri: "https://provenance-logs.s3.example/staging/execution/log.gz?signature=private", key: "staging/execution/log.gz"},
+		{name: "path style", uri: "https://s3.example/provenance-logs/staging/execution/log.gz?signature=private", key: "provenance-logs/staging/execution/log.gz"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upload := &runnerv1.ObjectUpload{Uri: test.uri, ContentType: completeLogUploadContentType, ExpiresAt: timestamppb.New(now.Add(9 * time.Minute))}
+			target, rejection := validateCompleteLogUpload(upload, now, now.Add(time.Minute), now.Add(5*time.Minute), false)
+			if rejection != nil || target == nil || target.objectKey != test.key {
+				t.Fatalf("legacy validation = target %#v rejection %#v", target, rejection)
+			}
+		})
+	}
+}
+
+func TestValidateCompleteLogUploadRejectsIdentityOutsideNegotiatedSemantics(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	upload := &runnerv1.ObjectUpload{Uri: "https://logs.example/staging/execution/log.gz?signature=private", ContentType: completeLogUploadContentType,
+		ExpiresAt: timestamppb.New(now.Add(9 * time.Minute)), ObjectKey: "staging/execution/log.gz"}
+	if target, rejection := validateCompleteLogUpload(upload, now, now.Add(time.Minute), now.Add(5*time.Minute), false); target != nil || rejection == nil || rejection.Code != "invalid_complete_log_upload" {
+		t.Fatalf("unnegotiated identity validation = target %#v rejection %#v", target, rejection)
+	}
+}
+
+func TestValidateCompleteLogUploadRejectsEncodedLegacyURIIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	for _, uri := range []string{
+		"https://logs.example/staging/%2e%2e/log.gz?signature=private",
+		"https://logs.example/staging/%2flog.gz?signature=private",
+	} {
+		upload := &runnerv1.ObjectUpload{Uri: uri, ContentType: completeLogUploadContentType, ExpiresAt: timestamppb.New(now.Add(9 * time.Minute))}
+		if target, rejection := validateCompleteLogUpload(upload, now, now.Add(time.Minute), now.Add(5*time.Minute), false); target != nil || rejection == nil || rejection.Code != "invalid_complete_log_upload" {
+			t.Fatalf("encoded legacy URI validation = target %#v rejection %#v", target, rejection)
+		}
 	}
 }
 
@@ -141,7 +240,7 @@ func TestCompleteLogUploaderRetriesExactBytesAndEmitsOnlySafeMetadata(t *testing
 		}
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("response")), Header: make(http.Header)}, nil
 	})
-	target := &completeLogTarget{uri: "https://logs.example/staging/execution/log.gz?signature=private", objectKey: "staging/execution/log.gz", expiresAt: now.Add(time.Minute)}
+	target := &completeLogTarget{uri: "https://logs.example/bucket/path-that-must-not-be-used-as-identity?signature=private", objectKey: "staging/execution/log.gz", expiresAt: now.Add(time.Minute)}
 	object, err := uploader.Upload(context.Background(), target, log)
 	if err != nil {
 		t.Fatal(err)

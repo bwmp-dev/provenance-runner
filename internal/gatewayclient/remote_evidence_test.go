@@ -15,9 +15,10 @@ import (
 )
 
 type recordingCompleteLogUploader struct {
-	calls  int
-	object *runnerv1.LogObject
-	err    error
+	calls            int
+	targetObjectKeys []string
+	object           *runnerv1.LogObject
+	err              error
 }
 
 func (u *recordingCompleteLogUploader) Upload(_ context.Context, target *completeLogTarget, log *execution.CompleteLog) (*runnerv1.LogObject, error) {
@@ -25,7 +26,10 @@ func (u *recordingCompleteLogUploader) Upload(_ context.Context, target *complet
 	if target == nil || strings.Contains(target.objectKey, "?") || log == nil || log.Archive == nil {
 		return nil, errors.New("invalid test upload")
 	}
-	return proto.Clone(u.object).(*runnerv1.LogObject), u.err
+	u.targetObjectKeys = append(u.targetObjectKeys, target.objectKey)
+	object := proto.Clone(u.object).(*runnerv1.LogObject)
+	object.ObjectKey = target.objectKey
+	return object, u.err
 }
 
 func TestRemoteTerminalResultsIncludeCompleteLogAndOmitUnavailableUsage(t *testing.T) {
@@ -65,16 +69,23 @@ func TestRemoteTerminalResultsIncludeCompleteLogAndOmitUnavailableUsage(t *testi
 			if uploader.calls != 1 || result.CompleteLog.Archive != nil {
 				t.Fatalf("upload calls = %d archive = %#v", uploader.calls, result.CompleteLog.Archive)
 			}
+			var terminalLog *runnerv1.LogObject
 			if test.wantCompleted {
 				structured := sent.GetCompleted().GetResult()
 				if structured == nil || structured.GetOutcome() != test.wantOutcome || structured.GetUsage() != nil || !proto.Equal(structured.GetCompleteLog(), testLogObject()) {
 					t.Fatalf("completed result = %#v", structured)
 				}
+				terminalLog = structured.GetCompleteLog()
 			} else {
 				failed := sent.GetFailed()
 				if failed == nil || failed.GetUsage() != nil || !proto.Equal(failed.GetCompleteLog(), testLogObject()) || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE {
 					t.Fatalf("failed result = %#v", failed)
 				}
+				terminalLog = failed.GetCompleteLog()
+			}
+			gatewayKey := offer.GetJob().GetCompleteLogUpload().GetObjectKey()
+			if len(uploader.targetObjectKeys) != 1 || uploader.targetObjectKeys[0] != gatewayKey || terminalLog.GetObjectKey() != gatewayKey || strings.Contains(offer.GetJob().GetCompleteLogUpload().GetUri(), gatewayKey) {
+				t.Fatalf("session upload identity = gateway %q targets %q terminal %q", gatewayKey, uploader.targetObjectKeys, terminalLog.GetObjectKey())
 			}
 			encoded, err := proto.Marshal(sent)
 			if err != nil || bytes.Contains(encoded, []byte("signature")) || bytes.Contains(encoded, []byte("logs.example")) {
@@ -206,7 +217,7 @@ func TestOfferUploadCapabilityIsKeptOutOfJournalAndWorkerSpecification(t *testin
 	var sent *runnerv1.RunnerMessage
 	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
 	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
-	session := &clientSession{client: client, authenticated: authenticated, send: func(message *runnerv1.RunnerMessage) error {
+	session := &clientSession{client: client, authenticated: authenticated, objectUploadIdentity: true, send: func(message *runnerv1.RunnerMessage) error {
 		sent = proto.Clone(message).(*runnerv1.RunnerMessage)
 		return nil
 	}}
@@ -225,8 +236,9 @@ func TestOfferUploadCapabilityIsKeptOutOfJournalAndWorkerSpecification(t *testin
 	if err := proto.Unmarshal(state.Active.Specification, specification); err != nil {
 		t.Fatal(err)
 	}
-	if specification.GetCompleteLogUpload() != nil || client.completeLogTarget(offer.GetJob().GetLease(), offer.GetJob().GetAttempt()) == nil {
-		t.Fatalf("sanitized specification = %#v target = %#v", specification.GetCompleteLogUpload(), client.completeLogTarget(offer.GetJob().GetLease(), offer.GetJob().GetAttempt()))
+	target := client.completeLogTarget(offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
+	if specification.GetCompleteLogUpload() != nil || target == nil || target.objectKey != offer.GetJob().GetCompleteLogUpload().GetObjectKey() || strings.Contains(target.uri, target.objectKey) {
+		t.Fatalf("sanitized specification = %#v target = %#v", specification.GetCompleteLogUpload(), target)
 	}
 }
 
@@ -248,7 +260,7 @@ func activeEvidenceClient(t *testing.T, now time.Time) (*Client, *runnerv1.Lease
 	}); err != nil {
 		t.Fatal(err)
 	}
-	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime())
+	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime(), true)
 	if rejection != nil {
 		t.Fatal(rejection)
 	}
