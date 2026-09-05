@@ -424,7 +424,7 @@ for name in "${required_environment[@]}"; do
   fi
 done
 
-for command_name in find git gzip jq sha256sum stat; do
+for command_name in find git gzip jq sha256sum stat tar; do
   command -v "$command_name" >/dev/null || {
     printf '%s is required\n' "$command_name" >&2
     exit 2
@@ -451,6 +451,12 @@ fi
 for path in "$PLAN03_ASSET_ROOT" "$PLAN03_TOOLKIT_SOURCE_ROOT" "$PROVENANCE_ROOTFS"; do
   [[ -d "$path" ]] || { printf '%s is not a directory\n' "$path" >&2; exit 2; }
 done
+rootfs_tree_sha_before=$(tar --sort=name --format=gnu --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$PROVENANCE_ROOTFS" . | sha256sum)
+rootfs_tree_sha_before=${rootfs_tree_sha_before%% *}
+[[ "$PROVENANCE_ROOTFS_IDENTITY" == "sha256:$rootfs_tree_sha_before" ]] || {
+  printf 'root filesystem identity %s does not match normalized tree sha256:%s\n' "$PROVENANCE_ROOTFS_IDENTITY" "$rootfs_tree_sha_before" >&2
+  exit 2
+}
 
 pid_fixture_source="$PLAN03_TOOLKIT_SOURCE_ROOT/packages/test-fixtures/hostile/fork-pid-bomb/src/main/java/dev/provenance/fixtures/hostile/ForkPidBombPlugin.java"
 [[ $(git -c safe.directory="$PLAN03_TOOLKIT_SOURCE_ROOT" -C "$PLAN03_TOOLKIT_SOURCE_ROOT" rev-parse HEAD) == "$PLAN03_TOOLKIT_SHA" ]] || {
@@ -1108,6 +1114,19 @@ while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classificat
 done < "$fixture_manifest"
 
 jq -es "$pid_repetitions_contract" "$PLAN03_EVIDENCE_ROOT/summary.ndjson" >/dev/null
+
+rootfs_tree_sha_after=$(tar --sort=name --format=gnu --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$PROVENANCE_ROOTFS" . | sha256sum)
+rootfs_tree_sha_after=${rootfs_tree_sha_after%% *}
+[[ "$rootfs_tree_sha_after" == "$rootfs_tree_sha_before" ]] || {
+  printf 'root filesystem identity changed across Plan 03 execution: before=%s after=%s\n' "$rootfs_tree_sha_before" "$rootfs_tree_sha_after" >&2
+  exit 1
+}
+jq -n \
+  --arg before "$rootfs_tree_sha_before" \
+  --arg after "$rootfs_tree_sha_after" \
+  --arg identity "$PROVENANCE_ROOTFS_IDENTITY" \
+  '{identity:$identity,beforeSHA256:$before,afterSHA256:$after,unchanged:($before==$after)}' \
+  > "$PLAN03_EVIDENCE_ROOT/rootfs-identity.json"
 
 (
   cd "$PLAN03_EVIDENCE_ROOT"

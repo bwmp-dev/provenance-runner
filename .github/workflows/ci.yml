@@ -81,7 +81,10 @@ jobs:
           printf '%s  %s\n' "${ALPINE_SHA512}" "${archive}" | sha512sum --check --strict -
           sudo mkdir --parents "${rootfs}"
           sudo tar --extract --gzip --file "${archive}" --directory "${rootfs}"
-          sudo -u nobody test -x "${rootfs}/bin/sh"
+          sudo chmod --recursive go-rwx "${rootfs}"
+          sudo test -x "${rootfs}/bin/sh"
+          rootfs_sha=$(sudo scripts/prepare-gvisor-rootfs.sh prepare "${rootfs}")
+          test -n "${rootfs_sha}"
           echo "PROVENANCE_RUNSC_ROOTFS=${rootfs}" >> "${GITHUB_ENV}"
       - name: Compile gVisor smoke test
         run: go test -c -o "${RUNNER_TEMP}/gvisor-smoke.test" ./internal/provider/gvisor
@@ -135,6 +138,10 @@ jobs:
           if [[ ! "${PROVENANCE_INSTALL_ROOT}" =~ ^/opt/provenance-ci-[0-9]+-[0-9]+$ ]]; then
             echo "refusing to remove unexpected install path: ${PROVENANCE_INSTALL_ROOT}" >&2
             exit 1
+          fi
+          rootfs="${PROVENANCE_INSTALL_ROOT}/alpine-rootfs"
+          if mountpoint --quiet -- "${rootfs}"; then
+            sudo scripts/prepare-gvisor-rootfs.sh release "${rootfs}"
           fi
           sudo rm --recursive --force -- "${PROVENANCE_INSTALL_ROOT}"
 

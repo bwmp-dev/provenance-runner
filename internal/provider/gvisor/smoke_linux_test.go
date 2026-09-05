@@ -5,6 +5,7 @@ package gvisor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,20 @@ func TestRunscSmoke(t *testing.T) {
 	if rootFS == "" {
 		t.Fatal("PROVENANCE_RUNSC_SMOKE=1 requires PROVENANCE_RUNSC_ROOTFS containing /bin/sh")
 	}
+	rootFSIdentityBefore, err := normalizedRootFSTreeSHA256(rootFS)
+	if err != nil {
+		t.Fatalf("capture root filesystem identity before smoke: %v", err)
+	}
+	defer func() {
+		rootFSIdentityAfter, err := normalizedRootFSTreeSHA256(rootFS)
+		if err != nil {
+			t.Errorf("capture root filesystem identity after smoke: %v", err)
+			return
+		}
+		if rootFSIdentityAfter != rootFSIdentityBefore {
+			t.Errorf("root filesystem identity changed across execution, cancellation, restart, or FIFO cleanup: before=%s after=%s", rootFSIdentityBefore, rootFSIdentityAfter)
+		}
+	}()
 
 	temporaryRoot := t.TempDir()
 	inputsRoot := filepath.Join(temporaryRoot, "inputs")
@@ -58,7 +73,7 @@ func TestRunscSmoke(t *testing.T) {
 		SystemdRunPath:    os.Getenv("PROVENANCE_SYSTEMD_RUN_PATH"),
 		SystemdCgroupRoot: os.Getenv("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
 		RootFS:            rootFS,
-		RootFSIdentity:    "smoke-rootfs",
+		RootFSIdentity:    "sha256:" + rootFSIdentityBefore,
 		StateRoot:         stateRoot,
 		BundleRoot:        bundleRoot,
 		InputsRoot:        inputsRoot,
@@ -292,6 +307,18 @@ func TestRunscSmoke(t *testing.T) {
 		assertNoSandboxResidue(t, restarted, containerID)
 		cleanupNeeded = false
 	})
+}
+
+func normalizedRootFSTreeSHA256(rootFS string) (string, error) {
+	digest := sha256.New()
+	var stderr bytes.Buffer
+	command := exec.Command("tar", "--sort=name", "--format=gnu", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner", "-cf", "-", "-C", rootFS, ".")
+	command.Stdout = digest
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf("hash normalized root filesystem tree: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil)), nil
 }
 
 func waitForExactSystemdLimits(t *testing.T, scope string, expected map[string]string) {

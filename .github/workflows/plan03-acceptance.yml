@@ -37,6 +37,7 @@ env:
   ALPINE_RELEASE: 3.24.1
   ALPINE_SHA512: de367c4fd4b5a2ab17f30fe62b135b98acd76c22014abdf51285588bde0edb7275265a84400418a5dab8cbdec36b3a41ca1312ca3af8e54438036455f26d72c1
   UBUNTU_IMAGE: ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+  UBUNTU_ROOTFS_TREE_SHA256: 088bb4126ce4d72ef98f08e947c88aade0cd3df6293f11ba3387ebb15ac29563
   PAPER_SHA256: 8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e
   JAVA_SHA256: 968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03
   RUNTIME_SHA256: ba1434cfc3af6fe145660e82f5b07ce9cb46cbc76d23c68a767a3717e7e5ca57
@@ -126,7 +127,9 @@ jobs:
           printf '%s  %s\n' "${ALPINE_SHA512}" "${alpine_archive}" | sha512sum --check --strict -
           sudo mkdir --parents "${install_root}/alpine-rootfs"
           sudo tar --extract --gzip --file "${alpine_archive}" --directory "${install_root}/alpine-rootfs"
-          sudo chmod --recursive a+rX "${install_root}"
+          sudo chmod --recursive go-rwx "${install_root}/alpine-rootfs"
+          sudo scripts/prepare-gvisor-rootfs.sh prepare "${install_root}/alpine-rootfs" >/dev/null
+          sudo chmod --recursive a+rX "${install_root}/gvisor"
 
           echo "PLAN03_INSTALL_ROOT=${install_root}" >> "${GITHUB_ENV}"
           echo "PLAN03_RUNSC_BINARY=${install_root}/gvisor/runsc" >> "${GITHUB_ENV}"
@@ -145,9 +148,11 @@ jobs:
           trap - EXIT
           sudo mkdir --parents "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs"
           sudo tar --extract --file "${RUNNER_TEMP}/ubuntu-rootfs.tar" --directory "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs"
-          sudo chmod --recursive a+rX "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs"
+          sudo chmod --recursive go-rwx "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs"
+          rootfs_sha=$(sudo scripts/prepare-gvisor-rootfs.sh prepare "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs")
+          test "${rootfs_sha}" = "${UBUNTU_ROOTFS_TREE_SHA256}"
           echo "PROVENANCE_ROOTFS=${PLAN03_INSTALL_ROOT}/ubuntu-rootfs" >> "${GITHUB_ENV}"
-          echo "PROVENANCE_ROOTFS_IDENTITY=${UBUNTU_IMAGE}" >> "${GITHUB_ENV}"
+          echo "PROVENANCE_ROOTFS_IDENTITY=sha256:${rootfs_sha}" >> "${GITHUB_ENV}"
 
       - name: Prepare checksum-pinned Paper assets
         shell: bash
@@ -271,4 +276,9 @@ jobs:
             printf 'refusing unexpected install path: %s\n' "${PLAN03_INSTALL_ROOT}" >&2
             exit 1
           fi
+          for rootfs in "${PLAN03_INSTALL_ROOT}/ubuntu-rootfs" "${PLAN03_INSTALL_ROOT}/alpine-rootfs"; do
+            if mountpoint --quiet -- "${rootfs}"; then
+              sudo scripts/prepare-gvisor-rootfs.sh release "${rootfs}"
+            fi
+          done
           sudo rm --recursive --force -- "${PLAN03_INSTALL_ROOT}"
