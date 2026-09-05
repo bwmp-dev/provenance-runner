@@ -12,16 +12,24 @@ request records the exact candidate SHA, workflow run URL, and artifact name.
 
 ## Trigger and accountability policy
 
-Normal CI and the short real-gVisor smoke run on every pull request. The full
-retained-evidence gate runs automatically when the workflow, harness, fixture
-inventory, any command, or any module-internal package changes, except for the
-four explicitly remote-only packages `internal/buildinfo`,
+Normal CI and the short real-gVisor smoke run on every same-repository pull
+request and every push to `main`. Every job fails closed before self-hosted
+runner assignment for a fork pull request, so untrusted fork code never executes
+on the shared root host. The full retained-evidence gate runs automatically for
+same-repository pull requests when the workflow, harness, fixture inventory, any
+command, or any module-internal package changes, except for the four explicitly
+remote-only packages `internal/buildinfo`,
 `internal/enrollment`, `internal/gatewayclient`, and
 `internal/runneridentity`. The broad `cmd/**` and `internal/**` patterns make a
 new command or internal package fail safe into the full gate unless it is
 deliberately reviewed and excluded. An unfiltered Go test fixes that exclusion
 set, rejects imports from covered internal packages into those packages, and
 confines their command-level use to the enrollment and connection functions.
+
+The short privileged gVisor smoke and the full Paper/gVisor gate share one
+repository-scoped, non-cancelling concurrency group. They cannot mutate shared
+kernel, cgroup, mount, or gVisor state simultaneously, while the ordinary test
+job remains unconstrained and can use another self-hosted runner in parallel.
 
 `go.mod` and `go.sum` changes do not automatically run the full gate. The
 integrator responsible for merging the pull request must classify the frozen

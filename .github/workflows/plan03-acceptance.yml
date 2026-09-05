@@ -36,6 +36,10 @@ jobs:
   paper-gvisor-exit-gate:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64]
+    concurrency:
+      group: "${{ github.repository }}-privileged-gvisor"
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 60
     steps:
       - name: Check out runner candidate

@@ -17,6 +17,12 @@ import (
 
 const runnerModule = "github.com/bwmp-dev/provenance-runner"
 
+const (
+	sameRepositoryPullRequestGuard = "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+	selfHostedLinuxX64             = "runs-on: [self-hosted, linux, x64]"
+	privilegedGVisorGroup          = `group: "${{ github.repository }}-privileged-gvisor"`
+)
+
 var plan03RemoteOnlyPackages = map[string]map[string]bool{
 	runnerModule + "/internal/buildinfo":      {"runConnect": true},
 	runnerModule + "/internal/enrollment":     {"runEnroll": true},
@@ -34,6 +40,7 @@ func TestPlan03RemoteOnlyPackagesStayOutsideLocalExecution(t *testing.T) {
 	repositoryRoot := plan03RepositoryRoot(t)
 	assertPlan03WorkflowTriggers(t, repositoryRoot)
 	assertNormalCITriggers(t, repositoryRoot)
+	assertSelfHostedJobPolicy(t, repositoryRoot)
 	assertPlan03WorkflowExclusions(t, repositoryRoot)
 	assertCoveredInternalPackagesDoNotImportRemoteOnly(t, repositoryRoot)
 	assertCommandUsesRemoteOnlyPackagesInAllowedFunctions(t, repositoryRoot)
@@ -50,7 +57,7 @@ func assertPlan03WorkflowTriggers(t *testing.T, repositoryRoot string) {
 	if !pullRequest || push || !workflowDispatch {
 		t.Fatalf("Plan 03 triggers: pull_request=%t push=%t workflow_dispatch=%t", pullRequest, push, workflowDispatch)
 	}
-	if !strings.Contains(string(workflow), "runs-on: [self-hosted, linux, x64]") {
+	if !strings.Contains(string(workflow), selfHostedLinuxX64) {
 		t.Fatal("Plan 03 gate must run on the self-hosted Linux x64 pool")
 	}
 }
@@ -69,6 +76,107 @@ func assertNormalCITriggers(t *testing.T, repositoryRoot string) {
 	if !strings.Contains(string(workflow), "push:\n    branches:\n      - main") {
 		t.Fatal("normal CI must run automatically on pushes to main")
 	}
+}
+
+func assertSelfHostedJobPolicy(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	ci := readPlan03ContractFile(t, filepath.Join(repositoryRoot, ".github", "workflows", "ci.yml"))
+	ciJobs := workflowJobBlocks(t, ci)
+	if len(ciJobs) != 3 {
+		t.Fatalf("normal CI job set = %v", sortedKeys(ciJobs))
+	}
+	for _, name := range []string{"test", "gvisor-smoke", "systemd-user-smoke"} {
+		job, ok := ciJobs[name]
+		if !ok {
+			t.Fatalf("normal CI lacks %q job", name)
+		}
+		if !strings.Contains(job, sameRepositoryPullRequestGuard) || !strings.Contains(job, selfHostedLinuxX64) {
+			t.Fatalf("normal CI job %q is not same-repository-only on self-hosted Linux x64", name)
+		}
+	}
+	if strings.Contains(ciJobs["test"], "concurrency:") {
+		t.Fatal("ordinary test job must remain available for parallel execution")
+	}
+	assertPrivilegedGVisorConcurrency(t, "short gVisor smoke", ciJobs["gvisor-smoke"])
+
+	plan03 := readPlan03ContractFile(t, filepath.Join(repositoryRoot, ".github", "workflows", "plan03-acceptance.yml"))
+	plan03Jobs := workflowJobBlocks(t, plan03)
+	if len(plan03Jobs) != 1 || plan03Jobs["paper-gvisor-exit-gate"] == "" {
+		t.Fatalf("Plan 03 job set = %v", sortedKeys(plan03Jobs))
+	}
+	gate := plan03Jobs["paper-gvisor-exit-gate"]
+	if !strings.Contains(gate, sameRepositoryPullRequestGuard) || !strings.Contains(gate, selfHostedLinuxX64) {
+		t.Fatal("Plan 03 gate is not same-repository-only on self-hosted Linux x64")
+	}
+	assertPrivilegedGVisorConcurrency(t, "Plan 03 gate", gate)
+}
+
+func assertPrivilegedGVisorConcurrency(t *testing.T, name, job string) {
+	t.Helper()
+	if !strings.Contains(job, "concurrency:\n") || !strings.Contains(job, privilegedGVisorGroup) ||
+		!strings.Contains(job, "cancel-in-progress: false") || !strings.Contains(job, "queue: max") {
+		t.Fatalf("%s lacks the shared non-cancelling privileged-gVisor concurrency policy", name)
+	}
+}
+
+func readPlan03ContractFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read workflow %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func workflowJobBlocks(t *testing.T, workflow string) map[string]string {
+	t.Helper()
+	jobs := make(map[string]string)
+	var current string
+	var block strings.Builder
+	inJobs := false
+	flush := func() {
+		if current != "" {
+			jobs[current] = block.String()
+			block.Reset()
+		}
+	}
+	scanner := bufio.NewScanner(strings.NewReader(workflow))
+	for scanner.Scan() {
+		rawLine := scanner.Text()
+		line := strings.TrimSpace(rawLine)
+		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		if !inJobs {
+			if line == "jobs:" && indent == 0 {
+				inJobs = true
+			}
+			continue
+		}
+		if indent == 0 && line != "" && !strings.HasPrefix(line, "#") {
+			break
+		}
+		if indent == 2 && strings.HasSuffix(line, ":") && !strings.HasPrefix(line, "#") {
+			flush()
+			current = strings.TrimSuffix(line, ":")
+		}
+		if current != "" {
+			block.WriteString(rawLine)
+			block.WriteByte('\n')
+		}
+	}
+	flush()
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read workflow jobs: %v", err)
+	}
+	return jobs
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func topLevelWorkflowTriggers(t *testing.T, workflow []byte) (pullRequest, push, workflowDispatch bool) {
