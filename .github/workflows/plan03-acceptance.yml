@@ -265,6 +265,20 @@ jobs:
             printf 'refusing unexpected cgroup path: %s\n' "${PLAN03_CGROUP_PARENT}" >&2
             exit 1
           fi
+          if sudo test -f "${PLAN03_CGROUP_PARENT}/cgroup.kill"; then
+            printf '1\n' | sudo tee "${PLAN03_CGROUP_PARENT}/cgroup.kill" >/dev/null
+          fi
+          populated=1
+          for _ in {1..100}; do
+            populated=$(sudo awk '/^populated /{print $2}' "${PLAN03_CGROUP_PARENT}/cgroup.events")
+            [[ "${populated}" == 0 ]] && break
+            sleep 0.05
+          done
+          if [[ "${populated}" != 0 ]]; then
+            printf 'delegated cgroup remained populated during cleanup:\n' >&2
+            sudo find "${PLAN03_CGROUP_PARENT}" -name cgroup.procs -type f -exec sh -c 'printf "%s: " "$1"; tr "\n" " " < "$1"; printf "\n"' sh {} \; >&2
+            exit 1
+          fi
           sudo find "${PLAN03_CGROUP_PARENT}" -mindepth 1 -depth -type d -exec rmdir {} +
           sudo rmdir "${PLAN03_CGROUP_PARENT}"
 
