@@ -23,9 +23,9 @@ deliberately reviewed and excluded. An unfiltered Go test fixes that exclusion
 set, rejects imports from covered internal packages into those packages, and
 confines their command-level use to the enrollment and connection functions.
 
-`go.mod` and `go.sum` changes do not run the full gate for every pull-request
-revision. The integrator responsible for merging the pull request must classify
-the frozen dependency diff. A Go toolchain change, or a direct or transitive
+`go.mod` and `go.sum` changes do not automatically run the full gate. The
+integrator responsible for merging the pull request must classify the frozen
+dependency diff. A Go toolchain change, or a direct or transitive
 dependency change capable of altering artifact handling, evidence or complete
 logs, local job decoding, Paper adaptation, process execution, workspace or
 instance-lock behavior, gVisor OCI construction, structured event transport,
@@ -37,10 +37,11 @@ Dispatch the workflow against the frozen pull-request head branch and verify
 that the resulting run's `headSha` equals the intended head SHA. Record that
 SHA, the run URL, and the `plan03-exit-gate-<SHA>` artifact name in the pull
 request acceptance evidence. If the head moves, the run is stale and must be
-repeated. Every merge that changes `go.mod` or `go.sum` also triggers one
-post-main backstop run; that run must be green before the merged dependency
-state is treated as integrated. The post-main backstop does not replace the
-pre-merge manual run for a sandbox-relevant dependency change.
+repeated. Normal CI still runs automatically on every pull request and every
+push to `main`; the full Plan 03 gate remains pull-request path-filtered and
+manual-only outside those paths. A sandbox-relevant `go.mod` or `go.sum` change
+therefore cannot merge on normal CI alone: its manual exact-head gate is still
+required before merge.
 
 ## Immutable inputs
 

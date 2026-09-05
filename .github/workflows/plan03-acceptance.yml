@@ -15,16 +15,6 @@ on:
       - "!internal/runneridentity/**"
       - "scripts/plan03-acceptance.sh"
       - "testdata/plan03/**"
-  # Module and toolchain changes get one post-merge backstop run instead of a
-  # full exit-gate run for every pull-request revision. Sandbox-relevant module
-  # changes still require a manual exact-head run before merge; see the evidence
-  # contract in docs/plan-03-exit-gate.md.
-  push:
-    branches:
-      - "main"
-    paths:
-      - "go.mod"
-      - "go.sum"
   workflow_dispatch:
 
 permissions:
@@ -45,7 +35,7 @@ env:
 jobs:
   paper-gvisor-exit-gate:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 60
     steps:
       - name: Check out runner candidate

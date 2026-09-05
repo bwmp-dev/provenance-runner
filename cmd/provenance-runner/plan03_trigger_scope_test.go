@@ -32,9 +32,78 @@ func TestPlan03RemoteOnlyPackagesStayOutsideLocalExecution(t *testing.T) {
 	t.Parallel()
 
 	repositoryRoot := plan03RepositoryRoot(t)
+	assertPlan03WorkflowTriggers(t, repositoryRoot)
+	assertNormalCITriggers(t, repositoryRoot)
 	assertPlan03WorkflowExclusions(t, repositoryRoot)
 	assertCoveredInternalPackagesDoNotImportRemoteOnly(t, repositoryRoot)
 	assertCommandUsesRemoteOnlyPackagesInAllowedFunctions(t, repositoryRoot)
+}
+
+func assertPlan03WorkflowTriggers(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	workflowPath := filepath.Join(repositoryRoot, ".github", "workflows", "plan03-acceptance.yml")
+	workflow, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("open Plan 03 workflow: %v", err)
+	}
+	pullRequest, push, workflowDispatch := topLevelWorkflowTriggers(t, workflow)
+	if !pullRequest || push || !workflowDispatch {
+		t.Fatalf("Plan 03 triggers: pull_request=%t push=%t workflow_dispatch=%t", pullRequest, push, workflowDispatch)
+	}
+	if !strings.Contains(string(workflow), "runs-on: [self-hosted, linux, x64]") {
+		t.Fatal("Plan 03 gate must run on the self-hosted Linux x64 pool")
+	}
+}
+
+func assertNormalCITriggers(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	workflowPath := filepath.Join(repositoryRoot, ".github", "workflows", "ci.yml")
+	workflow, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("open normal CI workflow: %v", err)
+	}
+	pullRequest, push, workflowDispatch := topLevelWorkflowTriggers(t, workflow)
+	if !pullRequest || !push || workflowDispatch {
+		t.Fatalf("normal CI triggers: pull_request=%t push=%t workflow_dispatch=%t", pullRequest, push, workflowDispatch)
+	}
+	if !strings.Contains(string(workflow), "push:\n    branches:\n      - main") {
+		t.Fatal("normal CI must run automatically on pushes to main")
+	}
+}
+
+func topLevelWorkflowTriggers(t *testing.T, workflow []byte) (pullRequest, push, workflowDispatch bool) {
+	t.Helper()
+	scanner := bufio.NewScanner(strings.NewReader(string(workflow)))
+	inOn := false
+	for scanner.Scan() {
+		rawLine := scanner.Text()
+		line := strings.TrimSpace(rawLine)
+		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+		if !inOn {
+			if line == "on:" && indent == 0 {
+				inOn = true
+			}
+			continue
+		}
+		if indent == 0 && line != "" && !strings.HasPrefix(line, "#") {
+			break
+		}
+		if indent != 2 {
+			continue
+		}
+		switch line {
+		case "pull_request:":
+			pullRequest = true
+		case "push:":
+			push = true
+		case "workflow_dispatch:":
+			workflowDispatch = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read workflow triggers: %v", err)
+	}
+	return pullRequest, push, workflowDispatch
 }
 
 func plan03RepositoryRoot(t *testing.T) string {
