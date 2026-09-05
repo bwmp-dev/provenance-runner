@@ -206,7 +206,7 @@ func TestOfferUploadCapabilityIsKeptOutOfJournalAndWorkerSpecification(t *testin
 	var sent *runnerv1.RunnerMessage
 	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
 	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
-	session := &clientSession{client: client, authenticated: authenticated, send: func(message *runnerv1.RunnerMessage) error {
+	session := &clientSession{client: client, authenticated: authenticated, objectUploadIdentity: true, send: func(message *runnerv1.RunnerMessage) error {
 		sent = proto.Clone(message).(*runnerv1.RunnerMessage)
 		return nil
 	}}
@@ -248,7 +248,7 @@ func activeEvidenceClient(t *testing.T, now time.Time) (*Client, *runnerv1.Lease
 	}); err != nil {
 		t.Fatal(err)
 	}
-	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime())
+	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime(), true)
 	if rejection != nil {
 		t.Fatal(rejection)
 	}

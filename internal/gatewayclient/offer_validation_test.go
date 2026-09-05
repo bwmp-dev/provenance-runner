@@ -133,11 +133,44 @@ func TestValidateOfferAcceptsBoundedCompleteLogUploadWithoutMutation(t *testing.
 	offer := validLeaseOffer(now)
 	offer.Job.CompleteLogUpload = validCompleteLogUpload(now)
 	original := proto.Clone(offer)
-	if rejection := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, false); rejection != nil {
+	if rejection := validateOfferWithFeatures(offer, validOfferConfig(), now, 10*time.Minute, false, true); rejection != nil {
 		t.Fatalf("validateOffer() rejection = %#v", rejection)
 	}
 	if !proto.Equal(offer, original) {
 		t.Fatal("validateOffer() mutated the upload capability")
+	}
+}
+
+func TestValidateOfferEnforcesNegotiatedObjectUploadIdentity(t *testing.T) {
+	now := time.Date(2026, time.September, 5, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		negotiated    bool
+		objectKey     string
+		wantRejection bool
+	}{
+		{name: "negotiated authoritative identity", negotiated: true, objectKey: "staging/execution/attempt/log.gz"},
+		{name: "negotiated missing identity", negotiated: true, wantRejection: true},
+		{name: "negotiated malformed identity", negotiated: true, objectKey: "staging/../attempt/log.gz", wantRejection: true},
+		{name: "unnegotiated legacy upload", negotiated: false},
+		{name: "unnegotiated authoritative identity", negotiated: false, objectKey: "staging/execution/attempt/log.gz", wantRejection: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			offer := validLeaseOffer(now)
+			offer.Job.CompleteLogUpload = validCompleteLogUpload(now)
+			offer.Job.CompleteLogUpload.ObjectKey = test.objectKey
+			rejection := validateOfferWithFeatures(offer, validOfferConfig(), now, 10*time.Minute, false, test.negotiated)
+			if test.wantRejection {
+				if rejection == nil || rejection.Code != "invalid_complete_log_upload" {
+					t.Fatalf("validation rejection = %#v", rejection)
+				}
+				return
+			}
+			if rejection != nil {
+				t.Fatalf("validation rejection = %#v", rejection)
+			}
+		})
 	}
 }
 
@@ -146,6 +179,7 @@ func validCompleteLogUpload(now time.Time) *runnerv1.ObjectUpload {
 		Uri:         "https://logs.example/staging/execution/attempt/log.gz?signature=secret",
 		ContentType: completeLogUploadContentType,
 		ExpiresAt:   timestamppb.New(now.Add(9 * time.Minute)),
+		ObjectKey:   "staging/execution/attempt/log.gz",
 	}
 }
 

@@ -203,7 +203,7 @@ var nonPublicUploadPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fe80::/10"),
 }
 
-func validateCompleteLogUpload(upload *runnerv1.ObjectUpload, now, offerExpiresAt, leaseExpiresAt time.Time) (*completeLogTarget, *OfferRejection) {
+func validateCompleteLogUpload(upload *runnerv1.ObjectUpload, now, offerExpiresAt, leaseExpiresAt time.Time, authoritativeIdentity bool) (*completeLogTarget, *OfferRejection) {
 	if upload == nil {
 		return nil, nil
 	}
@@ -231,9 +231,20 @@ func validateCompleteLogUpload(upload *runnerv1.ObjectUpload, now, offerExpiresA
 	if !expiresAt.After(now) || expiresAt.Before(offerExpiresAt) || !expiresAt.After(leaseExpiresAt) || expiresAt.After(now.Add(maximumLeaseDuration)) {
 		return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload expiration is outside the lease window")
 	}
-	objectKey, err := safeUploadObjectKey(parsed)
-	if err != nil {
-		return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload object key is invalid")
+	objectKey := upload.GetObjectKey()
+	if authoritativeIdentity {
+		if err := validateUploadObjectKey(objectKey); err != nil {
+			return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload object key is invalid")
+		}
+	} else {
+		if objectKey != "" {
+			return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload object identity was not negotiated")
+		}
+		var err error
+		objectKey, err = legacyUploadObjectKey(parsed)
+		if err != nil {
+			return nil, rejectUnsupported("invalid_complete_log_upload", "complete log upload object key is invalid")
+		}
 	}
 	return &completeLogTarget{uri: upload.GetUri(), objectKey: objectKey, expiresAt: expiresAt}, nil
 }
@@ -255,7 +266,25 @@ func validUploadHostname(hostname string) bool {
 	return true
 }
 
-func safeUploadObjectKey(parsed *url.URL) (string, error) {
+func validateUploadObjectKey(key string) error {
+	if key == "" || len(key) > maximumObjectKeyBytes || !utf8.ValidString(key) || strings.HasPrefix(key, "/") ||
+		strings.Contains(key, "\\") {
+		return errors.New("invalid object key")
+	}
+	for _, segment := range strings.Split(key, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return errors.New("invalid object key segment")
+		}
+		for _, character := range segment {
+			if character == 0 || unicode.IsControl(character) {
+				return errors.New("invalid object key character")
+			}
+		}
+	}
+	return nil
+}
+
+func legacyUploadObjectKey(parsed *url.URL) (string, error) {
 	if strings.Contains(parsed.EscapedPath(), "%") {
 		return "", errors.New("encoded object keys are not supported")
 	}
@@ -264,18 +293,8 @@ func safeUploadObjectKey(parsed *url.URL) (string, error) {
 		return "", err
 	}
 	key := strings.TrimPrefix(path, "/")
-	if key == "" || len(key) > maximumObjectKeyBytes || !utf8.ValidString(key) || strings.Contains(key, "\\") {
-		return "", errors.New("invalid object key")
-	}
-	for _, segment := range strings.Split(key, "/") {
-		if segment == "" || segment == "." || segment == ".." {
-			return "", errors.New("invalid object key segment")
-		}
-		for _, character := range segment {
-			if character == 0 || unicode.IsControl(character) {
-				return "", errors.New("invalid object key character")
-			}
-		}
+	if err := validateUploadObjectKey(key); err != nil {
+		return "", err
 	}
 	return key, nil
 }

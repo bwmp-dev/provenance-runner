@@ -101,7 +101,7 @@ func newRestartRecoveryHarnessWithUsage(t *testing.T, now time.Time, uploader co
 	harness := &restartRecoveryHarness{client: client, offer: offer}
 	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
 	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
-	harness.session = &clientSession{client: client, authenticated: authenticated, restartUploadRecovery: true, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+	harness.session = &clientSession{client: client, authenticated: authenticated, restartUploadRecovery: true, objectUploadIdentity: true, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
 		harness.sent = append(harness.sent, proto.Clone(message).(*runnerv1.RunnerMessage))
 		return nil
 	}}
@@ -360,6 +360,15 @@ func TestRestartRecoveryRejectsInvalidOrSubstitutedUploadResponses(t *testing.T)
 		{name: "expired", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
 			ack.Reconciliations[0].CompleteLogUpload.ExpiresAt = timestamppb.New(now)
 		}},
+		{name: "missing authoritative object identity", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
+			ack.Reconciliations[0].CompleteLogUpload.ObjectKey = ""
+		}},
+		{name: "malformed authoritative object identity", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
+			ack.Reconciliations[0].CompleteLogUpload.ObjectKey = "staging/../attempt/log.gz"
+		}},
+		{name: "authoritative object identity not negotiated", mutate: func(h *restartRecoveryHarness, _ *runnerv1.HeartbeatAcknowledgement) {
+			h.session.objectUploadIdentity = false
+		}},
 		{name: "upload expires with lease", mutate: func(_ *restartRecoveryHarness, ack *runnerv1.HeartbeatAcknowledgement) {
 			ack.Reconciliations[0].CompleteLogUpload.ExpiresAt = ack.Reconciliations[0].Lease.ExpiresAt
 		}},
@@ -396,6 +405,24 @@ func TestRestartRecoveryRejectsInvalidOrSubstitutedUploadResponses(t *testing.T)
 				t.Fatalf("invalid recovery upload mutated terminal state: calls=%d", uploader.calls)
 			}
 		})
+	}
+}
+
+func TestRestartRecoveryPreservesLegacyUnnegotiatedUploadIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	uploader := new(restartRecoveryUploader)
+	harness := newRestartRecoveryHarness(t, now, uploader)
+	harness.session.objectUploadIdentity = false
+	heartbeat := harness.sendHeartbeat(t, now)
+	upload := validCompleteLogUpload(now)
+	upload.ObjectKey = ""
+	upload.Uri = "https://logs.example/legacy/execution/attempt/log.gz?signature=secret"
+	if err := harness.session.handleHeartbeatAcknowledgement(harness.heartbeatAcknowledgement(heartbeat, now, upload), now); err != nil {
+		t.Fatal(err)
+	}
+	failed := harness.sent[len(harness.sent)-1].GetFailed()
+	if uploader.calls != 1 || failed == nil || failed.GetCompleteLog().GetObjectKey() != "legacy/execution/attempt/log.gz" {
+		t.Fatalf("legacy recovery = uploads %d terminal %#v", uploader.calls, failed)
 	}
 }
 

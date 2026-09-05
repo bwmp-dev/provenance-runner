@@ -71,7 +71,7 @@ func TestDurableOfferLifecycleDoesNotExecuteBeforeJobStartedAcknowledgement(t *t
 			return errors.New("capabilities were not second")
 		}
 		features := capabilities.GetCapabilities().GetFeatures()
-		if !advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1) || !advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY) || validateAdvertisedFeatures(features) != nil {
+		if !advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1) || !advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY) || !advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY) || validateAdvertisedFeatures(features) != nil {
 			return fmt.Errorf("required protocol capabilities were not advertised exactly once: %v", features)
 		}
 		heartbeat, err := stream.Recv()

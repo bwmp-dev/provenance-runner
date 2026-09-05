@@ -397,7 +397,7 @@ func TestRestartEvidenceContainsNoOfferOrCredentialSecretAndCleansIdempotently(t
 	authenticated := authenticatedMessage(now, platformScope()).GetAuthenticated()
 	authenticated.LeaseDuration = durationpb.New(10 * time.Minute)
 	var sent *runnerv1.RunnerMessage
-	session := &clientSession{client: client, authenticated: authenticated, send: func(message *runnerv1.RunnerMessage) error {
+	session := &clientSession{client: client, authenticated: authenticated, objectUploadIdentity: true, send: func(message *runnerv1.RunnerMessage) error {
 		sent = proto.Clone(message).(*runnerv1.RunnerMessage)
 		return nil
 	}}

@@ -25,6 +25,7 @@ type clientSession struct {
 	send                          func(*runnerv1.RunnerMessage) error
 	jobCorrelationV1              bool
 	restartUploadRecovery         bool
+	objectUploadIdentity          bool
 	seen                          map[string][sha256.Size]byte
 	seenOrder                     []string
 	pendingHeartbeat              *runnerv1.RunnerMessage
@@ -156,10 +157,10 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 	if s.client.worker == nil {
 		return s.rejectOffer(offer, runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED, "worker_unavailable: remote execution is unavailable")
 	}
-	if rejection := s.client.validateOffer(offer, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1); rejection != nil {
+	if rejection := validateOfferWithFeatures(offer, s.client.config, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity); rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}
-	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime())
+	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime(), s.objectUploadIdentity)
 	if rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}
@@ -1278,7 +1279,7 @@ func (s *clientSession) acceptRestartCompleteLogUpload(reconciliation *runnerv1.
 	if !leaseExpiresAt.After(now) {
 		return permanent("reconciliation complete log upload lease is expired")
 	}
-	target, rejection := validateCompleteLogUpload(upload, now, leaseExpiresAt, leaseExpiresAt)
+	target, rejection := validateCompleteLogUpload(upload, now, leaseExpiresAt, leaseExpiresAt, s.objectUploadIdentity)
 	if rejection != nil || target == nil {
 		return permanent("reconciliation complete log upload is malformed or expired")
 	}

@@ -336,12 +336,14 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	}
 	jobCorrelationV1 := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
 	restartUploadRecovery := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY)
+	objectUploadIdentity := advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY)
 	session := &clientSession{
 		client:                c,
 		authenticated:         authenticated,
 		send:                  send,
 		jobCorrelationV1:      jobCorrelationV1,
 		restartUploadRecovery: restartUploadRecovery,
+		objectUploadIdentity:  objectUploadIdentity,
 		seen:                  make(map[string][sha256.Size]byte),
 		rootContext:           ctx,
 		cancelSession:         cancel,
@@ -510,6 +512,7 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	}
 	features = append(features,
 		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY,
 	)
 	// An active journal without a trusted evidence store is an upgrade or
 	// fail-closed recovery case. Do not negotiate an upload capability that this

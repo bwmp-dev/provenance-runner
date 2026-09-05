@@ -52,6 +52,10 @@ func (c *Client) validateOffer(offer *runnerv1.LeaseOffer, now time.Time, leaseD
 }
 
 func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, jobCorrelationV1 bool) *OfferRejection {
+	return validateOfferWithFeatures(offer, config, now, leaseDuration, jobCorrelationV1, false)
+}
+
+func validateOfferWithFeatures(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, jobCorrelationV1, objectUploadIdentity bool) *OfferRejection {
 	if offer == nil || offer.GetJob() == nil {
 		return rejectUnsupported("invalid_offer", "lease offer job is required")
 	}
@@ -101,7 +105,7 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if rejection := validateOfferDownloads(job, offerExpiresAt, leaseExpiresAt); rejection != nil {
 		return rejection
 	}
-	if _, rejection := validateCompleteLogUpload(job.GetCompleteLogUpload(), now, offerExpiresAt, leaseExpiresAt); rejection != nil {
+	if _, rejection := validateCompleteLogUpload(job.GetCompleteLogUpload(), now, offerExpiresAt, leaseExpiresAt, objectUploadIdentity); rejection != nil {
 		return rejection
 	}
 	return nil
