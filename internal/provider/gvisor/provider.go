@@ -730,7 +730,11 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	<-samplingDone
 	e.sampleUsage()
 	if cancellationErr != nil {
-		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, cancellationErr
+		// A caller-enforced cancellation has no workload exit status. Preserve the
+		// established -1 sentinel even though orderly teardown may observe runsc
+		// exiting with SIGKILL (137) after the exact sandbox is killed.
+		cancelledExitCode := -1
+		return execution.ExecutionOutcome{ExitCode: &cancelledExitCode}, cancellationErr
 	}
 	if e.provider.config.CgroupDriver == CgroupDriverSystemdUser {
 		expectedScope := systemdCgroupPath(e.provider.config.SystemdCgroupRoot, e.containerID)

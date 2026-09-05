@@ -696,6 +696,22 @@ func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
 		}
 	})
 
+	t.Run("non-cancelled signal exit remains a workload failure", func(t *testing.T) {
+		provider, runner, _ := testProvider(t)
+		exitCode := 137
+		runner.run = func(context.Context, command) commandResult {
+			return commandResult{ExitCode: &exitCode, Err: errors.New("signal: killed")}
+		}
+		prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
+		outcome, err := prepared.Execute(context.Background())
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if outcome.ExitCode == nil || *outcome.ExitCode != 137 || outcome.Failure == nil || outcome.Failure.Classification != execution.ClassificationWorkloadFailure {
+			t.Fatalf("Execute() outcome = %#v", outcome)
+		}
+	})
+
 	t.Run("same exit with outer denial is runtime collapse", func(t *testing.T) {
 		exitCode := 2
 		outcome, err := classifyRunResult(commandResult{ExitCode: &exitCode, Err: errors.New("exit status 2")}, 3, true)
@@ -720,6 +736,7 @@ func TestExecuteClassifiesSandboxedExitAndRuntimeFailure(t *testing.T) {
 
 func TestCancellationKillsContainerAndCleanupDeletesIt(t *testing.T) {
 	provider, runner, _ := testProvider(t)
+	killedExitCode := 137
 	runStarted := make(chan struct{})
 	runExited := make(chan struct{})
 	releaseRun := make(chan struct{})
@@ -733,7 +750,7 @@ func TestCancellationKillsContainerAndCleanupDeletesIt(t *testing.T) {
 			case <-ctx.Done():
 			}
 			close(runExited)
-			return commandResult{Err: errors.New("sandbox killed")}
+			return commandResult{ExitCode: &killedExitCode, Err: errors.New("sandbox killed")}
 		case "kill":
 			releaseOnce.Do(func() { close(releaseRun) })
 		}
@@ -741,16 +758,23 @@ func TestCancellationKillsContainerAndCleanupDeletesIt(t *testing.T) {
 	}
 	prepared := prepareEnvironment(t, provider, validConfiguration(), 1024)
 	ctx, cancel := context.WithCancel(context.Background())
-	executeDone := make(chan error, 1)
+	type executeResult struct {
+		outcome execution.ExecutionOutcome
+		err     error
+	}
+	executeDone := make(chan executeResult, 1)
 	go func() {
-		_, err := prepared.Execute(ctx)
-		executeDone <- err
+		outcome, err := prepared.Execute(ctx)
+		executeDone <- executeResult{outcome: outcome, err: err}
 	}()
 	<-runStarted
 	cancel()
-	err := <-executeDone
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	result := <-executeDone
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", result.err)
+	}
+	if result.outcome.ExitCode == nil || *result.outcome.ExitCode != -1 {
+		t.Fatalf("cancelled Execute() exit code = %v, want -1", result.outcome.ExitCode)
 	}
 	select {
 	case <-runExited:
@@ -874,6 +898,7 @@ func TestRunContainerFailsClosedWhenKilledRunDoesNotExit(t *testing.T) {
 
 func TestExecutorWallTimeoutKillsAndCleansContainer(t *testing.T) {
 	provider, runner, _ := testProvider(t)
+	killedExitCode := 137
 	releaseRun := make(chan struct{})
 	var releaseOnce sync.Once
 	runner.run = func(ctx context.Context, invocation command) commandResult {
@@ -883,7 +908,7 @@ func TestExecutorWallTimeoutKillsAndCleansContainer(t *testing.T) {
 			case <-releaseRun:
 			case <-ctx.Done():
 			}
-			return commandResult{Err: errors.New("sandbox killed")}
+			return commandResult{ExitCode: &killedExitCode, Err: errors.New("sandbox killed")}
 		case "kill":
 			releaseOnce.Do(func() { close(releaseRun) })
 		}
@@ -911,6 +936,9 @@ func TestExecutorWallTimeoutKillsAndCleansContainer(t *testing.T) {
 	})
 	if result.Classification != execution.ClassificationTimedOut || result.Failure == nil || result.Failure.Code != "job_timeout" {
 		t.Fatalf("executor result = %#v", result)
+	}
+	if result.Execution == nil || result.Execution.ExitCode == nil || *result.Execution.ExitCode != -1 {
+		t.Fatalf("timed-out execution result = %#v, want exit code -1", result.Execution)
 	}
 	if result.Cleanup == nil || !result.Cleanup.Succeeded {
 		t.Errorf("cleanup result = %#v", result.Cleanup)
