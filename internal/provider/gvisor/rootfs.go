@@ -15,6 +15,7 @@ type rootFSMountTargetKind uint8
 const (
 	rootFSMountDirectory rootFSMountTargetKind = iota + 1
 	rootFSMountRegularFile
+	rootFSSpecialPermissions = os.ModeSticky | os.ModeSetuid | os.ModeSetgid
 )
 
 type rootFSMountTarget struct {
@@ -47,6 +48,17 @@ func validateRootFS(rootFS string, mounts []execution.ReadOnlyMount, eventFile *
 	}
 	if err := readOnly(rootFS); err != nil {
 		return fmt.Errorf("root filesystem must be mounted read-only: %w", err)
+	}
+	rootInfo, err := os.Lstat(rootFS)
+	if err != nil {
+		return fmt.Errorf("inspect root filesystem: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return errors.New("root filesystem must be a non-symbolic-link directory")
+	}
+	rootMode := rootInfo.Mode() & (os.ModePerm | rootFSSpecialPermissions)
+	if rootMode != 0o700 {
+		return fmt.Errorf("root filesystem mode is %s, want %s", rootMode, os.FileMode(0o700))
 	}
 	rootUID, rootGID, err := rootFSOwnership(rootFS)
 	if err != nil {
@@ -166,8 +178,7 @@ func validateRootFSMountTarget(rootFS, destination string, target rootFSMountTar
 			return "", fmt.Errorf("root filesystem mount target %q has an unsupported type", destination)
 		}
 		if target.mode != 0 {
-			const specialPermissions = os.ModeSticky | os.ModeSetuid | os.ModeSetgid
-			actualMode := info.Mode() & (os.ModePerm | specialPermissions)
+			actualMode := info.Mode() & (os.ModePerm | rootFSSpecialPermissions)
 			if actualMode != target.mode {
 				return "", fmt.Errorf("root filesystem mount target %q mode is %s, want %s", destination, actualMode, target.mode)
 			}

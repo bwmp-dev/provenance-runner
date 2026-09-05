@@ -49,9 +49,45 @@ require_directory() {
   }
 }
 
+require_rootfs() {
+  [[ ! -L "$rootfs" && -d "$rootfs" ]] || {
+    printf 'root filesystem is not a non-symbolic-link directory: %s\n' "$rootfs" >&2
+    exit 1
+  }
+  [[ $(stat -c '%a' -- "$rootfs") == 700 ]] || {
+    printf 'root filesystem %s has mode %s, want 700\n' "$rootfs" "$(stat -c '%a' -- "$rootfs")" >&2
+    exit 1
+  }
+  [[ $(stat -c '%u:%g' -- "$rootfs") == "$rootfs_uid:$rootfs_gid" ]] || {
+    printf 'root filesystem %s owner changed during preparation\n' "$rootfs" >&2
+    exit 1
+  }
+}
+
+require_expected_children() {
+  local path=$1
+  shift
+  local entry allowed child
+  while IFS= read -r -d '' entry; do
+    child=${entry##*/}
+    allowed=false
+    for expected in "$@"; do
+      if [[ "$child" == "$expected" ]]; then
+        allowed=true
+        break
+      fi
+    done
+    [[ "$allowed" == true ]] || {
+      printf 'refusing nonempty legacy root filesystem mount target %s (unexpected entry %s)\n' "$path" "$child" >&2
+      exit 1
+    }
+  done < <(find "$path" -mindepth 1 -maxdepth 1 -print0)
+}
+
 prepare_directory() {
   local path=$1
   local mode=$2
+  shift 2
   if [[ -L "$path" || ( -e "$path" && ! -d "$path" ) ]]; then
     printf 'refusing unsafe existing root filesystem mount target: %s\n' "$path" >&2
     exit 1
@@ -62,7 +98,44 @@ prepare_directory() {
     [[ "$parent" == "$rootfs" ]] || require_directory "$parent" 700
     install --directory --mode="$mode" --owner="$rootfs_uid" --group="$rootfs_gid" -- "$path"
   fi
+  require_expected_children "$path" "$@"
+  chown "$rootfs_uid:$rootfs_gid" -- "$path"
+  chmod "$mode" -- "$path"
   require_directory "$path" "$mode"
+}
+
+normalize_optional_empty_directory() {
+  local path=$1
+  local mode=$2
+  [[ ! -L "$path" ]] || {
+    printf 'refusing symbolic-link inherited root filesystem entry: %s\n' "$path" >&2
+    exit 1
+  }
+  [[ -e "$path" ]] || return 0
+  [[ -d "$path" ]] || {
+    printf 'refusing wrong-type inherited root filesystem entry: %s\n' "$path" >&2
+    exit 1
+  }
+  require_expected_children "$path"
+  chown "$rootfs_uid:$rootfs_gid" -- "$path"
+  chmod "$mode" -- "$path"
+  require_directory "$path" "$mode"
+}
+
+normalize_optional_empty_file() {
+  local path=$1
+  local mode=$2
+  [[ ! -L "$path" ]] || {
+    printf 'refusing symbolic-link inherited root filesystem entry: %s\n' "$path" >&2
+    exit 1
+  }
+  [[ -e "$path" ]] || return 0
+  [[ -f "$path" && $(stat -c '%s' -- "$path") == 0 ]] || {
+    printf 'refusing nonempty or wrong-type inherited root filesystem entry: %s\n' "$path" >&2
+    exit 1
+  }
+  chown "$rootfs_uid:$rootfs_gid" -- "$path"
+  chmod "$mode" -- "$path"
 }
 
 require_event_placeholder() {
@@ -86,6 +159,7 @@ require_event_placeholder() {
 }
 
 require_layout() {
+  require_rootfs
   for inherited in proc dev dev/pts; do
     require_directory "$rootfs/$inherited" 700
   done
@@ -120,13 +194,21 @@ case "$action" in
       rootfs_tree_sha256
       exit 0
     fi
-    for target in proc dev dev/pts inputs runtime workspace; do
-      prepare_directory "$rootfs/$target" 700
-    done
+    chown "$rootfs_uid:$rootfs_gid" -- "$rootfs"
+    chmod 0700 -- "$rootfs"
+    prepare_directory "$rootfs/proc" 700
+    prepare_directory "$rootfs/dev" 700 console pts shm
+    prepare_directory "$rootfs/dev/pts" 700
+    normalize_optional_empty_directory "$rootfs/dev/shm" 700
+    normalize_optional_empty_file "$rootfs/dev/console" 700
+    prepare_directory "$rootfs/inputs" 700
+    prepare_directory "$rootfs/runtime" 700
+    prepare_directory "$rootfs/workspace" 700
     [[ ! -L "$rootfs/tmp" && -d "$rootfs/tmp" ]] || {
       printf 'root filesystem /tmp is not a non-symbolic-link directory\n' >&2
       exit 1
     }
+    require_expected_children "$rootfs/tmp" provenance-probe-events.ndjson
     chown "$rootfs_uid:$rootfs_gid" -- "$rootfs/tmp"
     chmod 1700 -- "$rootfs/tmp"
     event_target=$rootfs/tmp/provenance-probe-events.ndjson
@@ -137,6 +219,12 @@ case "$action" in
     if [[ ! -e "$event_target" ]]; then
       install --mode=0600 --owner="$rootfs_uid" --group="$rootfs_gid" /dev/null "$event_target"
     fi
+    [[ $(stat -c '%s' -- "$event_target") == 0 ]] || {
+      printf 'refusing nonempty structured-event mount target: %s\n' "$event_target" >&2
+      exit 1
+    }
+    chown "$rootfs_uid:$rootfs_gid" -- "$event_target"
+    chmod 0600 -- "$event_target"
     require_layout
     before=$(rootfs_tree_sha256)
     mount --bind -- "$rootfs" "$rootfs"

@@ -83,6 +83,15 @@ func TestValidateRootFSRejectsUnsafeMountTargets(t *testing.T) {
 		eventFile   *execution.StructuredEventFile
 		wantMessage string
 	}{
+		"unsafe root mode": {
+			prepare: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.Chmod(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMessage: "root filesystem mode",
+		},
 		"missing fixed destination": {
 			prepare: func(t *testing.T, root string) {
 				t.Helper()
@@ -225,6 +234,9 @@ func TestPrepareAndExecuteFailClosedWhenRootFSValidationChanges(t *testing.T) {
 func preparedRootFSFixture(t *testing.T) string {
 	t.Helper()
 	rootFS := t.TempDir()
+	if err := os.Chmod(rootFS, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, target := range []string{"proc", "dev", "dev/pts"} {
 		if err := os.MkdirAll(filepath.Join(rootFS, filepath.FromSlash(target)), 0o700); err != nil {
 			t.Fatal(err)
