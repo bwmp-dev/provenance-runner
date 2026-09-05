@@ -49,7 +49,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out runner candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -68,7 +68,7 @@ jobs:
           cache: true
 
       - name: Check out pinned probe and fixture source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: bwmp-dev/provenance
           ref: c4bf6bc9ddd0be3221e897e0ee9e2d409d206dec
