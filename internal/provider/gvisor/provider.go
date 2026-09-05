@@ -62,8 +62,9 @@ type Config struct {
 }
 
 type Provider struct {
-	config Config
-	runner commandRunner
+	config               Config
+	runner               commandRunner
+	validateRootFSLayout func(string, []execution.ReadOnlyMount, *execution.StructuredEventFile) error
 }
 
 var _ execution.EnvironmentProvider = (*Provider)(nil)
@@ -118,7 +119,12 @@ func New(config Config) (*Provider, error) {
 		}
 		config.cgroupIdentity = "systemd-run:" + systemdRunIdentity + "/launcher:" + launcherIdentity
 	}
-	return newProvider(config, execCommandRunner{})
+	provider, err := newProvider(config, execCommandRunner{})
+	if err != nil {
+		return nil, err
+	}
+	provider.validateRootFSLayout = validateImmutableRootFS
+	return provider, nil
 }
 
 func newProvider(config Config, runner commandRunner) (*Provider, error) {
@@ -578,6 +584,11 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if e.provider.validateRootFSLayout != nil {
+		if err := e.provider.validateRootFSLayout(e.provider.config.RootFS, e.mounts, e.structuredEventFile); err != nil {
+			return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_rootfs_invalid", err)
+		}
+	}
 	collector, err := evidence.NewCollector(e.evidenceConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create gVisor evidence collector: %w", err)
@@ -597,6 +608,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		evidence:              collector,
 		structuredEventFile:   e.structuredEventFile,
 		structuredEventPrefix: e.structuredEventPrefix,
+		rootFSMounts:          append([]execution.ReadOnlyMount(nil), e.mounts...),
 		cgroupLimits: cgroupLimits{
 			memoryBytes: e.config.MemoryBytes,
 			cpuMillis:   e.config.CPUMillis,
@@ -646,6 +658,7 @@ type preparedEnvironment struct {
 	structuredEventFile        *execution.StructuredEventFile
 	structuredEventPrefix      string
 	structuredEventErr         string
+	rootFSMounts               []execution.ReadOnlyMount
 	cgroupLimits               cgroupLimits
 	eventChannelMaximumBytes   int64
 	eventChannelBufferedBytes  int64
@@ -664,6 +677,11 @@ func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserve
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
+	if e.provider.validateRootFSLayout != nil {
+		if err := e.provider.validateRootFSLayout(e.provider.config.RootFS, e.rootFSMounts, e.structuredEventFile); err != nil {
+			return execution.ExecutionOutcome{}, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_rootfs_invalid", err)
+		}
+	}
 	if e.structuredEventChannel != nil {
 		if err := e.structuredEventChannel.start(); err != nil {
 			e.collectStructuredEvents()

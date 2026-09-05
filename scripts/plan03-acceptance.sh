@@ -178,6 +178,36 @@ wait_for_incomplete_cgroup_teardown() {
   return 1
 }
 
+find_workspace_for_job() {
+  local expected_job_id=$1 workspace marker actual_job_id
+  for workspace in "$PLAN03_WORK_ROOT"/workspaces/provenance-*; do
+    [[ -e "$workspace" || -L "$workspace" ]] || continue
+    if [[ -L "$workspace" || ! -d "$workspace" ]]; then
+      printf 'unsafe workspace candidate: %s\n' "$workspace" >&2
+      return 1
+    fi
+    marker=$workspace/.provenance-workspace.json
+    [[ -e "$marker" || -L "$marker" ]] || continue
+    if [[ -L "$marker" || ! -f "$marker" ]]; then
+      printf 'unsafe workspace identity marker: %s\n' "$marker" >&2
+      return 1
+    fi
+    if ! actual_job_id=$(jq -er 'select((.jobId|type)=="string") | .jobId' "$marker" 2>/dev/null); then
+      # The runner may atomically remove the workspace between the existence
+      # check and read. Suppress only that exact transient absence.
+      [[ ! -e "$marker" && ! -L "$marker" ]] && continue
+      printf 'invalid workspace identity marker: %s\n' "$marker" >&2
+      return 1
+    fi
+    [[ -d "$workspace" && ! -L "$workspace" ]] || continue
+    if [[ "$actual_job_id" == "$expected_job_id" ]]; then
+      printf '%s\n' "$workspace"
+      return 0
+    fi
+  done
+  return 0
+}
+
 run_contract_tests() {
   for command_name in awk grep head jq mktemp seq; do
     command -v "$command_name" >/dev/null || {
@@ -194,6 +224,16 @@ run_contract_tests() {
   good_disk_result="$test_root/good-disk-result.json"
   good_disk_log="$test_root/good-disk.log"
   terminal_result="$test_root/terminal-result.json"
+
+  local PLAN03_WORK_ROOT="$test_root/work"
+  mkdir -p "$PLAN03_WORK_ROOT/workspaces/.extract-transient" "$PLAN03_WORK_ROOT/workspaces/provenance-job-contract"
+  jq -n '{jobId:"plan03-contract-workspace"}' > "$PLAN03_WORK_ROOT/workspaces/provenance-job-contract/.provenance-workspace.json"
+  [[ $(find_workspace_for_job plan03-contract-workspace) == "$PLAN03_WORK_ROOT/workspaces/provenance-job-contract" ]]
+  jq -n '{jobId:1}' > "$PLAN03_WORK_ROOT/workspaces/provenance-job-contract/.provenance-workspace.json"
+  if find_workspace_for_job plan03-contract-workspace >/dev/null 2>&1; then
+    printf 'workspace scan accepted a malformed identity marker\n' >&2
+    return 1
+  fi
 
   jq -n '{classification:"passed",phase:"completed",failure:null,execution:{exitCode:0},completeLog:{state:"complete",truncated:false},cleanup:{succeeded:true},structuredEvents:[
     {sequence:1,kind:"METADATA_INSPECTION",payload:{}},
@@ -424,7 +464,7 @@ for name in "${required_environment[@]}"; do
   fi
 done
 
-for command_name in find git gzip jq sha256sum stat; do
+for command_name in find git gzip jq sha256sum stat tar; do
   command -v "$command_name" >/dev/null || {
     printf '%s is required\n' "$command_name" >&2
     exit 2
@@ -451,6 +491,12 @@ fi
 for path in "$PLAN03_ASSET_ROOT" "$PLAN03_TOOLKIT_SOURCE_ROOT" "$PROVENANCE_ROOTFS"; do
   [[ -d "$path" ]] || { printf '%s is not a directory\n' "$path" >&2; exit 2; }
 done
+rootfs_tree_sha_before=$(tar --sort=name --format=gnu --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$PROVENANCE_ROOTFS" . | sha256sum)
+rootfs_tree_sha_before=${rootfs_tree_sha_before%% *}
+[[ "$PROVENANCE_ROOTFS_IDENTITY" == "sha256:$rootfs_tree_sha_before" ]] || {
+  printf 'root filesystem identity %s does not match normalized tree sha256:%s\n' "$PROVENANCE_ROOTFS_IDENTITY" "$rootfs_tree_sha_before" >&2
+  exit 2
+}
 
 pid_fixture_source="$PLAN03_TOOLKIT_SOURCE_ROOT/packages/test-fixtures/hostile/fork-pid-bomb/src/main/java/dev/provenance/fixtures/hostile/ForkPidBombPlugin.java"
 [[ $(git -c safe.directory="$PLAN03_TOOLKIT_SOURCE_ROOT" -C "$PLAN03_TOOLKIT_SOURCE_ROOT" rev-parse HEAD) == "$PLAN03_TOOLKIT_SHA" ]] || {
@@ -958,7 +1004,9 @@ run_paper_restart_recovery() {
   local bundle="" workspace="" container_id=""
   for _ in {1..1200}; do
     bundle=$(find "$PLAN03_WORK_ROOT/bundles" -mindepth 2 -maxdepth 2 -type f -name .provenance-run-attempted -printf '%h\n' -quit 2>/dev/null || true)
-    workspace=$(find "$PLAN03_WORK_ROOT/workspaces" -mindepth 2 -maxdepth 2 -type f -name .provenance-workspace.json -exec sh -c 'jq -e '\''.jobId=="plan03-restart-abandoned-paper"'\'' "$1" >/dev/null && dirname -- "$1"' sh {} \; | head -n 1)
+    if ! workspace=$(find_workspace_for_job plan03-restart-abandoned-paper); then
+      return 1
+    fi
     if [[ -n "$bundle" && -n "$workspace" ]]; then
       container_id=$(jq -r '.containerId' "$bundle/.provenance-gvisor.json")
       if "$PROVENANCE_RUNSC_PATH" --root="$PROVENANCE_GVISOR_STATE_ROOT" state "$container_id" > "$directory/pre-crash-runsc-state.json" 2>/dev/null; then
@@ -1108,6 +1156,19 @@ while IFS=$'\t' read -r fixture sha size plugin timeout output_limit classificat
 done < "$fixture_manifest"
 
 jq -es "$pid_repetitions_contract" "$PLAN03_EVIDENCE_ROOT/summary.ndjson" >/dev/null
+
+rootfs_tree_sha_after=$(tar --sort=name --format=gnu --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$PROVENANCE_ROOTFS" . | sha256sum)
+rootfs_tree_sha_after=${rootfs_tree_sha_after%% *}
+[[ "$rootfs_tree_sha_after" == "$rootfs_tree_sha_before" ]] || {
+  printf 'root filesystem identity changed across Plan 03 execution: before=%s after=%s\n' "$rootfs_tree_sha_before" "$rootfs_tree_sha_after" >&2
+  exit 1
+}
+jq -n \
+  --arg before "$rootfs_tree_sha_before" \
+  --arg after "$rootfs_tree_sha_after" \
+  --arg identity "$PROVENANCE_ROOTFS_IDENTITY" \
+  '{identity:$identity,beforeSHA256:$before,afterSHA256:$after,unchanged:($before==$after)}' \
+  > "$PLAN03_EVIDENCE_ROOT/rootfs-identity.json"
 
 (
   cd "$PLAN03_EVIDENCE_ROOT"
