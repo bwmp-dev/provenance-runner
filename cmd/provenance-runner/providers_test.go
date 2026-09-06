@@ -101,8 +101,14 @@ func TestOperatorCatalogsRejectsPriorOrMismatchedProbeIdentity(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			values, _ := paperMatrixEnvironment(t)
 			mutate(values)
-			if _, err := operatorCatalogs(func(name string) string { return values[name] }); err == nil {
+			_, err := operatorCatalogs(func(name string) string { return values[name] })
+			if err == nil {
 				t.Fatal("accepted a prior or mismatched trusted probe identity")
+			}
+			for _, expected := range []string{"must be probe 0.1.0", paper.AlphaProbeSourceCommit, paper.AlphaProbeSHA256, "size 478853"} {
+				if !strings.Contains(err.Error(), expected) {
+					t.Errorf("operatorCatalogs() error = %q, want probe identity component %q", err, expected)
+				}
 			}
 		})
 	}
