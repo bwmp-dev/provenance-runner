@@ -20,6 +20,17 @@ Hosted connect mode consumes a strict config and maintains a private atomic one-
 go run ./cmd/provenance-runner connect connect.json
 ```
 
+The default connection advertises IFC-015 explicit complete-log object identity;
+deploy an accepted IFC-015 platform producer before enabling this runner. For an
+operator-directed rollback to an alpha.9 gateway, restart with
+`provenance-runner connect connect.json --disable-object-upload-identity`.
+This process-wide flag omits feature 5 on every connection/reconnection and uses
+the existing legacy URI-path identity validation. A populated `object_key` from
+a gateway is rejected when the feature was not advertised; it is never silently
+trusted. Remove the flag and restart after restoring the accepted producer.
+The flag changes neither the connect JSON schema nor credentials, and does not
+automatically retry malformed negotiated uploads using legacy interpretation.
+
 It advertises the alpha.3 durable-acknowledgement feature, replays unacknowledged events and heartbeats across reconnects or restarts, and does not enter the sandbox until the gateway commits `JobStarted`. The local job's `provider` selects one of two implementations:
 
 - `development-process` executes directly on the host after the job explicitly sets `"acknowledgeUnsandboxed": true`. It exists only for runner-core development and is not a security boundary.

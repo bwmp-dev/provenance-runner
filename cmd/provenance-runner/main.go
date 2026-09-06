@@ -37,7 +37,10 @@ func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(arguments) == 2 && arguments[0] == "connect" {
-		return runConnect(ctx, arguments[1], stderr)
+		return runConnect(ctx, arguments[1], false, stderr)
+	}
+	if len(arguments) == 3 && arguments[0] == "connect" && arguments[2] == "--disable-object-upload-identity" {
+		return runConnect(ctx, arguments[1], true, stderr)
 	}
 	if len(arguments) == 2 && arguments[0] == "enroll" {
 		return runEnroll(ctx, arguments[1], stderr)
@@ -100,7 +103,7 @@ func runExecuteWithCompleteLogContext(ctx context.Context, jobPath, completeLogP
 	return writeResultAndCompleteLog(stdout, stderr, executor.Execute(ctx, job), completeLogPath)
 }
 
-func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {
+func runConnect(ctx context.Context, configPath string, disableObjectUploadIdentity bool, stderr io.Writer) int {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		fmt.Fprintln(stderr, "connect runner: this alpha advertises and requires linux/amd64")
 		return 1
@@ -110,6 +113,7 @@ func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "connect runner: %v\n", err)
 		return 1
 	}
+	config.DisableObjectUploadIdentity = disableObjectUploadIdentity
 	registry, err := registryForProvider(ctx, "paper", os.Getenv)
 	if err != nil {
 		fmt.Fprintf(stderr, "connect runner: initialize Paper provider: %v\n", err)
@@ -145,7 +149,7 @@ func runConnect(ctx context.Context, configPath string, stderr io.Writer) int {
 func writeUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "usage: provenance-runner execute <job.json|->")
 	fmt.Fprintln(writer, "       provenance-runner execute <job.json|-> --complete-log <new-path>")
-	fmt.Fprintln(writer, "       provenance-runner connect <connect.json>")
+	fmt.Fprintln(writer, "       provenance-runner connect <connect.json> [--disable-object-upload-identity]")
 	fmt.Fprintln(writer, "       provenance-runner enroll <enrollment.json>")
 }
 
