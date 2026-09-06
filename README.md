@@ -86,7 +86,7 @@ go run ./cmd/provenance-paper-runtime \
   -output paper-1.20.6-151-prepared-runtime.tar.gz
 ```
 
-The alpha Paper provider accepts only probe `0.1.0` built from Provenance commit `98d5f07f173a9e3f1b365add24b81c934d7e3c61`: SHA-256 `abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43`, 478837 bytes. The JAR is reproducible from that commit, but the current public Provenance release does not publish probe bytes, so the operator must host those exact bytes and supply their HTTPS URI.
+The alpha Paper provider accepts only probe `0.1.0` built from Provenance commit `f82dcbf8244354059731ba533f73909ed5528bbd`: SHA-256 `040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868`, 478853 bytes. This probe compiles against the Paper 1.20.6 API floor and was exercised with identical bytes across the three catalog environments. The source/hash pin alone does not establish that a download has been published. Rebuild those exact bytes from the pinned source or verify an available release asset, then supply their HTTPS URI; digest and size remain mandatory. The previous probe identity is rejected, so coordinate the runner update with the operator probe pin. This does not renew the full Plan 03 or hosted Plan 05/06 exit-gate acceptance.
 
 Optional limits are `PROVENANCE_MAX_ARTIFACT_BYTES`, `PROVENANCE_MAX_DEPENDENCY_BYTES`, `PROVENANCE_MAX_PREPARATION_BYTES`, and `PROVENANCE_MAX_CACHE_BYTES`. `PROVENANCE_GVISOR_PLATFORM` may be `systrap` (the default) or `kvm`. Implementation hard limits still apply.
 

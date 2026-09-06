@@ -85,6 +85,35 @@ func TestOperatorCatalogsConfiguresExactPreparedRuntimeMatrix(t *testing.T) {
 	}
 }
 
+func TestOperatorCatalogsRejectsPriorOrMismatchedProbeIdentity(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]string){
+		"previous probe": func(values map[string]string) {
+			values["PROVENANCE_PAPER_PROBE_SHA256"] = "abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43"
+			values["PROVENANCE_PAPER_PROBE_SIZE_BYTES"] = "478837"
+		},
+		"previous size with current digest": func(values map[string]string) {
+			values["PROVENANCE_PAPER_PROBE_SIZE_BYTES"] = "478837"
+		},
+		"previous digest with current size": func(values map[string]string) {
+			values["PROVENANCE_PAPER_PROBE_SHA256"] = "abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			values, _ := paperMatrixEnvironment(t)
+			mutate(values)
+			_, err := operatorCatalogs(func(name string) string { return values[name] })
+			if err == nil {
+				t.Fatal("accepted a prior or mismatched trusted probe identity")
+			}
+			for _, expected := range []string{"must be probe 0.1.0", paper.AlphaProbeSourceCommit, paper.AlphaProbeSHA256, "size 478853"} {
+				if !strings.Contains(err.Error(), expected) {
+					t.Errorf("operatorCatalogs() error = %q, want probe identity component %q", err, expected)
+				}
+			}
+		})
+	}
+}
+
 func TestOperatorCatalogsRejectsInvalidOrAmbiguousRuntimeMatrices(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]string, []preparedRuntimeConfiguration){
 		"missing environment": func(values map[string]string, runtimes []preparedRuntimeConfiguration) {
@@ -402,8 +431,8 @@ func paperEnvironment(t *testing.T) map[string]string {
 	}
 	values := map[string]string{
 		"PROVENANCE_PAPER_PROBE_URI":                           "https://artifacts.example.com/paper-probe.jar",
-		"PROVENANCE_PAPER_PROBE_SHA256":                        "abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43",
-		"PROVENANCE_PAPER_PROBE_SIZE_BYTES":                    "478837",
+		"PROVENANCE_PAPER_PROBE_SHA256":                        "040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868",
+		"PROVENANCE_PAPER_PROBE_SIZE_BYTES":                    "478853",
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_URI":                "https://artifacts.example.com/prepared-runtime.tar.gz",
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256":             strings.Repeat("b", 64),
 		"PROVENANCE_PAPER_PREPARED_RUNTIME_SIZE_BYTES":         "2048",
