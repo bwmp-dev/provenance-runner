@@ -1348,7 +1348,7 @@ func TestRecoveredTerminalEventIsReplayedAndNeverExecutesAgain(t *testing.T) {
 	}
 }
 
-func TestWorkloadFailureIsACompletedFailedResult(t *testing.T) {
+func TestWorkloadFailurePreservesFailureDetail(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	client := newClient(validConfig(), nil)
 	client.now = func() time.Time { return now }
@@ -1372,7 +1372,7 @@ func TestWorkloadFailureIsACompletedFailedResult(t *testing.T) {
 	if err := session.queueResult(result); err != nil {
 		t.Fatal(err)
 	}
-	if len(sent) != 1 || sent[0].GetCompleted().GetResult().GetOutcome() != runnerv1.ResultOutcome_RESULT_OUTCOME_FAILED || sent[0].GetFailed() != nil {
+	if len(sent) != 1 || sent[0].GetCompleted() != nil || sent[0].GetFailed().GetFailure().GetCode() != "assertion_failed" || sent[0].GetFailed().GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_PLUGIN || sent[0].GetFailed().GetFailure().GetRetryable() {
 		t.Fatalf("workload failure result = %#v", sent)
 	}
 }

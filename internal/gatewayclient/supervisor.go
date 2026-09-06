@@ -1124,7 +1124,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 			return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
 		}
 	}
-	if result.Passed() || result.Classification == execution.ClassificationWorkloadFailure {
+	if result.Passed() {
 		outcome := runnerv1.ResultOutcome_RESULT_OUTCOME_FAILED
 		if result.Passed() {
 			outcome = runnerv1.ResultOutcome_RESULT_OUTCOME_PASSED
@@ -1503,6 +1503,14 @@ func resultFailure(result execution.Result) *runnerv1.FailureDetail {
 	if result.Failure != nil {
 		detail.Code = result.Failure.Code
 		detail.Summary = boundedSummary(result.Failure.Message)
+		switch result.Failure.Stage {
+		case execution.FailureStagePreparation:
+			detail.Stage = runnerv1.FailureStage_FAILURE_STAGE_PREPARATION
+		case execution.FailureStageStartup:
+			detail.Stage = runnerv1.FailureStage_FAILURE_STAGE_STARTUP
+		case execution.FailureStageExecution:
+			detail.Stage = runnerv1.FailureStage_FAILURE_STAGE_EXECUTION
+		}
 	}
 	switch result.Classification {
 	case execution.ClassificationInvalidJob:
