@@ -7,9 +7,9 @@ const (
 	Paper1214EnvironmentID = "paper-1.21.4-232-linux-amd64-temurin-21.0.8+9"
 	AlphaEnvironmentID     = "paper-1.21.8-60-linux-amd64-temurin-21.0.8+9"
 	AlphaProbeVersion      = "0.1.0"
-	AlphaProbeSourceCommit = "98d5f07f173a9e3f1b365add24b81c934d7e3c61"
-	AlphaProbeSHA256       = "abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43"
-	AlphaProbeSizeBytes    = int64(478_837)
+	AlphaProbeSourceCommit = "f82dcbf8244354059731ba533f73909ed5528bbd"
+	AlphaProbeSHA256       = "040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868"
+	AlphaProbeSizeBytes    = int64(478_853)
 	DownloadUserAgent      = "Provenance-Runner/0.1.0 (https://github.com/bwmp-dev/provenance-runner)"
 )
 

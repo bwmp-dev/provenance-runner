@@ -403,8 +403,8 @@ run_contract_tests() {
   fi
 
   [[ $(awk -F '\t' '$1=="fork-pid-bomb" && $2=="b4d936c12370892047839396786b6e65b1b5ccf65c6ddae70e283b43fe3e8e16" && $3==7593 {count++} END {print count+0}' "$fixture_manifest") -eq 1 ]]
-  grep -Fq 'PLAN03_TOOLKIT_SHA: c4bf6bc9ddd0be3221e897e0ee9e2d409d206dec' "$repository_root/.github/workflows/plan03-acceptance.yml"
-  [[ $(grep -Fc 'ref: c4bf6bc9ddd0be3221e897e0ee9e2d409d206dec' "$repository_root/.github/workflows/plan03-acceptance.yml") -eq 1 ]]
+  grep -Fq 'PLAN03_TOOLKIT_SHA: f82dcbf8244354059731ba533f73909ed5528bbd' "$repository_root/.github/workflows/plan03-acceptance.yml"
+  [[ $(grep -Fc 'ref: f82dcbf8244354059731ba533f73909ed5528bbd' "$repository_root/.github/workflows/plan03-acceptance.yml") -eq 1 ]]
   [[ $(fixture_repetitions fork-pid-bomb) == 3 ]]
   [[ $(fixture_case_identity fork-pid-bomb 1) == fork-pid-bomb-run-1 ]]
   [[ $(fixture_case_identity fork-pid-bomb 2) == fork-pid-bomb-run-2 ]]
@@ -536,7 +536,7 @@ if jq -e "$pid_result_contract" >/dev/null 2>&1 <<< '{"classification":"workload
 fi
 paper_sha=8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e
 java_sha=968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03
-probe_sha=abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43
+probe_sha=040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868
 runtime_sha=ba1434cfc3af6fe145660e82f5b07ce9cb46cbc76d23c68a767a3717e7e5ca57
 
 seed_cache() {
@@ -560,7 +560,7 @@ seed_cache() {
 
 seed_cache "$PLAN03_ASSET_ROOT/paper-1.21.8-60.jar" "$paper_sha" 52811717
 seed_cache "$PLAN03_ASSET_ROOT/OpenJDK21U-jre_x64_linux_hotspot_21.0.8_9.tar.gz" "$java_sha" 51942501
-seed_cache "$PLAN03_ASSET_ROOT/paper-probe-0.1.0.jar" "$probe_sha" 478837
+seed_cache "$PLAN03_ASSET_ROOT/paper-probe-0.1.0.jar" "$probe_sha" 478853
 seed_cache "$PLAN03_ASSET_ROOT/paper-prepared-runtime.tar.gz" "$runtime_sha" 153958528
 
 generate_test_plan() {
@@ -630,7 +630,7 @@ done < "$fixture_manifest"
 
 export PROVENANCE_PAPER_PROBE_URI=https://artifacts.example.com/paper-probe.jar
 export PROVENANCE_PAPER_PROBE_SHA256=$probe_sha
-export PROVENANCE_PAPER_PROBE_SIZE_BYTES=478837
+export PROVENANCE_PAPER_PROBE_SIZE_BYTES=478853
 export PROVENANCE_PAPER_PREPARED_RUNTIME_URI=https://artifacts.example.com/paper-prepared-runtime.tar.gz
 export PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256=$runtime_sha
 export PROVENANCE_PAPER_PREPARED_RUNTIME_SIZE_BYTES=153958528
