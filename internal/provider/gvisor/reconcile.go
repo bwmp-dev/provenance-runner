@@ -64,6 +64,10 @@ func (p *Provider) Reconcile(ctx context.Context) error {
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("delete abandoned container %s: %w", metadata.ContainerID, result.Err))
 			continue
 		}
+		if err := p.confirmContainerTeardown(ctx, metadata.ContainerID); err != nil {
+			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("confirm abandoned container %s deletion: %w", metadata.ContainerID, err))
+			continue
+		}
 		if err := removeOwnedBundle(p.config.BundleRoot, bundle); err != nil {
 			reconciliationErrors = append(reconciliationErrors, err)
 		}

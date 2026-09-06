@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReconcileRemovesNeverAttemptedOwnedBundleWithoutRuntimeDelete(t *testing.T) {
@@ -88,6 +89,27 @@ func TestReconcileRetainsBundleWhenRuntimeDeleteFails(t *testing.T) {
 	}
 	if _, err := os.Stat(owned.bundle); err != nil {
 		t.Errorf("bundle removed despite failed delete: %v", err)
+	}
+}
+
+func TestReconcileRetainsBundleWhileExactRuntimeResidueRemains(t *testing.T) {
+	provider, _, _ := testProvider(t)
+	owned := prepareEnvironment(t, provider, validConfiguration(), 1024)
+	if err := owned.markRunAttempted(); err != nil {
+		t.Fatal(err)
+	}
+	residue := filepath.Join(provider.config.StateRoot, "runsc-"+owned.containerID+".sock")
+	if err := os.WriteFile(residue, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	err := provider.Reconcile(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Reconcile() error = %v, want deadline exceeded", err)
+	}
+	if _, err := os.Stat(owned.bundle); err != nil {
+		t.Fatalf("bundle removed while runtime residue remained: %v", err)
 	}
 }
 

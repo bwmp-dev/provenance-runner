@@ -12,20 +12,31 @@ request records the exact candidate SHA, workflow run URL, and artifact name.
 
 ## Trigger and accountability policy
 
-Normal CI and the short real-gVisor smoke run on every pull request. The full
-retained-evidence gate runs automatically when the workflow, harness, fixture
-inventory, any command, or any module-internal package changes, except for the
-four explicitly remote-only packages `internal/buildinfo`,
-`internal/enrollment`, `internal/gatewayclient`, and
-`internal/runneridentity`. The broad `cmd/**` and `internal/**` patterns make a
-new command or internal package fail safe into the full gate unless it is
-deliberately reviewed and excluded. An unfiltered Go test fixes that exclusion
-set, rejects imports from covered internal packages into those packages, and
-confines their command-level use to the enrollment and connection functions.
+Normal CI runs on every push to every branch in the upstream repository. Neither
+normal CI nor the full gate subscribes to `pull_request` or
+`pull_request_target`, so a public fork event cannot schedule untrusted code on
+the shared root host. Before accepting a fork contribution, a maintainer must
+inspect it, reproduce its exact candidate commit on a trusted upstream branch,
+and use the push checks attached to that trusted branch SHA. A fork head or merge
+ref must never be executed directly on the self-hosted pool.
 
-`go.mod` and `go.sum` changes do not run the full gate for every pull-request
-revision. The integrator responsible for merging the pull request must classify
-the frozen dependency diff. A Go toolchain change, or a direct or transitive
+The full retained-evidence gate is `workflow_dispatch`-only. The integrator
+manually dispatches it against the frozen trusted upstream head whenever the
+workflow, harness, fixture inventory, command, local-execution package, or a
+sandbox-relevant module dependency changes. Normal CI remains the automatic
+exact-head check for every trusted upstream branch and for `main`.
+
+The short privileged gVisor smoke and the full Paper/gVisor gate share one
+repository-scoped, non-cancelling concurrency group. They cannot mutate shared
+kernel, cgroup, mount, or gVisor state simultaneously, while the ordinary test
+job remains unconstrained and can use another self-hosted runner in parallel.
+The dedicated-host systemd-user smoke has a separate repository-scoped,
+non-cancelling queue so two runs cannot mutate the remote smoke boundary at the
+same time without blocking the local privileged-gVisor queue.
+
+`go.mod` and `go.sum` changes do not automatically run the full gate. The
+integrator responsible for merging the pull request must classify the frozen
+dependency diff. A Go toolchain change, or a direct or transitive
 dependency change capable of altering artifact handling, evidence or complete
 logs, local job decoding, Paper adaptation, process execution, workspace or
 instance-lock behavior, gVisor OCI construction, structured event transport,
@@ -33,14 +44,12 @@ resource controls, cleanup, or reconciliation, requires a manual full-gate run
 before merge. This includes relevant changes to `golang.org/x/sys`, the
 Provenance toolkit protocol dependency, and Protobuf runtime dependencies.
 
-Dispatch the workflow against the frozen pull-request head branch and verify
-that the resulting run's `headSha` equals the intended head SHA. Record that
-SHA, the run URL, and the `plan03-exit-gate-<SHA>` artifact name in the pull
-request acceptance evidence. If the head moves, the run is stale and must be
-repeated. Every merge that changes `go.mod` or `go.sum` also triggers one
-post-main backstop run; that run must be green before the merged dependency
-state is treated as integrated. The post-main backstop does not replace the
-pre-merge manual run for a sandbox-relevant dependency change.
+Dispatch the workflow against the frozen trusted upstream head branch and verify
+that the resulting run's `headSha` equals the intended head SHA. Record that SHA,
+the run URL, and the `plan03-exit-gate-<SHA>` artifact name in the pull request
+acceptance evidence. If the head moves, the run is stale and must be repeated. A
+sandbox-relevant `go.mod` or `go.sum` change cannot merge on normal CI alone: its
+manual exact-head gate is still required before merge.
 
 ## Immutable inputs
 
