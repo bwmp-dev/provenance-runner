@@ -67,9 +67,9 @@ manual exact-head gate is still required before merge.
 - Temurin JRE 21.0.8+9: 51,942,501 bytes, SHA-256
   `968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03`.
 - Probe and all fixtures: source commit
-  `c4bf6bc9ddd0be3221e897e0ee9e2d409d206dec`. The probe is 478,837 bytes
+  `f82dcbf8244354059731ba533f73909ed5528bbd`. The probe is 478,853 bytes
   with SHA-256
-  `abbccf45831ef998466542b19169731b9ec4f8a6c3525fce4d7a2c0b5f4b4b43`.
+  `040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868`.
 - Prepared Paper runtime: 153,958,528 compressed bytes and 163,396,442
   expanded bytes, SHA-256
   `ba1434cfc3af6fe145660e82f5b07ce9cb46cbc76d23c68a767a3717e7e5ca57`.
