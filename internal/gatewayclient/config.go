@@ -64,10 +64,13 @@ type Config struct {
 	ExpectedScope   ExpectedScope `json:"expectedScope"`
 	Resources       Resources     `json:"resources"`
 
-	RunnerVersion   string `json:"-"`
-	credential      []byte
-	journalFile     string
-	credentialStore durableCredentialStore
+	RunnerVersion string `json:"-"`
+	// DisableObjectUploadIdentity is an operator rollback control, not part of
+	// the released connect document. Restart the process to change it.
+	DisableObjectUploadIdentity bool `json:"-"`
+	credential                  []byte
+	journalFile                 string
+	credentialStore             durableCredentialStore
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {

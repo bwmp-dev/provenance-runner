@@ -510,10 +510,10 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	if c.config.credentialStore != nil {
 		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_CREDENTIAL_ROTATION)
 	}
-	features = append(features,
-		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1,
-		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY,
-	)
+	features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1)
+	if !c.config.DisableObjectUploadIdentity {
+		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY)
+	}
 	// An active journal without a trusted evidence store is an upgrade or
 	// fail-closed recovery case. Do not negotiate an upload capability that this
 	// process cannot safely consume; it will report the legacy bounded terminal

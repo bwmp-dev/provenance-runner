@@ -64,6 +64,24 @@ func TestRunPrintsUsageForUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestConnectUploadIdentityRollbackFlagParsing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-connect.json")
+	for _, tc := range []struct {
+		arguments []string
+		want      int
+	}{
+		{[]string{"connect", missing}, 1},
+		{[]string{"connect", missing, "--disable-object-upload-identity"}, 1},
+		{[]string{"connect", missing, "--disable-object-upload-identit"}, 2},
+		{[]string{"connect", missing, "--disable-object-upload-identity", "extra"}, 2},
+	} {
+		var stdout, stderr bytes.Buffer
+		if got := run(tc.arguments, strings.NewReader(""), &stdout, &stderr); got != tc.want {
+			t.Fatalf("arguments %v: got %d want %d: %s", tc.arguments, got, tc.want, stderr.String())
+		}
+	}
+}
+
 func TestRunFailsPaperInitializationBeforeExecutionWhenTrustedPinIsMissing(t *testing.T) {
 	t.Setenv("PROVENANCE_PAPER_PROBE_URI", "")
 	job := `{"schemaVersion":"provenance.local-job/v1alpha1","id":"paper-job","provider":"paper","environment":{}}`
