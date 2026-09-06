@@ -1,0 +1,8 @@
+{
+  "lease": {"leaseId":"10000000-0000-0000-0000-000000000001","jobId":"20000000-0000-0000-0000-000000000001","executionId":"20000000-0000-0000-0000-000000000001","expiresAt":"2026-09-06T00:08:00Z"},
+  "attempt": {"attemptId":"30000000-0000-0000-0000-000000000001","attemptNumber":1,"releaseCandidateId":"40000000-0000-0000-0000-000000000001","matrixEntryId":"50000000-0000-0000-0000-000000000001"},
+  "failure": {"category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","code":"on_enable_failure","summary":"probe observed a plugin lifecycle exception"},
+  "usage": {"cpuTime":"1s","peakMemoryBytes":"2048","diskReadBytes":"10","diskWriteBytes":"20"},
+  "completeLog": {"objectKey":"staging/execution/attempt/log.gz","digest":{"algorithm":"DIGEST_ALGORITHM_SHA256","value":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="},"compressedSizeBytes":"123","contentType":"application/gzip"},
+  "failedAt":"2026-09-06T00:00:02Z"
+}

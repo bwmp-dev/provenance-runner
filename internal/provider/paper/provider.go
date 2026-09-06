@@ -700,13 +700,30 @@ func (p *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 	}
 	if lifecycleErr != nil {
 		code := "paper_lifecycle_failed"
+		var stage execution.FailureStage
 		var classified *probeLifecycleFailure
 		if errors.As(lifecycleErr, &classified) {
 			code = classified.code
+			stage = validatedFailureStage(code)
 		}
-		return output, execution.NewClassifiedError(execution.ClassificationWorkloadFailure, code, lifecycleErr)
+		return output, execution.NewStagedClassifiedError(execution.ClassificationWorkloadFailure, code, stage, lifecycleErr)
 	}
 	return output, nil
+}
+
+// Only called after the full lifecycle validator has returned its typed failure.
+// The code table is provider-owned; never copy a stage from a raw probe payload.
+func validatedFailureStage(code string) execution.FailureStage {
+	switch allowedClassificationCodes[code].stage {
+	case "FAILURE_STAGE_PREPARATION":
+		return execution.FailureStagePreparation
+	case "FAILURE_STAGE_STARTUP":
+		return execution.FailureStageStartup
+	case "FAILURE_STAGE_EXECUTION":
+		return execution.FailureStageExecution
+	default:
+		return ""
+	}
 }
 
 func (p *preparedEnvironment) Cleanup(ctx context.Context) error {

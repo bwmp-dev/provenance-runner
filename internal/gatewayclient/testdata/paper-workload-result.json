@@ -1,0 +1,13 @@
+{
+  "stage": "startup",
+  "result": {
+    "status": "failed",
+    "classification": "workload_failure",
+    "phase": "collection",
+    "failure": {
+      "classification": "workload_failure",
+      "code": "on_enable_failure",
+      "message": "probe observed a plugin lifecycle exception"
+    }
+  }
+}

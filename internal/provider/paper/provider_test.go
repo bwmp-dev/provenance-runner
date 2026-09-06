@@ -394,10 +394,12 @@ func TestExecutorPreservesValidatedProbeFailureCode(t *testing.T) {
 	server, _ := artifactServer(t, payloads)
 	output := happyProbeOutput()
 	failure := []execution.StructuredEvent{
-		probeStructuredEvent(5, "LIFECYCLE_EXCEPTION", `{"phase":"LOAD","plugin":"SuccessFixture"}`),
-		probeStructuredEvent(6, "CLASSIFICATION", `{"code":"on_load_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
+		probeStructuredEvent(5, "LIFECYCLE_EXCEPTION", `{"phase":"ENABLE","plugin":"SuccessFixture"}`),
+		probeStructuredEvent(6, "CLASSIFICATION", `{"code":"on_enable_failure","category":"FAILURE_CATEGORY_PLUGIN","stage":"FAILURE_STAGE_STARTUP","retryable":false,"plugin":"SuccessFixture"}`),
 	}
 	output.StructuredEvents = append(output.StructuredEvents[:4], append(failure, output.StructuredEvents[4:]...)...)
+	replaceProbeEvent(t, &output, "TARGET_REQUIREMENT", `{"role":"TARGET","name":"SuccessFixture","configured":true,"loaded":true,"enabled":false}`)
+	replaceProbeEvent(t, &output, "SERVER_READY", `{"requirementsSatisfied":false}`)
 	sandbox := &fakeSandboxProvider{prepared: &fakePrepared{output: &output}}
 	provider := testProvider(t, server, sandbox, payloads, "test-jre")
 	config := validConfiguration(server.URL, payloads)
@@ -419,8 +421,26 @@ func TestExecutorPreservesValidatedProbeFailureCode(t *testing.T) {
 		Environment:    environmentJSON,
 		MaxOutputBytes: 1 << 20,
 	})
-	if result.Classification != execution.ClassificationWorkloadFailure || result.Failure == nil || result.Failure.Code != "on_load_failure" {
+	if result.Classification != execution.ClassificationWorkloadFailure || result.Failure == nil || result.Failure.Code != "on_enable_failure" || result.Failure.Stage != execution.FailureStageStartup {
 		t.Fatalf("result = %#v", result)
+	}
+	// Compare only the classification projection; wall clocks, logs and sandbox
+	// identity are covered separately and are not classification inputs.
+	wire, err := os.ReadFile("../../gatewayclient/testdata/paper-workload-result.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projection struct {
+		Stage  execution.FailureStage
+		Result execution.Result
+	}
+	if err := json.Unmarshal(wire, &projection); err != nil {
+		t.Fatal(err)
+	}
+	expected := projection.Result
+	expected.Failure.Stage = projection.Stage
+	if result.Status != expected.Status || result.Classification != expected.Classification || result.Phase != expected.Phase || *result.Failure != *expected.Failure {
+		t.Fatalf("actual provider/executor classification differs from shared serializer input: %#v", result.Failure)
 	}
 }
 

@@ -212,9 +212,32 @@ type EvidenceUsage struct {
 }
 
 type Failure struct {
+	// Stage describes a validated provider failure, not the executor's collection phase.
+	Stage          FailureStage   `json:"-"`
 	Classification Classification `json:"classification"`
 	Code           string         `json:"code"`
 	Message        string         `json:"message"`
+}
+
+type FailureStage string
+
+const (
+	FailureStagePreparation FailureStage = "preparation"
+	FailureStageStartup     FailureStage = "startup"
+	FailureStageExecution   FailureStage = "execution"
+)
+
+// NewStagedClassifiedError preserves a trusted provider's validated failure stage.
+// Unsupported values are omitted, retaining the legacy executor-phase fallback.
+func NewStagedClassifiedError(classification Classification, code string, stage FailureStage, err error) error {
+	result := NewClassifiedError(classification, code, err)
+	if classified, ok := result.(*classifiedError); ok {
+		switch stage {
+		case FailureStagePreparation, FailureStageStartup, FailureStageExecution:
+			classified.failure.Stage = stage
+		}
+	}
+	return result
 }
 
 func NewFailure(classification Classification, code, message string) *Failure {

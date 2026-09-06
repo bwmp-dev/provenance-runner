@@ -41,7 +41,7 @@ func TestRemoteTerminalResultsIncludeCompleteLogAndOmitUnavailableUsage(t *testi
 		wantOutcome    runnerv1.ResultOutcome
 	}{
 		{name: "passed", classification: execution.ClassificationPassed, wantCompleted: true, wantOutcome: runnerv1.ResultOutcome_RESULT_OUTCOME_PASSED},
-		{name: "workload failure", classification: execution.ClassificationWorkloadFailure, wantCompleted: true, wantOutcome: runnerv1.ResultOutcome_RESULT_OUTCOME_FAILED},
+		{name: "workload failure", classification: execution.ClassificationWorkloadFailure},
 		{name: "infrastructure failure", classification: execution.ClassificationInfrastructureFailure},
 	}
 	for _, test := range tests {
@@ -78,7 +78,11 @@ func TestRemoteTerminalResultsIncludeCompleteLogAndOmitUnavailableUsage(t *testi
 				terminalLog = structured.GetCompleteLog()
 			} else {
 				failed := sent.GetFailed()
-				if failed == nil || failed.GetUsage() != nil || !proto.Equal(failed.GetCompleteLog(), testLogObject()) || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE {
+				category := runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE
+				if test.classification == execution.ClassificationWorkloadFailure {
+					category = runnerv1.FailureCategory_FAILURE_CATEGORY_PLUGIN
+				}
+				if failed == nil || failed.GetUsage() != nil || !proto.Equal(failed.GetCompleteLog(), testLogObject()) || failed.GetFailure().GetCategory() != category {
 					t.Fatalf("failed result = %#v", failed)
 				}
 				terminalLog = failed.GetCompleteLog()
@@ -96,25 +100,35 @@ func TestRemoteTerminalResultsIncludeCompleteLogAndOmitUnavailableUsage(t *testi
 }
 
 func TestRemoteUploadFailureBecomesClassifiedInfrastructureFailure(t *testing.T) {
-	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	client, _ := activeEvidenceClient(t, now)
-	uploader := &recordingCompleteLogUploader{object: testLogObject(), err: errors.New("request included secret? no")}
-	client.logUploader = uploader
-	var sent *runnerv1.RunnerMessage
-	session := &clientSession{client: client, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
-		sent = proto.Clone(message).(*runnerv1.RunnerMessage)
-		return nil
-	}}
-	result := execution.Result{SchemaVersion: execution.ResultSchemaVersion, Status: "passed", Classification: execution.ClassificationPassed, Phase: execution.PhaseCompleted, CompleteLog: testCompleteLog(t, []byte("remote evidence\n")), StartedAt: now, CompletedAt: now}
-	if err := session.handleWorkerEvent(workerEvent{result: &result}); err != nil {
-		t.Fatal(err)
-	}
-	failed := sent.GetFailed()
-	if uploader.calls != 1 || failed == nil || failed.GetFailure().GetCode() != "complete_log_upload_failed" || failed.GetFailure().GetStage() != runnerv1.FailureStage_FAILURE_STAGE_RESULT_UPLOAD || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE || !failed.GetFailure().GetRetryable() || failed.GetUsage() != nil || failed.GetCompleteLog() != nil {
-		t.Fatalf("upload failure = %#v calls=%d", failed, uploader.calls)
-	}
-	if strings.Contains(failed.GetFailure().GetSummary(), "secret") {
-		t.Fatalf("upload failure leaked underlying error: %#v", failed.GetFailure())
+	for _, classification := range []execution.Classification{execution.ClassificationPassed, execution.ClassificationWorkloadFailure} {
+		t.Run(string(classification), func(t *testing.T) {
+			now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+			client, _ := activeEvidenceClient(t, now)
+			uploader := &recordingCompleteLogUploader{object: testLogObject(), err: errors.New("request included secret? no")}
+			client.logUploader = uploader
+			var sent *runnerv1.RunnerMessage
+			session := &clientSession{client: client, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+				sent = proto.Clone(message).(*runnerv1.RunnerMessage)
+				return nil
+			}}
+			result := execution.Result{SchemaVersion: execution.ResultSchemaVersion, Status: "passed", Classification: execution.ClassificationPassed, Phase: execution.PhaseCompleted, CompleteLog: testCompleteLog(t, []byte("remote evidence\n")), StartedAt: now, CompletedAt: now}
+			if classification == execution.ClassificationWorkloadFailure {
+				result.Status = "failed"
+				result.Classification = classification
+				result.Failure = execution.NewFailure(classification, "on_enable_failure", "probe observed a plugin lifecycle exception")
+				result.Failure.Stage = execution.FailureStageStartup
+			}
+			if err := session.handleWorkerEvent(workerEvent{result: &result}); err != nil {
+				t.Fatal(err)
+			}
+			failed := sent.GetFailed()
+			if uploader.calls != 1 || failed == nil || failed.GetFailure().GetCode() != "complete_log_upload_failed" || failed.GetFailure().GetStage() != runnerv1.FailureStage_FAILURE_STAGE_RESULT_UPLOAD || failed.GetFailure().GetCategory() != runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE || !failed.GetFailure().GetRetryable() || failed.GetUsage() != nil || failed.GetCompleteLog() != nil {
+				t.Fatalf("upload failure = %#v calls=%d", failed, uploader.calls)
+			}
+			if strings.Contains(failed.GetFailure().GetSummary(), "secret") {
+				t.Fatalf("upload failure leaked underlying error: %#v", failed.GetFailure())
+			}
+		})
 	}
 }
 
@@ -127,7 +141,7 @@ func TestRemoteTerminalResultsCarryMeasuredUsageForEveryCompletedOrFailedOutcome
 		completed      bool
 	}{
 		{name: "passed", classification: execution.ClassificationPassed, completed: true},
-		{name: "workload failure", classification: execution.ClassificationWorkloadFailure, completed: true},
+		{name: "workload failure", classification: execution.ClassificationWorkloadFailure},
 		{name: "infrastructure failure", classification: execution.ClassificationInfrastructureFailure},
 		{name: "timeout", classification: execution.ClassificationTimedOut},
 	}
