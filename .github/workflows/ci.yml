@@ -148,11 +148,15 @@ jobs:
 
   systemd-user-smoke:
     runs-on: [self-hosted, linux, x64]
+    concurrency:
+      group: "${{ github.repository }}-systemd-user-smoke"
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Configure pinned dedicated-host SSH identity
         shell: bash
@@ -287,7 +291,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: systemd-user-smoke-${{ github.event.pull_request.head.sha || github.sha }}
+          name: systemd-user-smoke-${{ github.sha }}
           path: ${{ env.SYSTEMD_SMOKE_EVIDENCE }}
           if-no-files-found: error
           retention-days: 90

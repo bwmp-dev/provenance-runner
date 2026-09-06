@@ -30,6 +30,9 @@ The short privileged gVisor smoke and the full Paper/gVisor gate share one
 repository-scoped, non-cancelling concurrency group. They cannot mutate shared
 kernel, cgroup, mount, or gVisor state simultaneously, while the ordinary test
 job remains unconstrained and can use another self-hosted runner in parallel.
+The dedicated-host systemd-user smoke has a separate repository-scoped,
+non-cancelling queue so two runs cannot mutate the remote smoke boundary at the
+same time without blocking the local privileged-gVisor queue.
 
 `go.mod` and `go.sum` changes do not automatically run the full gate. The
 integrator responsible for merging the pull request must classify the frozen

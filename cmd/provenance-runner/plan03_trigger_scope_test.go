@@ -19,6 +19,7 @@ const runnerModule = "github.com/bwmp-dev/provenance-runner"
 const (
 	selfHostedLinuxX64    = "runs-on: [self-hosted, linux, x64]"
 	privilegedGVisorGroup = `group: "${{ github.repository }}-privileged-gvisor"`
+	systemdUserSmokeGroup = `group: "${{ github.repository }}-systemd-user-smoke"`
 )
 
 var plan03RemoteOnlyPackages = map[string]map[string]bool{
@@ -42,6 +43,40 @@ func TestPlan03RemoteOnlyPackagesStayOutsideLocalExecution(t *testing.T) {
 	assertSelfHostedJobPolicy(t, repositoryRoot)
 	assertCoveredInternalPackagesDoNotImportRemoteOnly(t, repositoryRoot)
 	assertCommandUsesRemoteOnlyPackagesInAllowedFunctions(t, repositoryRoot)
+}
+
+func TestTopLevelWorkflowTriggerForms(t *testing.T) {
+	tests := []struct {
+		name                                 string
+		workflow                             string
+		pullRequest, pullRequestTarget, push bool
+	}{
+		{
+			name:        "inline sequence",
+			workflow:    "name: test\non: [push, pull_request]\njobs: {}\n",
+			pullRequest: true,
+			push:        true,
+		},
+		{
+			name:        "scalar",
+			workflow:    "name: test\non: pull_request\njobs: {}\n",
+			pullRequest: true,
+		},
+		{
+			name:              "block pull request target",
+			workflow:          "name: test\non:\n  pull_request_target:\njobs: {}\n",
+			pullRequestTarget: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pullRequest, pullRequestTarget, push, workflowDispatch := topLevelWorkflowTriggers(t, []byte(test.workflow))
+			if pullRequest != test.pullRequest || pullRequestTarget != test.pullRequestTarget ||
+				push != test.push || workflowDispatch {
+				t.Fatalf("triggers: pull_request=%t pull_request_target=%t push=%t workflow_dispatch=%t", pullRequest, pullRequestTarget, push, workflowDispatch)
+			}
+		})
+	}
 }
 
 func assertPlan03WorkflowTriggers(t *testing.T, repositoryRoot string) {
@@ -80,10 +115,18 @@ func assertNormalCITriggers(t *testing.T, repositoryRoot string) {
 
 func assertNoPublicPullRequestWorkflows(t *testing.T, repositoryRoot string) {
 	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(repositoryRoot, ".github", "workflows", "*.yml"))
-	if err != nil || len(paths) == 0 {
-		t.Fatalf("enumerate workflows: paths=%v err=%v", paths, err)
+	var paths []string
+	for _, pattern := range []string{"*.yml", "*.yaml"} {
+		matches, err := filepath.Glob(filepath.Join(repositoryRoot, ".github", "workflows", pattern))
+		if err != nil {
+			t.Fatalf("enumerate workflows matching %s: %v", pattern, err)
+		}
+		paths = append(paths, matches...)
 	}
+	if len(paths) == 0 {
+		t.Fatal("workflow directory contains no .yml or .yaml files")
+	}
+	sort.Strings(paths)
 	for _, path := range paths {
 		workflow := readPlan03ContractFile(t, path)
 		pullRequest, pullRequestTarget, _, _ := topLevelWorkflowTriggers(t, []byte(workflow))
@@ -113,6 +156,10 @@ func assertSelfHostedJobPolicy(t *testing.T, repositoryRoot string) {
 		t.Fatal("ordinary test job must remain available for parallel execution")
 	}
 	assertPrivilegedGVisorConcurrency(t, "short gVisor smoke", ciJobs["gvisor-smoke"])
+	assertQueuedConcurrency(t, "systemd-user smoke", ciJobs["systemd-user-smoke"], systemdUserSmokeGroup)
+	if strings.Contains(ci, "github.event.pull_request") {
+		t.Fatal("push-only normal CI must not derive checkout or artifact identity from a pull-request event")
+	}
 
 	plan03 := readPlan03ContractFile(t, filepath.Join(repositoryRoot, ".github", "workflows", "plan03-acceptance.yml"))
 	plan03Jobs := workflowJobBlocks(t, plan03)
@@ -128,9 +175,14 @@ func assertSelfHostedJobPolicy(t *testing.T, repositoryRoot string) {
 
 func assertPrivilegedGVisorConcurrency(t *testing.T, name, job string) {
 	t.Helper()
-	if !strings.Contains(job, "concurrency:\n") || !strings.Contains(job, privilegedGVisorGroup) ||
+	assertQueuedConcurrency(t, name, job, privilegedGVisorGroup)
+}
+
+func assertQueuedConcurrency(t *testing.T, name, job, group string) {
+	t.Helper()
+	if !strings.Contains(job, "concurrency:\n") || !strings.Contains(job, group) ||
 		!strings.Contains(job, "cancel-in-progress: false") || !strings.Contains(job, "queue: max") {
-		t.Fatalf("%s lacks the shared non-cancelling privileged-gVisor concurrency policy", name)
+		t.Fatalf("%s lacks its repository-scoped non-cancelling queued concurrency policy", name)
 	}
 }
 
@@ -223,39 +275,108 @@ func workflowTriggerBlock(t *testing.T, workflow []byte) string {
 
 func topLevelWorkflowTriggers(t *testing.T, workflow []byte) (pullRequest, pullRequestTarget, push, workflowDispatch bool) {
 	t.Helper()
+	record := func(event string) {
+		switch event {
+		case "pull_request":
+			pullRequest = true
+		case "pull_request_target":
+			pullRequestTarget = true
+		case "push":
+			push = true
+		case "workflow_dispatch":
+			workflowDispatch = true
+		}
+	}
+
 	scanner := bufio.NewScanner(strings.NewReader(string(workflow)))
 	inOn := false
+	foundOn := false
 	for scanner.Scan() {
 		rawLine := scanner.Text()
 		line := strings.TrimSpace(rawLine)
 		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
 		if !inOn {
-			if line == "on:" && indent == 0 {
-				inOn = true
+			if indent != 0 || !strings.HasPrefix(line, "on:") {
+				continue
 			}
-			continue
+			foundOn = true
+			value := strings.TrimSpace(strings.TrimPrefix(line, "on:"))
+			value = strings.TrimSpace(strings.SplitN(value, " #", 2)[0])
+			if value == "" || strings.HasPrefix(value, "#") {
+				inOn = true
+				continue
+			}
+			for _, event := range inlineWorkflowTriggers(t, value) {
+				record(event)
+			}
+			break
 		}
 		if indent == 0 && line != "" && !strings.HasPrefix(line, "#") {
 			break
 		}
-		if indent != 2 {
+		if indent != 2 || line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		switch line {
-		case "pull_request:":
-			pullRequest = true
-		case "pull_request_target:":
-			pullRequestTarget = true
-		case "push:":
-			push = true
-		case "workflow_dispatch:":
-			workflowDispatch = true
+		key, _, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("unsupported workflow trigger entry %q", line)
 		}
+		record(unquoteWorkflowTrigger(t, strings.TrimSpace(key)))
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("read workflow triggers: %v", err)
 	}
+	if !foundOn {
+		t.Fatal("workflow lacks a supported top-level on declaration")
+	}
 	return pullRequest, pullRequestTarget, push, workflowDispatch
+}
+
+func inlineWorkflowTriggers(t *testing.T, value string) []string {
+	t.Helper()
+	if strings.HasPrefix(value, "[") {
+		if !strings.HasSuffix(value, "]") {
+			t.Fatalf("unterminated inline workflow trigger sequence %q", value)
+		}
+		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]"))
+		if value == "" {
+			t.Fatalf("empty inline workflow trigger sequence")
+		}
+		parts := strings.Split(value, ",")
+		events := make([]string, 0, len(parts))
+		for _, part := range parts {
+			events = append(events, unquoteWorkflowTrigger(t, strings.TrimSpace(part)))
+		}
+		return events
+	}
+	if strings.ContainsAny(value, "{}[],") {
+		t.Fatalf("unsupported inline workflow trigger declaration %q", value)
+	}
+	return []string{unquoteWorkflowTrigger(t, value)}
+}
+
+func unquoteWorkflowTrigger(t *testing.T, value string) string {
+	t.Helper()
+	if value == "" {
+		t.Fatal("empty workflow trigger name")
+	}
+	if strings.HasPrefix(value, "'") || strings.HasSuffix(value, "'") {
+		if len(value) < 2 || !strings.HasPrefix(value, "'") || !strings.HasSuffix(value, "'") {
+			t.Fatalf("malformed quoted workflow trigger %q", value)
+		}
+		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+	}
+	if strings.HasPrefix(value, `"`) || strings.HasSuffix(value, `"`) {
+		unquoted, err := strconv.Unquote(value)
+		if err != nil {
+			t.Fatalf("malformed quoted workflow trigger %q: %v", value, err)
+		}
+		return unquoted
+	}
+	if strings.ContainsAny(value, " \t:#") {
+		t.Fatalf("malformed workflow trigger name %q", value)
+	}
+	return value
 }
 
 func plan03RepositoryRoot(t *testing.T) string {
