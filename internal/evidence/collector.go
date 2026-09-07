@@ -99,6 +99,12 @@ func (c *Collector) RecordEvent(ctx context.Context, input EventInput) error {
 }
 
 func (c *Collector) recordEventLocked(input EventInput) {
+	clean, err := sanitizeEvent(input, c.config.patterns, c.config.MaxEventBytes)
+	if err != nil {
+		c.setStructuredEventError("structured event cannot be safely sanitized")
+		return
+	}
+	input = clean
 	if len(c.events) >= c.config.MaxEvents {
 		c.eventsTruncated = true
 		return
@@ -186,10 +192,10 @@ func (c *Collector) observeRawBytes(count int64) bool {
 	return c.live.truncated
 }
 
-func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated, partial, redacted bool) {
+func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated, partial, redacted, structured bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if stream == StreamStdout && c.config.StructuredLinePrefix != "" && bytes.HasPrefix(line, []byte(c.config.StructuredLinePrefix)) {
+	if structured {
 		if lineTruncated {
 			c.setStructuredEventError("structured event line exceeded the configured line limit")
 			return

@@ -39,6 +39,7 @@ const (
 )
 
 type Config struct {
+	patterns             *secretPatterns
 	MaxLineBytes         int64
 	MaxTotalBytes        int64
 	MaxCompleteLogBytes  int64
@@ -108,6 +109,12 @@ func (c Config) withDefaults() (Config, error) {
 			return Config{}, errors.New("redaction secret configuration exceeds its limit")
 		}
 	}
+	patterns, err := compileSecrets(c.Secrets)
+	if err != nil {
+		return Config{}, err
+	}
+	c.patterns = patterns
+	c.Secrets = append([]string(nil), c.Secrets...)
 	return c, nil
 }
 
