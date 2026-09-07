@@ -3,6 +3,7 @@
 package gvisor
 
 import (
+	"errors"
 	"fmt"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	"io"
@@ -65,7 +66,7 @@ func RunMeasuredLauncher(arguments []string, stderr io.Writer) int {
 		Pdeathsig:                  syscall.SIGKILL,
 	}
 	if err := child.Start(); err != nil {
-		fmt.Fprintln(stderr, "measured namespace unavailable")
+		fmt.Fprintln(stderr, "measured namespace unavailable:", namespaceFailureCategory(err))
 		return runscFailureExitCode
 	}
 	signals := make(chan os.Signal, 2)
@@ -87,6 +88,18 @@ func RunMeasuredLauncher(arguments []string, stderr io.Writer) int {
 			return runscFailureExitCode
 		}
 	}
+}
+
+func namespaceFailureCategory(err error) string {
+	for _, item := range []struct {
+		err   error
+		label string
+	}{{syscall.EPERM, "permission"}, {syscall.EACCES, "access"}, {syscall.ENOSYS, "unsupported"}, {syscall.EINVAL, "invalid"}, {syscall.EAGAIN, "resources"}, {syscall.ENOSPC, "capacity"}} {
+		if errors.Is(err, item.err) {
+			return item.label
+		}
+	}
+	return "other"
 }
 
 // RunMeasuredChild runs only in the fresh mapped namespace. The bind mount dies

@@ -309,10 +309,7 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		containerID := prepared.containerID
 		var runOutput bytes.Buffer
-		invocation, err := provider.wrapRunCommand(command{
-			Path: provider.config.RunscPath,
-			Args: provider.runArguments("run", "--bundle="+prepared.bundle, containerID),
-		}, prepared.cgroupLimits, containerID, filepath.Join(prepared.bundle, systemdLaunchMarker))
+		invocation, err := prepared.provider.wrapRunCommand(prepared.executionCommand(nil, nil), prepared.cgroupLimits, containerID, filepath.Join(prepared.bundle, systemdLaunchMarker))
 		if err != nil {
 			t.Fatalf("configure abandoned runsc command: %v", err)
 		}

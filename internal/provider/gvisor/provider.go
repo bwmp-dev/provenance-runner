@@ -776,16 +776,7 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (outcome execution.Ex
 	samplingDone := make(chan struct{})
 	go e.sampleUsageUntil(stopSampling, samplingDone)
 	launchMarker := filepath.Join(e.bundle, systemdLaunchMarker)
-	invocation := command{
-		Path:   e.provider.config.RunscPath,
-		Args:   e.provider.runArguments("run", "--bundle="+e.bundle, e.containerID),
-		Stdout: stdout,
-		Stderr: stderr,
-	}
-	if e.measurement != nil {
-		invocation.Path = e.measurement.RunnerPath()
-		invocation.Args = append([]string{MeasuredLauncherCommand, e.measurement.RootPath(), e.measurement.SandboxPath(), e.measurement.ImagePath(), e.measurement.LoopPath(), filepath.Join(e.bundle, ".measured-root"), e.measurement.Snapshot().RootFS.SHA256, e.provider.config.MeasuredRuntimeMode, "--"}, invocation.Args...)
-	}
+	invocation := e.executionCommand(stdout, stderr)
 	runCommand, err := e.provider.wrapRunCommand(invocation, e.cgroupLimits, e.containerID, launchMarker)
 	if err != nil {
 		close(stopSampling)
@@ -821,6 +812,17 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (outcome execution.Ex
 		return execution.ExecutionOutcome{ExitCode: result.ExitCode}, errors.New("systemd user scope was never observed")
 	}
 	return classifyRunResult(result, outerPIDDenials, denialEvidenceAvailable)
+}
+
+// The restart acceptance path uses this same exact invocation as Execute;
+// bypassing it would omit the measured namespace/retained-object handoff.
+func (e *preparedEnvironment) executionCommand(stdout, stderr io.Writer) command {
+	invocation := command{Path: e.provider.config.RunscPath, Args: e.provider.runArguments("run", "--bundle="+e.bundle, e.containerID), Stdout: stdout, Stderr: stderr}
+	if e.measurement != nil {
+		invocation.Path = e.measurement.RunnerPath()
+		invocation.Args = append([]string{MeasuredLauncherCommand, e.measurement.RootPath(), e.measurement.SandboxPath(), e.measurement.ImagePath(), e.measurement.LoopPath(), filepath.Join(e.bundle, ".measured-root"), e.measurement.Snapshot().RootFS.SHA256, e.provider.config.MeasuredRuntimeMode, "--"}, invocation.Args...)
+	}
+	return invocation
 }
 
 // runContainer keeps the blocking run command attached while cancellation is

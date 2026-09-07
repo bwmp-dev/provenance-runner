@@ -4,9 +4,22 @@ package gvisor
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+func TestNamespaceFailureDiagnosticIsClosed(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{{fmt.Errorf("private marker: %w", syscall.EPERM), "permission"}, {syscall.EAGAIN, "resources"}, {fmt.Errorf("private marker"), "other"}} {
+		if got := namespaceFailureCategory(test.err); got != test.want {
+			t.Fatalf("unexpected safe category %q", got)
+		}
+	}
+}
 
 func TestMeasurementRequiresAggregateSystemdBoundary(t *testing.T) {
 	provider, runner, _ := testProvider(t)

@@ -90,7 +90,7 @@ cleanup() {
   [[ "$evidence_owner" =~ ^[0-9]+$ ]] || exit 1
   chown "$evidence_owner" "$evidence" || clean=0
   (cd "$evidence" && shopt -s nullglob && sha256sum -- *.json *.log > manifest.sha256) || clean=0
-  for record in cleanup.json image.json smoke.log executable-observations.json monitor.log manifest.sha256; do
+  for record in cleanup.json image.json smoke.log executable-observations.json monitor.log preflight.json manifest.sha256; do
     if [[ -f "$evidence/$record" && ! -L "$evidence/$record" ]]; then chown "$evidence_owner" "$evidence/$record" || clean=0; fi
   done
   # Never erase a failed cleanup target. Keep it for exact operator diagnosis.
@@ -150,6 +150,10 @@ setpriv --reuid "$task_uid" --regid "$task_gid" --clear-groups env "${session_en
   systemd-run --user --scope --quiet --unit=pvm-preflight -- true
 scope_root="/sys/fs/cgroup/user.slice/user-${task_uid}.slice/user@${task_uid}.service/app.slice"
 [[ -d "$scope_root" ]]
+install -m 0555 "$(dirname "$0")/measured-runtime-preflight.py" "$fixture/preflight.py"
+setpriv --reuid "$task_uid" --regid "$task_gid" --clear-groups env "${session_env[@]}" \
+  systemd-run --user --scope --collect --quiet --slice=app.slice --unit=pvm-diagnostics \
+    python3 "$fixture/preflight.py" > "$evidence/preflight.json"
 python3 "$(dirname "$0")/measured-runtime-monitor.py" --uid "$task_uid" \
   --scope-root "${scope_root#/sys/fs/cgroup}" --frontend "$runsc" \
   --stop-file "$fixture/monitor-stop" --output "$evidence/executable-observations.json" \
