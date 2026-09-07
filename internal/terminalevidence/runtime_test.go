@@ -2,6 +2,7 @@ package terminalevidence
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"strings"
@@ -13,6 +14,65 @@ import (
 
 func measuredFixture() runtimeidentity.Snapshot {
 	return runtimeidentity.Snapshot{RunnerVersion: "0.1.0", RunnerExecutableSHA256: strings.Repeat("1", 64), SandboxKind: "gvisor", SandboxVersion: "release-20260817.0", SandboxExecutableSHA256: strings.Repeat("2", 64), NetworkMode: "none", RootFS: runtimeidentity.RootFS{Format: "squashfs-image-sha256/v1", SHA256: strings.Repeat("3", 64)}}
+}
+
+func TestMeasuredOptionalAndUnsupportedReleasedParity(t *testing.T) {
+	for _, tc := range []struct {
+		name                                                 string
+		optionalPlugin, optionalShutdown, optionalDependency bool
+		operator, completeness                               string
+	}{
+		{name: "all-supported", operator: "regex", completeness: "complete"},
+		{name: "optional-plugin", optionalPlugin: true, operator: "regex", completeness: "partial"},
+		{name: "optional-shutdown", optionalShutdown: true, operator: "regex", completeness: "partial"},
+		{name: "optional-dependency", optionalDependency: true, operator: "regex", completeness: "partial"},
+		{name: "unsupported-console", operator: "contains", completeness: "partial"},
+		{name: "optional-and-unsupported", optionalPlugin: true, optionalShutdown: true, optionalDependency: true, operator: "contains", completeness: "partial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := dependencyJob(t)
+			var configuration map[string]any
+			if err := json.Unmarshal(job.NormalizedConfigurationJson, &configuration); err != nil {
+				t.Fatal(err)
+			}
+			tests := configuration["tests"].(map[string]any)
+			startup := tests["startup"].(map[string]any)
+			startup["requirePluginEnabled"] = !tc.optionalPlugin
+			startup["requireCleanShutdown"] = !tc.optionalShutdown
+			configuration["dependencies"].([]any)[0].(map[string]any)["required"] = !tc.optionalDependency
+			tests["console"] = []any{map[string]any{"id": "check", "command": "version", "timeoutSeconds": float64(10),
+				"assertions": []any{map[string]any{"stream": "combined", "pattern": "safe", "match": "present", "operator": tc.operator}}}}
+			raw, err := canonicalJSON(configuration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.NormalizedConfigurationJson = raw
+			hash := sha256.Sum256(raw)
+			job.Hashes.Configuration.Value = hash[:]
+			context, err := NewContext(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := measuredFixture()
+			proof, err := Build(context, "runner-1", []Observation{
+				{Type: "startup-ready", ServerLoaded: true, StabilizationCompleted: true, ServerReady: true, RequirementsSatisfied: true},
+				{Type: "plugin-enabled", Name: job.TargetPluginName, Loaded: true, Enabled: true},
+				{Type: "clean-shutdown", ShutdownRequested: true, ServerStopped: true, ReportedShutdownRequested: true},
+				{Type: "dependency-present", Name: "DependencyPlugin", Loaded: true, Enabled: true},
+				{Type: "console-regex", TestID: "check", AssertionID: "check:1", Registered: true, ExecutionCompleted: true, Evaluated: true, Passed: true},
+			}, &runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(proof.CanonicalJson, []byte(`"completeness":"`+tc.completeness+`"`)) {
+				t.Fatalf("wrong completeness, want %s", tc.completeness)
+			}
+			validateReleasedProof(t, context, proof)
+			if err := ValidateFrozen(proof, job, "runner-1"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestMeasuredRuntimeCompletenessAndHistoricalReplay(t *testing.T) {

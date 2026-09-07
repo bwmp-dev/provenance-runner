@@ -40,7 +40,9 @@ private OCI root. A raw inherited `/proc/PID/fd/N` root path is not usable as
 runsc's gofer self-bind destination; that failed diagnostic is not acceptance.
 
 Only observed runtime fields are projected. A measured runtime can still have
-partial assertion coverage. Complete coverage can contain failed assertions;
+partial assertion coverage. Optional planned requirements and unsupported
+operators remain partial, matching the released consumer; complete requires
+every planned entry to be supported and observed. Complete coverage can contain failed assertions;
 it does not mean the job passed. Durable replay validates original frozen bytes
 without remeasuring an upgraded installation. Historical null-runtime proof is
 not backfilled.

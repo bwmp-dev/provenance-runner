@@ -128,7 +128,7 @@ func Build(c *Context, runnerID string, observations []Observation, measured ...
 		}
 		complete := true
 		for _, p := range c.planned {
-			if (p.supported && !seen[p.id]) || (!p.supported && p.kind == "console-regex") {
+			if !p.supported || !seen[p.id] {
 				complete = false
 			}
 		}
