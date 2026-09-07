@@ -117,6 +117,33 @@ jobs:
             -test.run '^TestRunscSmoke$' \
             -test.count=1 \
             -test.timeout=60s
+      - name: Run disposable measured runtime systemd acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_runtime_monitor.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_runtime_profile.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_runtime_preflight.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_prepare_measured_builder.py -v
+          bash -n scripts/test-measured-runtime-systemd.sh scripts/prepare-measured-builder.sh
+          provision=$(sudo bash scripts/prepare-measured-builder.sh "${PROVENANCE_INSTALL_ROOT}/measured-builder")
+          builder=$(jq -er '.builder' <<< "$provision")
+          libraries=$(jq -er '.libraryDirectory' <<< "$provision")
+          evidence="${RUNNER_TEMP}/measured-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "PROVENANCE_MEASURED_EVIDENCE=${evidence}" >> "${GITHUB_ENV}"
+          sudo --preserve-env=GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_JOB bash scripts/test-measured-runtime-systemd.sh \
+            "${PROVENANCE_INSTALL_ROOT}/gvisor/runsc" \
+            "${RUNNER_TEMP}/alpine-minirootfs-${ALPINE_RELEASE}-x86_64.tar.gz" \
+            41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081 \
+            "${builder}" 47d5c1af3da11864e64c9dc6bb4e568719dcc315e6a744e79381ce3374fb7393 \
+            "${RUNNER_TEMP}/gvisor-smoke.test" "${evidence}" "${libraries}"
+      - name: Retain disposable measured runtime evidence
+        if: always() && env.PROVENANCE_MEASURED_EVIDENCE != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: measured-runtime-${{ github.sha }}
+          path: ${{ env.PROVENANCE_MEASURED_EVIDENCE }}
+          if-no-files-found: error
       - name: Remove delegated cgroup subtree
         if: always()
         shell: bash

@@ -61,6 +61,23 @@ func TestActualPlatformCreatedJobAndReleasedReference(t *testing.T) {
 	if value["runtime"] != nil || value["completeness"] != "partial" {
 		t.Fatal("unmeasured runtime became complete")
 	}
+	validateReleasedProof(t, context, proof)
+	// Mutation of the supplied job cannot alter the already frozen context.
+	job.TargetPluginName = "changed"
+	job.NormalizedConfigurationJson[0] = '!'
+	job.Hashes.Artifact.Value[0] ^= 1
+	again, err := Build(context, "runner-1", observations)
+	if err != nil || !proto.Equal(proof, again) {
+		t.Fatal("context aliases caller job")
+	}
+}
+
+func validateReleasedProof(t *testing.T, context *Context, proof *runnerv1.ExecutionEvidence) {
+	t.Helper()
+	var value map[string]any
+	if err := json.Unmarshal(proof.CanonicalJson, &value); err != nil {
+		t.Fatal(err)
+	}
 	assertions := []any{}
 	for _, p := range context.planned {
 		selector := p.selector
@@ -77,14 +94,6 @@ func TestActualPlatformCreatedJobAndReleasedReference(t *testing.T) {
 	command.Stdin = bytes.NewReader(input)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("released reference rejected actual producer mapping: %v %s", err, output)
-	}
-	// Mutation of the supplied job cannot alter the already frozen context.
-	job.TargetPluginName = "changed"
-	job.NormalizedConfigurationJson[0] = '!'
-	job.Hashes.Artifact.Value[0] ^= 1
-	again, err := Build(context, "runner-1", observations)
-	if err != nil || !proto.Equal(proof, again) {
-		t.Fatal("context aliases caller job")
 	}
 }
 

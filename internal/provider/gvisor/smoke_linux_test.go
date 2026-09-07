@@ -14,17 +14,89 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == MeasuredLauncherCommand {
+		os.Exit(RunMeasuredLauncher(os.Args[2:], os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == MeasuredChildCommand {
+		os.Exit(RunMeasuredChild(os.Args[2:], os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == SystemdLauncherCommand {
 		os.Exit(RunSystemdLauncher(os.Args[2:], os.Stderr))
 	}
 	os.Exit(m.Run())
+}
+
+func TestMeasuredNamespaceProbeChild(t *testing.T) {
+	if os.Getenv("PROVENANCE_MEASURED_NAMESPACE_PROBE") != "1" {
+		t.Skip("owned diagnostic child only")
+	}
+	if os.Getenv("PROVENANCE_MEASURED_NAMESPACE_MAPPED") == "1" && (os.Getuid() != 0 || os.Getgid() != 0) {
+		t.Fatal("unexpected mapped identity")
+	}
+	fmt.Println("MEASURED_NAMESPACE_CHILD_OK")
+}
+
+func TestMeasuredNamespaceExecDiagnostic(t *testing.T) {
+	if os.Getenv("PROVENANCE_MEASURED_EXEC_DIAGNOSTIC") != "1" {
+		t.Skip("owned disposable diagnostic only")
+	}
+	if os.Getuid() == 0 {
+		t.Fatal("diagnostic requires nonroot owned user")
+	}
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mapped := range []bool{false, true} {
+		for _, fd := range []bool{false, true} {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			file, err := os.Open("/proc/self/exe")
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			executable := path
+			if fd {
+				executable = "/proc/self/fd/3"
+			}
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestMeasuredNamespaceProbeChild$", "-test.count=1", "-test.v")
+			cmd.Env = append(os.Environ(), "PROVENANCE_MEASURED_NAMESPACE_PROBE=1", fmt.Sprintf("PROVENANCE_MEASURED_NAMESPACE_MAPPED=%d", map[bool]int{false: 0, true: 1}[mapped]))
+			cmd.ExtraFiles = []*os.File{file}
+			if mapped {
+				cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS, UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}}, GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, Pdeathsig: syscall.SIGKILL}
+			}
+			var output bytes.Buffer
+			cmd.Stdout = &output
+			cmd.Stderr = &output
+			startErr := cmd.Start()
+			started := startErr == nil
+			pid := 0
+			if started {
+				pid = cmd.Process.Pid
+				err = cmd.Wait()
+			} else {
+				err = startErr
+			}
+			category := "none"
+			if err != nil {
+				category = namespaceFailureCategory(err)
+			}
+			result := map[string]any{"version": 1, "mapped": mapped, "retainedFD": fd, "started": started, "pid": pid, "uid": os.Getuid(), "errorCategory": category, "childConfirmed": err == nil && strings.Contains(output.String(), "MEASURED_NAMESPACE_CHILD_OK")}
+			encoded, _ := json.Marshal(result)
+			t.Log("MEASURED_EXEC_PROBE=" + string(encoded))
+			file.Close()
+			cancel()
+		}
+	}
 }
 
 func TestRunscSmoke(t *testing.T) {
@@ -43,12 +115,17 @@ func TestRunscSmoke(t *testing.T) {
 	if rootFS == "" {
 		t.Fatal("PROVENANCE_RUNSC_SMOKE=1 requires PROVENANCE_RUNSC_ROOTFS containing /bin/sh")
 	}
-	rootFSIdentityBefore, err := normalizedRootFSTreeSHA256(rootFS)
+	identity, closeIdentity, err := smokeRootIdentity(rootFS, resolvedRunsc, os.Getenv("PROVENANCE_MEASURED_ROOTFS_IMAGE"), os.Getenv("PROVENANCE_MEASURED_LOOP_DEVICE"))
+	if err != nil {
+		t.Fatalf("capture measured root identity before smoke: %v", err)
+	}
+	defer closeIdentity()
+	rootFSIdentityBefore, err := identity()
 	if err != nil {
 		t.Fatalf("capture root filesystem identity before smoke: %v", err)
 	}
 	defer func() {
-		rootFSIdentityAfter, err := normalizedRootFSTreeSHA256(rootFS)
+		rootFSIdentityAfter, err := identity()
 		if err != nil {
 			t.Errorf("capture root filesystem identity after smoke: %v", err)
 			return
@@ -68,16 +145,19 @@ func TestRunscSmoke(t *testing.T) {
 	stateRoot := filepath.Join(temporaryRoot, "state")
 	bundleRoot := filepath.Join(temporaryRoot, "bundles")
 	providerConfig := Config{
-		RunscPath:         resolvedRunsc,
-		CgroupDriver:      os.Getenv("PROVENANCE_GVISOR_CGROUP_DRIVER"),
-		SystemdRunPath:    os.Getenv("PROVENANCE_SYSTEMD_RUN_PATH"),
-		SystemdCgroupRoot: os.Getenv("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
-		RootFS:            rootFS,
-		RootFSIdentity:    "sha256:" + rootFSIdentityBefore,
-		StateRoot:         stateRoot,
-		BundleRoot:        bundleRoot,
-		InputsRoot:        inputsRoot,
-		Platform:          "systrap",
+		RunscPath:            resolvedRunsc,
+		CgroupDriver:         os.Getenv("PROVENANCE_GVISOR_CGROUP_DRIVER"),
+		SystemdRunPath:       os.Getenv("PROVENANCE_SYSTEMD_RUN_PATH"),
+		SystemdCgroupRoot:    os.Getenv("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
+		RootFS:               rootFS,
+		RootFSImagePath:      os.Getenv("PROVENANCE_MEASURED_ROOTFS_IMAGE"),
+		RootFSLoopDevicePath: os.Getenv("PROVENANCE_MEASURED_LOOP_DEVICE"),
+		MeasuredRuntimeMode:  os.Getenv("PROVENANCE_MEASURED_RUNTIME_MODE"),
+		RootFSIdentity:       "sha256:" + rootFSIdentityBefore,
+		StateRoot:            stateRoot,
+		BundleRoot:           bundleRoot,
+		InputsRoot:           inputsRoot,
+		Platform:             "systrap",
 	}
 	provider, err := New(providerConfig)
 	if err != nil {
@@ -85,6 +165,24 @@ func TestRunscSmoke(t *testing.T) {
 	}
 	if err := provider.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if provider.config.RootFSImagePath != "" {
+		t.Run("cancelled cleanup retains exact objects for retry", func(t *testing.T) {
+			prepared := prepareSmokeEnvironment(t, provider, "smoke", configuration{Command: "/bin/true", Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20})
+			defer cleanupSmokeEnvironment(t, prepared)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if !errors.Is(prepared.Cleanup(ctx), context.Canceled) {
+				t.Fatal("cancelled cleanup unexpectedly succeeded")
+			}
+			if prepared.measurement == nil || prepared.measurement.Validate() != nil {
+				t.Fatal("failed cleanup lost retained runtime identity")
+			}
+			cleanupSmokeEnvironment(t, prepared)
+			if prepared.measurement.Validate() == nil {
+				t.Fatal("successful cleanup retained open identity lease")
+			}
+		})
 	}
 	if provider.config.CgroupDriver == CgroupDriverSystemdUser {
 		t.Run("systemd user scope applies exact limits", func(t *testing.T) {
@@ -100,6 +198,7 @@ func TestRunscSmoke(t *testing.T) {
 			prepared := prepareSmokeEnvironment(t, provider, "smoke", config)
 			defer cleanupSmokeEnvironment(t, prepared)
 			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			result := make(chan error, 1)
 			go func() {
 				_, err := prepared.Execute(ctx)
@@ -111,7 +210,7 @@ func TestRunscSmoke(t *testing.T) {
 				"memory.swap.max": "0",
 				"cpu.max":         "50000 100000",
 				"pids.max":        "81",
-			})
+			}, result)
 			cancel()
 			select {
 			case err := <-result:
@@ -161,6 +260,21 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		if output.ResourceUsage == nil || output.ResourceUsage.CPUTime <= 0 || output.ResourceUsage.PeakMemoryBytes == 0 || output.ResourceUsage.NetworkReceiveBytes != 0 || output.ResourceUsage.NetworkTransmitBytes != 0 {
 			t.Fatalf("sandbox measured usage = %#v", output.ResourceUsage)
+		}
+		if providerConfig.RootFSImagePath != "" && (output.MeasuredRuntime == nil || !output.MeasuredRuntime.Valid()) {
+			t.Fatal("actual measured execution omitted runtime identity")
+		}
+		if output.MeasuredRuntime != nil {
+			original := *output.MeasuredRuntime
+			output.MeasuredRuntime.RootFS.SHA256 = strings.Repeat("0", 64)
+			again, err := prepared.Collect(ctx)
+			if err != nil || again.MeasuredRuntime == nil || *again.MeasuredRuntime != original {
+				t.Fatal("collected runtime aliases caller mutation")
+			}
+			output.MeasuredRuntime = again.MeasuredRuntime
+		}
+		if providerConfig.RootFSImagePath == "" && output.MeasuredRuntime != nil {
+			t.Fatal("legacy root reported measured runtime")
 		}
 		cleanupSmokeEnvironment(t, prepared)
 		assertNoSandboxResidue(t, provider, containerID)
@@ -261,10 +375,7 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		containerID := prepared.containerID
 		var runOutput bytes.Buffer
-		invocation, err := provider.wrapRunCommand(command{
-			Path: provider.config.RunscPath,
-			Args: provider.runArguments("run", "--bundle="+prepared.bundle, containerID),
-		}, prepared.cgroupLimits, containerID, filepath.Join(prepared.bundle, systemdLaunchMarker))
+		invocation, err := prepared.provider.wrapRunCommand(prepared.executionCommand(nil, nil), prepared.cgroupLimits, containerID, filepath.Join(prepared.bundle, systemdLaunchMarker))
 		if err != nil {
 			t.Fatalf("configure abandoned runsc command: %v", err)
 		}
@@ -309,6 +420,64 @@ func TestRunscSmoke(t *testing.T) {
 	})
 }
 
+func smokeRootIdentity(root, sandbox, image, loop string) (func() (string, error), func() error, error) {
+	if image == "" {
+		return func() (string, error) { return normalizedRootFSTreeSHA256(root) }, func() error { return nil }, nil
+	}
+	// Preserve root-owned private files; the measured contract is the complete
+	// immutable image and its retained mount/loop binding, not a nonroot tar.
+	measurement, err := runtimeidentity.Acquire(context.Background(), sandbox, root, image, loop)
+	if err != nil {
+		return nil, nil, err
+	}
+	return func() (string, error) {
+		if err := measurement.Validate(); err != nil {
+			return "", err
+		}
+		return measurement.Snapshot().RootFS.SHA256, nil
+	}, measurement.Close, nil
+}
+
+func TestMeasuredPreflightWithProtectedImageFiles(t *testing.T) {
+	root := os.Getenv("PROVENANCE_MEASUREMENT_FIXTURE_ROOT")
+	if root == "" {
+		t.Skip("disposable privileged fixture required")
+	}
+	if root != "/tmp/provenance-runtime-fixture" || os.Getuid() != 1000 {
+		t.Fatal("unexpected fixture")
+	}
+	if _, err := os.ReadFile(filepath.Join(root, "mount", "private-root-file")); !errors.Is(err, os.ErrPermission) {
+		t.Fatal("protected file was weakened")
+	}
+	legacy, closeLegacy, err := smokeRootIdentity(filepath.Join(root, "mount"), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeLegacy()
+	if _, err := legacy(); err == nil {
+		t.Fatal("expected legacy tar permission failure")
+	}
+	identity, closeIdentity, err := smokeRootIdentity(filepath.Join(root, "mount"), filepath.Join(root, "runsc"), filepath.Join(root, "image.squashfs"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeIdentity()
+	before, err := identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := identity()
+	if err != nil || before != after {
+		t.Fatal("measured identity drift")
+	}
+	if err := closeIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity(); err == nil {
+		t.Fatal("closed identity accepted")
+	}
+}
+
 func normalizedRootFSTreeSHA256(rootFS string) (string, error) {
 	digest := sha256.New()
 	var stderr bytes.Buffer
@@ -321,24 +490,60 @@ func normalizedRootFSTreeSHA256(rootFS string) (string, error) {
 	return fmt.Sprintf("%x", digest.Sum(nil)), nil
 }
 
-func waitForExactSystemdLimits(t *testing.T, scope string, expected map[string]string) {
+func waitForExactSystemdLimits(t *testing.T, scope string, expected map[string]string, execution <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
+	last := "unobserved"
 	for time.Now().Before(deadline) {
-		matched := true
-		for name, want := range expected {
-			data, err := os.ReadFile(filepath.Join(scope, name))
-			if err != nil || strings.TrimSpace(string(data)) != want {
-				matched = false
-				break
-			}
+		select {
+		case <-execution:
+			t.Fatal("systemd limit observation: execution ended before limits were verified")
+		default:
 		}
-		if matched {
+		last = systemdLimitObservation(scope, expected)
+		if last == "matched" {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("systemd scope %q did not expose exact resource limits", scope)
+	t.Fatalf("systemd scope did not expose exact resource limits: %s", last)
+}
+
+func systemdLimitObservation(scope string, expected map[string]string) string {
+	for name, want := range expected {
+		data, err := os.ReadFile(filepath.Join(scope, name))
+		if errors.Is(err, os.ErrNotExist) {
+			return "scope_or_limit_absent"
+		}
+		if err != nil {
+			return "limit_unreadable"
+		}
+		if strings.TrimSpace(string(data)) != want {
+			return "limit_mismatch"
+		}
+	}
+	return "matched"
+}
+
+func TestSystemdLimitObservationAttribution(t *testing.T) {
+	scope := t.TempDir()
+	expected := map[string]string{"pids.max": "81"}
+	if systemdLimitObservation(scope, expected) != "scope_or_limit_absent" {
+		t.Fatal("absent limit misclassified")
+	}
+	path := filepath.Join(scope, "pids.max")
+	if err := os.WriteFile(path, []byte("80\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if systemdLimitObservation(scope, expected) != "limit_mismatch" {
+		t.Fatal("wrong limit misclassified")
+	}
+	if err := os.WriteFile(path, []byte("81\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if systemdLimitObservation(scope, expected) != "matched" {
+		t.Fatal("exact limit rejected")
+	}
 }
 
 func waitForScopeRemoval(t *testing.T, scope string) {

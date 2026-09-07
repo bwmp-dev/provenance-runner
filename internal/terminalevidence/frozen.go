@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 )
 
-// ValidateFrozen accepts only this producer's exact partial representation,
+// ValidateFrozen accepts only this producer's exact frozen representation,
 // bound to the immutable executed specification. Empty runnerID is restricted
 // to journal loading before authentication; delivery supplies the real runner.
 func ValidateFrozen(proof *runnerv1.ExecutionEvidence, job *runnerv1.JobSpecification, runnerID string) error {
@@ -74,7 +76,18 @@ func ValidateFrozen(proof *runnerv1.ExecutionEvidence, job *runnerv1.JobSpecific
 		flag := func(key string) bool { value, _ := v[key].(bool); return value }
 		observations = append(observations, Observation{Type: p.kind, Name: p.name, TestID: p.selector["testId"], AssertionID: p.selector["assertionId"], ServerLoaded: flag("serverLoaded"), StabilizationCompleted: flag("stabilizationCompleted"), ServerReady: flag("serverReady"), RequirementsSatisfied: flag("requirementsSatisfied"), Loaded: flag("loaded"), Enabled: flag("enabled"), Registered: flag("registered"), ExecutionCompleted: flag("executionCompleted"), Evaluated: flag("evaluated"), Passed: flag("passed"), OutputTruncated: flag("outputTruncated"), ShutdownRequested: flag("shutdownRequested"), ServerStopped: flag("serverStopped"), ReportedShutdownRequested: flag("reportedShutdownRequested")})
 	}
-	expected, err := Build(c, binding.RunnerID, observations)
+	var measured *runtimeidentity.Snapshot
+	if document["runtime"] != nil {
+		encoded, err := json.Marshal(document["runtime"])
+		if err != nil {
+			return ErrInvalid
+		}
+		measured = new(runtimeidentity.Snapshot)
+		if json.Unmarshal(encoded, measured) != nil || !measured.Valid() {
+			return ErrInvalid
+		}
+	}
+	expected, err := Build(c, binding.RunnerID, observations, measured)
 	if err != nil || !bytes.Equal(expected.GetCanonicalJson(), proof.GetCanonicalJson()) {
 		return ErrInvalid
 	}

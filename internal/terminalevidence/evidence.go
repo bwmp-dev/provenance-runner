@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 )
 
@@ -60,9 +62,9 @@ func (c *Context) Matches(lease *runnerv1.LeaseIdentity, attempt *runnerv1.Attem
 	return c != nil && c.binding.JobID == lease.GetJobId() && c.binding.ExecutionID == lease.GetExecutionId() && c.binding.LeaseID == lease.GetLeaseId() && c.binding.AttemptID == attempt.GetAttemptId() && c.binding.CandidateID == attempt.GetReleaseCandidateId() && c.binding.MatrixEntryID == attempt.GetMatrixEntryId() && c.binding.AttemptNumber == attempt.GetAttemptNumber()
 }
 
-// Build freezes exact canonical bytes once. All production runtime evidence is
-// null/partial: current directory trees are not immutable image measurements.
-func Build(c *Context, runnerID string, observations []Observation) (*runnerv1.ExecutionEvidence, error) {
+// Build freezes exact canonical bytes once. Legacy directory trees remain
+// null/partial; only an execution-bound measurement may populate runtime.
+func Build(c *Context, runnerID string, observations []Observation, measured ...*runtimeidentity.Snapshot) (*runnerv1.ExecutionEvidence, error) {
 	if c == nil || !identifier.MatchString(runnerID) {
 		return nil, ErrInvalid
 	}
@@ -110,7 +112,31 @@ func Build(c *Context, runnerID string, observations []Observation) (*runnerv1.E
 	sort.Slice(assertions, func(i, j int) bool {
 		return assertions[i].(map[string]any)["id"].(string) < assertions[j].(map[string]any)["id"].(string)
 	})
-	document := map[string]any{"schemaVersion": "provenance.execution-evidence/v1", "binding": bound, "requested": c.requested, "runtime": nil, "assertions": assertions, "completeness": "partial"}
+	var runtime any
+	completeness := "partial"
+	if len(measured) > 1 {
+		return nil, ErrInvalid
+	}
+	if len(measured) == 1 && measured[0] != nil {
+		copy := *measured[0]
+		if !copy.Valid() {
+			return nil, ErrInvalid
+		}
+		encoded, _ := json.Marshal(copy)
+		if json.Unmarshal(encoded, &runtime) != nil {
+			return nil, ErrInvalid
+		}
+		complete := true
+		for _, p := range c.planned {
+			if !p.supported || !seen[p.id] {
+				complete = false
+			}
+		}
+		if complete {
+			completeness = "complete"
+		}
+	}
+	document := map[string]any{"schemaVersion": "provenance.execution-evidence/v1", "binding": bound, "requested": c.requested, "runtime": runtime, "assertions": assertions, "completeness": completeness}
 	encoded, err := json.Marshal(document)
 	if err != nil {
 		return nil, ErrInvalid
