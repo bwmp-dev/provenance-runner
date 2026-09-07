@@ -11,7 +11,40 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+func TestLeaseValidMappingRequiresExactCompleteReadOnlyImage(t *testing.T) {
+	lease := &Lease{imageStat: unix.Stat_t{Dev: 2049, Ino: 12345}}
+	exact := unix.LoopInfo64{Device: 2049, Inode: 12345, Flags: unix.LO_FLAGS_READ_ONLY}
+	for _, test := range []struct {
+		name   string
+		change func(*unix.LoopInfo64)
+		valid  bool
+	}{
+		{"exact full image", func(*unix.LoopInfo64) {}, true},
+		{"nonzero offset", func(m *unix.LoopInfo64) { m.Offset = 1 }, false},
+		{"nonzero size limit", func(m *unix.LoopInfo64) { m.Sizelimit = 1 }, false},
+		{"encryption type", func(m *unix.LoopInfo64) { m.Encrypt_type = 1 }, false},
+		{"encryption key size", func(m *unix.LoopInfo64) { m.Encrypt_key_size = 1 }, false},
+		{"missing read only", func(m *unix.LoopInfo64) { m.Flags = 0 }, false},
+		{"other flag is not read only", func(m *unix.LoopInfo64) { m.Flags = unix.LO_FLAGS_AUTOCLEAR }, false},
+		{"wrong backing device", func(m *unix.LoopInfo64) { m.Device++ }, false},
+		{"wrong backing inode", func(m *unix.LoopInfo64) { m.Inode++ }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mapping := exact
+			test.change(&mapping)
+			if got := lease.validMapping(&mapping); got != test.valid {
+				t.Fatalf("validMapping() = %t, want %t", got, test.valid)
+			}
+			if !lease.validMapping(&exact) {
+				t.Fatal("exact baseline was mutated")
+			}
+		})
+	}
+}
 
 func TestRunningExecutableReference(t *testing.T) {
 	file, err := os.Open("/proc/self/exe")
