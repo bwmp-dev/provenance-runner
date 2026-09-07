@@ -198,6 +198,7 @@ func TestRunscSmoke(t *testing.T) {
 			prepared := prepareSmokeEnvironment(t, provider, "smoke", config)
 			defer cleanupSmokeEnvironment(t, prepared)
 			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			result := make(chan error, 1)
 			go func() {
 				_, err := prepared.Execute(ctx)
@@ -209,7 +210,7 @@ func TestRunscSmoke(t *testing.T) {
 				"memory.swap.max": "0",
 				"cpu.max":         "50000 100000",
 				"pids.max":        "81",
-			})
+			}, result)
 			cancel()
 			select {
 			case err := <-result:
@@ -489,24 +490,60 @@ func normalizedRootFSTreeSHA256(rootFS string) (string, error) {
 	return fmt.Sprintf("%x", digest.Sum(nil)), nil
 }
 
-func waitForExactSystemdLimits(t *testing.T, scope string, expected map[string]string) {
+func waitForExactSystemdLimits(t *testing.T, scope string, expected map[string]string, execution <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
+	last := "unobserved"
 	for time.Now().Before(deadline) {
-		matched := true
-		for name, want := range expected {
-			data, err := os.ReadFile(filepath.Join(scope, name))
-			if err != nil || strings.TrimSpace(string(data)) != want {
-				matched = false
-				break
-			}
+		select {
+		case <-execution:
+			t.Fatal("systemd limit observation: execution ended before limits were verified")
+		default:
 		}
-		if matched {
+		last = systemdLimitObservation(scope, expected)
+		if last == "matched" {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("systemd scope %q did not expose exact resource limits", scope)
+	t.Fatalf("systemd scope did not expose exact resource limits: %s", last)
+}
+
+func systemdLimitObservation(scope string, expected map[string]string) string {
+	for name, want := range expected {
+		data, err := os.ReadFile(filepath.Join(scope, name))
+		if errors.Is(err, os.ErrNotExist) {
+			return "scope_or_limit_absent"
+		}
+		if err != nil {
+			return "limit_unreadable"
+		}
+		if strings.TrimSpace(string(data)) != want {
+			return "limit_mismatch"
+		}
+	}
+	return "matched"
+}
+
+func TestSystemdLimitObservationAttribution(t *testing.T) {
+	scope := t.TempDir()
+	expected := map[string]string{"pids.max": "81"}
+	if systemdLimitObservation(scope, expected) != "scope_or_limit_absent" {
+		t.Fatal("absent limit misclassified")
+	}
+	path := filepath.Join(scope, "pids.max")
+	if err := os.WriteFile(path, []byte("80\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if systemdLimitObservation(scope, expected) != "limit_mismatch" {
+		t.Fatal("wrong limit misclassified")
+	}
+	if err := os.WriteFile(path, []byte("81\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if systemdLimitObservation(scope, expected) != "matched" {
+		t.Fatal("exact limit rejected")
+	}
 }
 
 func waitForScopeRemoval(t *testing.T, scope string) {

@@ -185,11 +185,18 @@ func embeddedOptions(arguments []string) bool {
 	}
 	operation := ""
 	networkNone := false
+	rootless := false
 	for _, argument := range arguments {
 		// Never override an explicitly selected STRICT/release policy or select
 		// checkpoint/helper-dependent operations through the measured launcher.
 		if strings.HasPrefix(argument, "--sidecar-") {
 			return false
+		}
+		if argument == "--rootless" || strings.HasPrefix(argument, "--rootless=") {
+			if argument != "--rootless=true" || rootless || operation != "" {
+				return false
+			}
+			rootless = true
 		}
 		if strings.HasPrefix(argument, "--network") && (argument == "--network" || strings.HasPrefix(argument, "--network=")) {
 			if argument != "--network=none" || networkNone || operation != "" {
@@ -201,7 +208,7 @@ func embeddedOptions(arguments []string) bool {
 			operation = argument
 		}
 	}
-	return operation == "run" && networkNone
+	return operation == "run" && networkNone && rootless
 }
 
 func singleCallerMapping(data []byte) bool {

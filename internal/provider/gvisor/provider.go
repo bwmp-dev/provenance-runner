@@ -1115,7 +1115,10 @@ func (p *Provider) runArguments(arguments ...string) []string {
 		global = append(global, "--ignore-cgroups=true")
 	}
 	if p.config.RootFSImagePath != "" {
-		global = append(global, "--gofer-network-namespace=new")
+		// The measured launcher maps only namespace ID0 to its non-root caller.
+		// Explicit rootless mode maps the nested sandbox nobody ID to that ID0,
+		// rather than requesting an unmapped parent ID65534.
+		global = append(global, "--gofer-network-namespace=new", "--rootless=true")
 	}
 	return append(global, arguments...)
 }
