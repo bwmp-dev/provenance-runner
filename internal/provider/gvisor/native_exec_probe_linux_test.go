@@ -48,6 +48,7 @@ func TestMeasuredNativeFDExecDiagnostic(t *testing.T) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS, UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}}, GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, Pdeathsig: syscall.SIGKILL}
 		output, err := cmd.CombinedOutput()
 		category := "none"
+		stage := "complete"
 		if err != nil {
 			category = namespaceFailureCategory(err)
 			for _, value := range []string{"permission", "access", "unsupported", "invalid", "resources", "capacity", "other"} {
@@ -56,7 +57,12 @@ func TestMeasuredNativeFDExecDiagnostic(t *testing.T) {
 				}
 			}
 		}
-		record, _ := json.Marshal(map[string]any{"version": 1, "mapped": true, "pathnameBootstrap": true, "nativeExecveat": native, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
+		for _, value := range []string{"mapped_identity", "actual_open", "retained_stat", "actual_stat", "object_identity", "hash_read", "hash_identity"} {
+			if bytes.Contains(output, []byte("NATIVE_EXEC_STAGE_"+value)) {
+				stage = value
+			}
+		}
+		record, _ := json.Marshal(map[string]any{"version": 1, "goVersion": runtime.Version(), "stage": stage, "mapped": true, "pathnameBootstrap": true, "nativeExecveat": native, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
 		t.Log("MEASURED_NATIVE_EXEC_PROBE=" + string(record))
 	}
 }
@@ -67,32 +73,35 @@ func TestMeasuredNativeFDExecChild(t *testing.T) {
 		t.Skip("owned diagnostic child only")
 	}
 	if os.Getuid() != 0 || os.Getgid() != 0 {
-		t.Fatal("incorrect mapped identity")
+		t.Fatal("NATIVE_EXEC_STAGE_mapped_identity")
 	}
 	retained := os.NewFile(3, "retained-probe")
 	defer retained.Close()
 	actual, err := os.Open("/proc/self/exe")
 	if err != nil {
-		t.Fatal("actual executable unavailable")
+		t.Fatal("NATIVE_EXEC_STAGE_actual_open NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
 	}
 	defer actual.Close()
 	left, err := retained.Stat()
 	if err != nil {
-		t.Fatal("retained stat unavailable")
+		t.Fatal("NATIVE_EXEC_STAGE_retained_stat NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
 	}
 	right, err := actual.Stat()
-	if err != nil || !os.SameFile(left, right) {
-		t.Fatal("executable identity substituted")
+	if err != nil {
+		t.Fatal("NATIVE_EXEC_STAGE_actual_stat NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
+	}
+	if !os.SameFile(left, right) {
+		t.Fatal("NATIVE_EXEC_STAGE_object_identity")
 	}
 	hashFile := func(f *os.File) []byte {
 		h := sha256.New()
 		if _, err := io.Copy(h, io.NewSectionReader(f, 0, left.Size())); err != nil {
-			t.Fatal("executable hash unavailable")
+			t.Fatal("NATIVE_EXEC_STAGE_hash_read NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
 		}
 		return h.Sum(nil)
 	}
 	if !bytes.Equal(hashFile(retained), hashFile(actual)) {
-		t.Fatal("executable bytes substituted")
+		t.Fatal("NATIVE_EXEC_STAGE_hash_identity")
 	}
 	if phase == "terminal" {
 		fmt.Println("NATIVE_EXEC_SAME_OBJECT_OK")

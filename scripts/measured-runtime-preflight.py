@@ -4,6 +4,7 @@ import ctypes
 import errno
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 
@@ -32,6 +33,8 @@ def main():
               "maxUserNamespaces": scalar("/proc/sys/user/max_user_namespaces"),
               "apparmorRestrictUnprivilegedUserns": scalar("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
               "confinement": confinement()}
+    release = os.uname().release
+    record["kernelRelease"] = release if re.fullmatch(r"[A-Za-z0-9._+\-]{1,128}", release) else "unavailable"
     try:
         flag = Path("/sys/module/apparmor/parameters/enabled").read_text().strip()
         record["apparmorEnabled"] = {"Y": True, "N": False}.get(flag)
