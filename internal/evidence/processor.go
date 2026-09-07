@@ -8,17 +8,21 @@ import (
 )
 
 type rawProcessor struct {
-	mu         sync.Mutex
-	collector  *Collector
-	stream     Stream
-	normalizer utf8Normalizer
-	ansi       ansiStripper
-	redactor   secretRedactor
-	line       lineLimiter
-	finished   bool
-	prefix     []byte
-	probe      []byte
-	route      uint8
+	mu                                       sync.Mutex
+	collector                                *Collector
+	stream                                   Stream
+	normalizer                               utf8Normalizer
+	ansi                                     ansiStripper
+	redactor                                 secretRedactor
+	line                                     lineLimiter
+	finished                                 bool
+	prefix                                   []byte
+	probe                                    []byte
+	route                                    uint8
+	probeMasked                              []bool
+	rawMasked                                bool
+	structuredLine                           lineLimiter
+	structuredUnsafe, jsonString, jsonEscape bool
 }
 
 func newRawProcessor(collector *Collector, stream Stream, config Config) *rawProcessor {
@@ -33,14 +37,24 @@ func newRawProcessor(collector *Collector, stream Stream, config Config) *rawPro
 	processor.line = lineLimiter{
 		maximum: maximumLineBytes,
 		emit: func(line []byte, truncated, partial, redacted bool) {
-			collector.emitRawLine(stream, line, truncated, partial, redacted)
+			collector.emitRawLine(stream, line, truncated, partial, redacted, false)
 		},
 	}
-	processor.redactor = newSecretRedactor(config.patterns, processor.line.write)
+	processor.structuredLine = lineLimiter{maximum: maximumLineBytes, emit: func(line []byte, truncated, partial, redacted bool) {
+		if processor.structuredUnsafe {
+			collector.mu.Lock()
+			collector.setStructuredEventError("structured event cannot be safely sanitized")
+			collector.mu.Unlock()
+		} else {
+			collector.emitRawLine(stream, line, truncated, partial, redacted, true)
+		}
+	}}
+	processor.redactor = newSecretRedactor(config.patterns, func([]byte, bool) {})
+	processor.redactor.observe = processor.routeMatched
 	if stream == StreamStdout {
 		processor.prefix = []byte(config.StructuredLinePrefix)
 	}
-	processor.ansi.emit = processor.routeBytes
+	processor.ansi.emit = processor.redactor.write
 	processor.normalizer.emit = processor.ansi.write
 	return processor
 }
@@ -64,45 +78,90 @@ func (p *rawProcessor) finish() {
 	}
 	p.normalizer.finish()
 	p.ansi.finish()
-	if len(p.probe) > 0 {
-		p.redactor.write(p.probe)
-		p.probe = nil
-	}
 	p.redactor.finish()
+	for i, value := range p.probe {
+		p.emitMatchedRaw(value, p.probeMasked[i])
+	}
+	p.probe = nil
+	p.probeMasked = nil
+	p.structuredLine.finish()
 	p.line.finish()
 	p.finished = true
 }
 
-// Recognize the controlled structured prefix before redacting, never by
-// modifying serialized JSON. Non-structured bytes keep the streaming matcher.
-func (p *rawProcessor) routeBytes(content []byte) {
-	if len(p.prefix) == 0 {
-		p.redactor.write(content)
-		return
-	}
+// Route original bytes only AFTER the whole-stream matcher has established
+// their masking status. Never reset its state at JSON or newline boundaries.
+func (p *rawProcessor) routeMatched(content []byte, masked bool) {
 	for _, value := range content {
+		if len(p.prefix) == 0 {
+			p.emitMatchedRaw(value, masked)
+			continue
+		}
 		if p.route == 0 {
 			p.probe = append(p.probe, value)
+			p.probeMasked = append(p.probeMasked, masked)
 			if !bytes.HasPrefix(p.prefix, p.probe) {
 				p.route = 1
-				p.redactor.write(p.probe)
+				for i, b := range p.probe {
+					p.emitMatchedRaw(b, p.probeMasked[i])
+				}
 				p.probe = p.probe[:0]
+				p.probeMasked = p.probeMasked[:0]
 			} else if len(p.probe) == len(p.prefix) {
-				p.redactor.finish()
-				p.redactor = newSecretRedactor(p.redactor.patterns, p.line.write)
 				p.route = 2
-				p.line.write(p.probe, false)
+				p.structuredUnsafe = false
+				p.jsonString = false
+				p.jsonEscape = false
+				for _, hit := range p.probeMasked {
+					p.structuredUnsafe = p.structuredUnsafe || hit
+					if !hit {
+						p.rawMasked = false
+					}
+				}
+				p.structuredLine.write(p.probe, false)
 				p.probe = p.probe[:0]
+				p.probeMasked = p.probeMasked[:0]
 			}
 		} else if p.route == 1 {
-			p.redactor.write([]byte{value})
+			p.emitMatchedRaw(value, masked)
 		} else {
-			p.line.write([]byte{value}, false)
+			if !masked {
+				p.rawMasked = false
+			}
+			// A match touching JSON syntax or a scalar is not safely
+			// replaceable. String bodies are sanitized after JSON decoding.
+			inBody := p.jsonString && (p.jsonEscape || value != '"')
+			if masked && !inBody {
+				p.structuredUnsafe = true
+			}
+			if p.jsonString {
+				if p.jsonEscape {
+					p.jsonEscape = false
+				} else if value == '\\' {
+					p.jsonEscape = true
+				} else if value == '"' {
+					p.jsonString = false
+				}
+			} else if value == '"' {
+				p.jsonString = true
+			}
+			p.structuredLine.write([]byte{value}, false)
 		}
 		if value == '\n' {
 			p.route = 0
 		}
 	}
+}
+
+func (p *rawProcessor) emitMatchedRaw(value byte, masked bool) {
+	if masked {
+		if !p.rawMasked {
+			p.line.write([]byte(RedactionMarker), true)
+		}
+	} else {
+		p.line.write([]byte{value}, false)
+	}
+	p.rawMasked = masked
 }
 
 type utf8Normalizer struct {

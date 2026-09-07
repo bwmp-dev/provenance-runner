@@ -45,6 +45,10 @@ func sanitizeEvent(input EventInput, patterns *secretPatterns, maximum int64) (E
 			return nil, errStructuredRedaction
 		}
 		switch item := value.(type) {
+		case json.Number:
+			if _, changed := sanitizeString(string(item), patterns); changed {
+				return nil, errStructuredRedaction
+			}
 		case string:
 			result, _ := sanitizeString(item, patterns)
 			return result, nil
@@ -79,8 +83,41 @@ func sanitizeEvent(input EventInput, patterns *secretPatterns, maximum int64) (E
 	if err != nil || int64(len(payload)) > maximum {
 		return EventInput{}, errStructuredRedaction
 	}
+	// Reject surviving scalar/syntax-spanning patterns without rewriting JSON.
+	// Inspect original matched positions so generated replacement markers are
+	// never themselves treated as new secret occurrences.
+	if unsafeSerializedJSON(input.Payload, patterns) || unsafeSerializedJSON(payload, patterns) {
+		return EventInput{}, errStructuredRedaction
+	}
 	input.Payload = payload
 	return input, nil
+}
+
+func unsafeSerializedJSON(payload []byte, patterns *secretPatterns) bool {
+	unsafe, inString, escaped := false, false, false
+	r := newSecretRedactor(patterns, func([]byte, bool) {})
+	r.observe = func(content []byte, masked bool) {
+		for _, value := range content {
+			body := inString && (escaped || value != '"')
+			if masked && !body {
+				unsafe = true
+			}
+			if inString {
+				if escaped {
+					escaped = false
+				} else if value == '\\' {
+					escaped = true
+				} else if value == '"' {
+					inString = false
+				}
+			} else if value == '"' {
+				inString = true
+			}
+		}
+	}
+	r.write(payload)
+	r.finish()
+	return unsafe
 }
 
 func uniqueJSONKeys(decoder *json.Decoder, depth int) bool {

@@ -192,10 +192,10 @@ func (c *Collector) observeRawBytes(count int64) bool {
 	return c.live.truncated
 }
 
-func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated, partial, redacted bool) {
+func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated, partial, redacted, structured bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if stream == StreamStdout && c.config.StructuredLinePrefix != "" && bytes.HasPrefix(line, []byte(c.config.StructuredLinePrefix)) {
+	if structured {
 		if lineTruncated {
 			c.setStructuredEventError("structured event line exceeded the configured line limit")
 			return

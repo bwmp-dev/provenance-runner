@@ -18,13 +18,17 @@ not fed back into matching. Adjacent/overlapping matches form one redacted span.
 
 Raw output is normalized, ANSI-stripped, matched, then line/total-limited. Live
 and compressed complete logs share those bytes and redacted flags. Controlled
-structured stdout prefixes are recognized before matching: JSON is decoded and
-its string values sanitized, rather than replacing bytes in JSON syntax.
+structured stdout prefixes are recognized from original bytes only after the
+whole-stream matcher has decided their masking status. Matcher state and holdback
+are never reset at newline or structured boundaries. JSON is decoded and its
+string values sanitized, rather than replacing bytes in JSON syntax. Matches
+touching the controlled prefix, JSON syntax or scalar number/boolean/null tokens
+drop the event with a fixed diagnostic; cross-boundary raw bytes remain masked.
 The direct RecordEvent boundary uses the same sanitization. With secrets present,
 duplicate keys, keys or event kinds requiring sanitization, excessive nesting
 (over 128 levels), and post-sanitization size overflow drop the event with a fixed
-diagnostic. Keys are never silently renamed or merged. JSON numbers retain their
-lexical precision. With no secrets, direct event behavior is unchanged.
+diagnostic. Keys are never silently renamed or merged. Untouched JSON numbers
+retain their lexical precision. With no secrets, direct event behavior is unchanged.
 
 The matching set cannot establish credential delivery, custody, injection,
 destruction, or exclusion from other subsystems. Tests are synthetic and do not

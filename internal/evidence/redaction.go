@@ -114,6 +114,7 @@ type secretRedactor struct {
 	read, written int64
 	masked        bool
 	emit          func([]byte, bool)
+	observe       func([]byte, bool)
 }
 
 func newSecretRedactor(patterns *secretPatterns, emit func([]byte, bool)) secretRedactor {
@@ -126,6 +127,10 @@ func newSecretRedactor(patterns *secretPatterns, emit func([]byte, bool)) secret
 
 func (r *secretRedactor) write(content []byte) {
 	if len(r.pending) == 0 {
+		if r.observe != nil {
+			r.observe(content, false)
+			return
+		}
 		r.emit(content, false)
 		return
 	}
@@ -162,6 +167,12 @@ func (r *secretRedactor) emitNext() {
 		r.intervals = r.intervals[1:]
 	}
 	masked := len(r.intervals) > 0 && r.intervals[0].start <= r.written
+	if r.observe != nil {
+		pos := r.written % int64(len(r.pending))
+		r.observe(r.pending[pos:pos+1], masked)
+		r.written++
+		return
+	}
 	if masked {
 		if !r.masked {
 			r.emit([]byte(RedactionMarker), true)
