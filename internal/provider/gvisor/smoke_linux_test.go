@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -32,6 +33,70 @@ func TestMain(m *testing.M) {
 		os.Exit(RunSystemdLauncher(os.Args[2:], os.Stderr))
 	}
 	os.Exit(m.Run())
+}
+
+func TestMeasuredNamespaceProbeChild(t *testing.T) {
+	if os.Getenv("PROVENANCE_MEASURED_NAMESPACE_PROBE") != "1" {
+		t.Skip("owned diagnostic child only")
+	}
+	if os.Getenv("PROVENANCE_MEASURED_NAMESPACE_MAPPED") == "1" && (os.Getuid() != 0 || os.Getgid() != 0) {
+		t.Fatal("unexpected mapped identity")
+	}
+	fmt.Println("MEASURED_NAMESPACE_CHILD_OK")
+}
+
+func TestMeasuredNamespaceExecDiagnostic(t *testing.T) {
+	if os.Getenv("PROVENANCE_MEASURED_EXEC_DIAGNOSTIC") != "1" {
+		t.Skip("owned disposable diagnostic only")
+	}
+	if os.Getuid() == 0 {
+		t.Fatal("diagnostic requires nonroot owned user")
+	}
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mapped := range []bool{false, true} {
+		for _, fd := range []bool{false, true} {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			file, err := os.Open("/proc/self/exe")
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			executable := path
+			if fd {
+				executable = "/proc/self/fd/3"
+			}
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestMeasuredNamespaceProbeChild$", "-test.count=1", "-test.v")
+			cmd.Env = append(os.Environ(), "PROVENANCE_MEASURED_NAMESPACE_PROBE=1", fmt.Sprintf("PROVENANCE_MEASURED_NAMESPACE_MAPPED=%d", map[bool]int{false: 0, true: 1}[mapped]))
+			cmd.ExtraFiles = []*os.File{file}
+			if mapped {
+				cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS, UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}}, GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, Pdeathsig: syscall.SIGKILL}
+			}
+			var output bytes.Buffer
+			cmd.Stdout = &output
+			cmd.Stderr = &output
+			startErr := cmd.Start()
+			started := startErr == nil
+			pid := 0
+			if started {
+				pid = cmd.Process.Pid
+				err = cmd.Wait()
+			} else {
+				err = startErr
+			}
+			category := "none"
+			if err != nil {
+				category = namespaceFailureCategory(err)
+			}
+			result := map[string]any{"version": 1, "mapped": mapped, "retainedFD": fd, "started": started, "pid": pid, "uid": os.Getuid(), "errorCategory": category, "childConfirmed": err == nil && strings.Contains(output.String(), "MEASURED_NAMESPACE_CHILD_OK")}
+			encoded, _ := json.Marshal(result)
+			t.Log("MEASURED_EXEC_PROBE=" + string(encoded))
+			file.Close()
+			cancel()
+		}
+	}
 }
 
 func TestRunscSmoke(t *testing.T) {
