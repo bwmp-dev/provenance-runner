@@ -11,7 +11,7 @@ for input in "$runsc" "$source_archive" "$builder" "$test_binary"; do
   [[ "$input" == /* && -f "$input" && ! -L "$input" ]]
 done
 [[ "$evidence" == /* && ! -e "$evidence" && ! -L "$evidence" ]]
-for prerequisite in systemctl systemd-run useradd userdel setpriv losetup mount umount mountpoint python3 jq timeout pgrep getent sha256sum; do
+for prerequisite in systemctl systemd-run useradd userdel setpriv losetup mount umount mountpoint python3 jq timeout pgrep getent sha256sum apparmor_parser; do
   command -v "$prerequisite" >/dev/null || { echo "missing measured fixture prerequisite: $prerequisite" >&2; exit 1; }
 done
 builder_environment=(env -u LD_PRELOAD -u LD_AUDIT -u LD_LIBRARY_PATH)
@@ -34,6 +34,7 @@ fi
 fixture=$(mktemp -d /var/lib/provenance-measurement-ci.XXXXXXXX)
 task_user="pvm$(basename "$fixture" | tr -cd 'a-zA-Z0-9' | tail -c 9 | tr 'A-Z' 'a-z')"
 task_uid= task_gid= user_created=0 manager_started=0 loop= image= monitor_pid= root_mounted=0 evidence_created=0 cleanup_error=0
+source "$(dirname "$0")/measured-runtime-profile.sh"
 cleanup() {
   result=$?
   trap - EXIT
@@ -71,7 +72,8 @@ cleanup() {
       [[ -z $(losetup --noheadings --output NAME --associated "$image") ]] || clean=0
     else clean=0; fi
   fi
-  if [[ "$user_created" == 1 ]]; then
+  profile_remove || clean=0
+  if [[ "$user_created" == 1 && "$profile_loaded" == 0 && "$profile_uncertain" == 0 ]]; then
     if [[ $(id -u "$task_user") == "$task_uid" ]] && ! pgrep -u "$task_uid" >/dev/null; then
       userdel "$task_user" || clean=0
       # useradd --user-group created this group. Do not delete a surviving
@@ -84,13 +86,20 @@ cleanup() {
     echo "measured fixture evidence creation failed; retained target: $fixture" >&2
     exit 1
   fi
+  jq -n --arg name "$profile_name" --arg sha256 "$profile_sha" --arg status "$profile_status" \
+    --argjson loaded "$profile_loaded" --argjson uncertain "$profile_uncertain" \
+    --argjson loadSucceeded "$profile_load_succeeded" --argjson zeroProcesses "$profile_zero_processes" \
+    '{version:1,name:$name,sha256:$sha256,status:$status,loaded:($loaded==1),uncertain:($uncertain==1),loadSucceeded:($loadSucceeded==1),zeroOwnedProcessesBeforeRemoval:($zeroProcesses==1)}' > "$evidence/profile.json" || clean=0
+  if [[ -n "$profile_file" && -f "$profile_file" && ! -L "$profile_file" ]]; then
+    cp -- "$profile_file" "$evidence/profile.txt" || clean=0
+  fi
   jq -n --arg user "$task_user" --arg uid "$task_uid" --arg gid "$task_gid" --arg loop "$loop" --arg fixture "$fixture" --argjson clean "$clean" --argjson result "$result" \
     '{version:1,disposableUser:$user,disposableUid:$uid,disposableGid:$gid,allocatedLoop:$loop,fixturePath:$fixture,cleanupSucceeded:($clean==1),testExit:$result}' > "$evidence/cleanup.json" || clean=0
   evidence_owner=${SUDO_UID:-0}
   [[ "$evidence_owner" =~ ^[0-9]+$ ]] || exit 1
   chown "$evidence_owner" "$evidence" || clean=0
-  (cd "$evidence" && shopt -s nullglob && sha256sum -- *.json *.log > manifest.sha256) || clean=0
-  for record in cleanup.json image.json smoke.log executable-observations.json monitor.log preflight.json exec-probe.log manifest.sha256; do
+  (cd "$evidence" && shopt -s nullglob && sha256sum -- *.json *.log *.txt > manifest.sha256) || clean=0
+  for record in cleanup.json image.json smoke.log executable-observations.json monitor.log preflight.json exec-probe.log profile.json profile.txt manifest.sha256; do
     if [[ -f "$evidence/$record" && ! -L "$evidence/$record" ]]; then chown "$evidence_owner" "$evidence/$record" || clean=0; fi
   done
   # Never erase a failed cleanup target. Keep it for exact operator diagnosis.
@@ -117,6 +126,8 @@ useradd --uid "$task_uid" --user-group --no-create-home --home-dir "$fixture/hom
 user_created=1
 [[ $(id -u "$task_user") == "$task_uid" ]]
 task_gid=$(id -g "$task_user")
+chown "0:$task_gid" "$fixture"
+chmod 0710 "$fixture"
 mkdir -m 0700 "$fixture/home" "$fixture/work"
 chown "$task_uid:$task_gid" "$fixture/home" "$fixture/work"
 mkdir -m 0711 "$fixture/rootfs"
@@ -134,7 +145,9 @@ minor=$(stat -c '%T' "$loop")
 mknod -m 0444 "$fixture/loop" b 7 "$((16#$minor))"
 mount -t squashfs -o ro,nosuid,nodev "$loop" "$fixture/rootfs"
 root_mounted=1
-install -m 0555 "$test_binary" "$fixture/gvisor-smoke.test"
+install -o 0 -g "$task_gid" -m 0550 "$test_binary" "$fixture/gvisor-smoke.test"
+profile_prepare
+profile_load
 ! systemctl is-active --quiet "user@${task_uid}.service"
 if systemctl start "user@${task_uid}.service"; then
   manager_started=1

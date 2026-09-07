@@ -70,7 +70,7 @@ class MonitorTests(unittest.TestCase):
         script = Path(__file__).with_name("test-measured-runtime-systemd.sh").read_text()
         self.assertNotIn("userdel -r", script)
         self.assertNotIn("chmod", "\n".join(line for line in script.splitlines() if '"$loop"' in line))
-        self.assertIn('[[ "$user_created" == 1 ]]', script)
+        self.assertIn('[[ "$user_created" == 1 && "$profile_loaded" == 0 && "$profile_uncertain" == 0 ]]', script)
         self.assertIn('[[ "$root_mounted" == 1 ]]', script)
         self.assertIn('[[ "$clean" == 1 && "$fixture" =~', script)
         self.assertLess(script.index("trap cleanup EXIT"), script.index('chmod 0711 "$fixture"'))
@@ -84,7 +84,7 @@ class MonitorTests(unittest.TestCase):
         # isolated output, replacing only external recording utilities.
         for failing in ("jq", "sha256sum", "chown"):
             with self.subTest(failing=failing), tempfile.TemporaryDirectory() as tmp:
-                shell = ('set -u\n' + function + '\n'
+                shell = ('set -u\nsource "' + str(Path(__file__).with_name('measured-runtime-profile.sh')) + '"\n' + function + '\n'
                          'fixture=$1 evidence=$1 task_user=fixture task_uid= task_gid= loop= image=\n'
                          'monitor_pid= manager_started=0 root_mounted=0 user_created=0 evidence_created=1 cleanup_error=0\n'
                          'jq() { echo "{}"; }; sha256sum() { return 0; }; chown() { return 0; };\n'
