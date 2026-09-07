@@ -50,6 +50,7 @@ func TestMeasuredNativeFDExecDiagnostic(t *testing.T) {
 		category := "none"
 		stage := "complete"
 		if err != nil {
+			stage = "launch_or_child"
 			category = namespaceFailureCategory(err)
 			for _, value := range []string{"permission", "access", "unsupported", "invalid", "resources", "capacity", "other"} {
 				if bytes.Contains(output, []byte("NATIVE_EXEC_ERROR_"+value)) {
@@ -57,12 +58,18 @@ func TestMeasuredNativeFDExecDiagnostic(t *testing.T) {
 				}
 			}
 		}
-		for _, value := range []string{"mapped_identity", "actual_open", "retained_stat", "actual_stat", "object_identity", "hash_read", "hash_identity"} {
+		for _, value := range []string{"mapped_identity", "actual_open", "retained_stat", "actual_stat", "object_identity", "retained_hash", "actual_hash", "hash_identity", "execveat", "proc_exec"} {
 			if bytes.Contains(output, []byte("NATIVE_EXEC_STAGE_"+value)) {
 				stage = value
 			}
 		}
-		record, _ := json.Marshal(map[string]any{"version": 1, "goVersion": runtime.Version(), "stage": stage, "mapped": true, "pathnameBootstrap": true, "nativeExecveat": native, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
+		confinement := "unavailable"
+		for _, value := range []string{"unconfined", "confined"} {
+			if bytes.Contains(output, []byte("NATIVE_EXEC_CONFINEMENT_"+value)) {
+				confinement = value
+			}
+		}
+		record, _ := json.Marshal(map[string]any{"version": 1, "goVersion": runtime.Version(), "confinement": confinement, "stage": stage, "mapped": true, "pathnameBootstrap": true, "nativeExecveat": native, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
 		t.Log("MEASURED_NATIVE_EXEC_PROBE=" + string(record))
 	}
 }
@@ -74,6 +81,13 @@ func TestMeasuredNativeFDExecChild(t *testing.T) {
 	}
 	if os.Getuid() != 0 || os.Getgid() != 0 {
 		t.Fatal("NATIVE_EXEC_STAGE_mapped_identity")
+	}
+	if value, err := os.ReadFile("/proc/self/attr/current"); err == nil {
+		if strings.TrimSpace(string(value)) == "unconfined" {
+			fmt.Println("NATIVE_EXEC_CONFINEMENT_unconfined")
+		} else {
+			fmt.Println("NATIVE_EXEC_CONFINEMENT_confined")
+		}
 	}
 	retained := os.NewFile(3, "retained-probe")
 	defer retained.Close()
@@ -93,14 +107,14 @@ func TestMeasuredNativeFDExecChild(t *testing.T) {
 	if !os.SameFile(left, right) {
 		t.Fatal("NATIVE_EXEC_STAGE_object_identity")
 	}
-	hashFile := func(f *os.File) []byte {
+	hashFile := func(f *os.File, stage string) []byte {
 		h := sha256.New()
 		if _, err := io.Copy(h, io.NewSectionReader(f, 0, left.Size())); err != nil {
-			t.Fatal("NATIVE_EXEC_STAGE_hash_read NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
+			t.Fatal("NATIVE_EXEC_STAGE_" + stage + " NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
 		}
 		return h.Sum(nil)
 	}
-	if !bytes.Equal(hashFile(retained), hashFile(actual)) {
+	if !bytes.Equal(hashFile(retained, "retained_hash"), hashFile(actual, "actual_hash")) {
 		t.Fatal("NATIVE_EXEC_STAGE_hash_identity")
 	}
 	if phase == "terminal" {
@@ -118,8 +132,10 @@ func TestMeasuredNativeFDExecChild(t *testing.T) {
 	fmt.Println("NATIVE_EXEC_PRECHECK_OK")
 	if os.Getenv("PROVENANCE_NATIVE_EXEC_METHOD") == "true" {
 		err = nativeProbeExec(3, arguments, environment)
+		fmt.Println("NATIVE_EXEC_STAGE_execveat")
 	} else {
 		err = syscall.Exec("/proc/self/fd/3", arguments, environment)
+		fmt.Println("NATIVE_EXEC_STAGE_proc_exec")
 	}
 	t.Fatal("NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
 }
