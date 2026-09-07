@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -26,6 +27,7 @@ type clientSession struct {
 	jobCorrelationV1              bool
 	restartUploadRecovery         bool
 	objectUploadIdentity          bool
+	terminalEvidenceV1            bool
 	seen                          map[string][sha256.Size]byte
 	seenOrder                     []string
 	pendingHeartbeat              *runnerv1.RunnerMessage
@@ -243,6 +245,9 @@ func (s *clientSession) queueDurable(payload any, mutate func(*journalState) err
 	default:
 		return errors.New("unsupported durable runner event")
 	}
+	if err := terminalMessageBound(message); err != nil {
+		return err
+	}
 	encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(message)
 	if err != nil {
 		return err
@@ -250,6 +255,9 @@ func (s *clientSession) queueDurable(payload any, mutate func(*journalState) err
 	if err := s.client.journal.update(func(state *journalState) error {
 		if len(state.PendingMessage) != 0 {
 			return errors.New("runner already has an unacknowledged durable event")
+		}
+		if err := validateTerminalProof(message, *state, s.client.config.RunnerID); err != nil {
+			return errors.New("terminal evidence does not match active job")
 		}
 		if mutate != nil {
 			if err := mutate(state); err != nil {
@@ -261,7 +269,7 @@ func (s *clientSession) queueDurable(payload any, mutate func(*journalState) err
 	}); err != nil {
 		return err
 	}
-	return s.send(message)
+	return s.sendRetained(message)
 }
 
 func (s *clientSession) replayPending() error {
@@ -273,7 +281,7 @@ func (s *clientSession) replayPending() error {
 	if err := proto.Unmarshal(pending, message); err != nil {
 		return err
 	}
-	return s.send(message)
+	return s.sendRetained(message)
 }
 
 func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.RunnerEventAcknowledgement, now time.Time) error {
@@ -1093,6 +1101,16 @@ func (s *clientSession) queueResult(result execution.Result) error {
 	if err != nil {
 		return err
 	}
+	var proof *runnerv1.ExecutionEvidence
+	if result.TerminalContext != nil {
+		if !result.TerminalContext.Matches(lease, attempt) || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
+			return permanent("terminal evidence executed identity mismatch")
+		}
+		proof, err = terminalevidence.Build(result.TerminalContext, s.authenticated.GetRunnerId(), result.TerminalObservations)
+		if err != nil {
+			return permanent("terminal evidence could not be frozen")
+		}
+	}
 	startedAt, completedAt, err := normalizedTerminalTimes(result.StartedAt, result.CompletedAt)
 	if err != nil {
 		return err
@@ -1111,7 +1129,8 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		}
 		if err != nil {
 			failed := &runnerv1.JobFailed{
-				Lease: lease, Attempt: attempt, FailedAt: timestamppb.New(completedAt),
+				ExecutionEvidence: proof,
+				Lease:             lease, Attempt: attempt, FailedAt: timestamppb.New(completedAt),
 				Usage: usage,
 				Failure: &runnerv1.FailureDetail{
 					Category:  runnerv1.FailureCategory_FAILURE_CATEGORY_INFRASTRUCTURE,
@@ -1134,11 +1153,11 @@ func (s *clientSession) queueResult(result execution.Result) error {
 			value := int32(*result.Execution.ExitCode)
 			structured.ProcessExitCode = &value
 		}
-		completed := &runnerv1.JobCompleted{Lease: lease, Attempt: attempt, Result: structured}
+		completed := &runnerv1.JobCompleted{Lease: lease, Attempt: attempt, Result: structured, ExecutionEvidence: proof}
 		return s.queueDurable(&runnerv1.RunnerMessage_Completed{Completed: completed}, nil)
 	}
 	failure := resultFailure(result)
-	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, Usage: usage, CompleteLog: completeLog, FailedAt: timestamppb.New(completedAt)}
+	failed := &runnerv1.JobFailed{Lease: lease, Attempt: attempt, Failure: failure, Usage: usage, CompleteLog: completeLog, FailedAt: timestamppb.New(completedAt), ExecutionEvidence: proof}
 	return s.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: failed}, nil)
 }
 

@@ -22,6 +22,11 @@ func (strictProtocolCodec) Marshal(value any) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("protobuf codec cannot marshal %T", value)
 	}
+	if runner, ok := value.(*runnerv1.RunnerMessage); ok {
+		if err := terminalMessageBound(runner); err != nil {
+			return nil, err
+		}
+	}
 	return proto.Marshal(message)
 }
 

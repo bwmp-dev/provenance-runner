@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/artifact"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	"github.com/bwmp-dev/provenance-runner/internal/workspace"
 )
 
@@ -426,6 +428,17 @@ func TestExecutorPreservesValidatedProbeFailureCode(t *testing.T) {
 	}
 	// Compare only the classification projection; wall clocks, logs and sandbox
 	// identity are covered separately and are not classification inputs.
+	observationBytes, err := os.ReadFile("../../gatewayclient/testdata/paper-terminal-observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expectedObservations []terminalevidence.Observation
+	if err := json.Unmarshal(observationBytes, &expectedObservations); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.TerminalObservations, expectedObservations) {
+		t.Fatalf("actual provider/executor observations differ from serializer fixture: %#v", result.TerminalObservations)
+	}
 	wire, err := os.ReadFile("../../gatewayclient/testdata/paper-workload-result.json")
 	if err != nil {
 		t.Fatal(err)

@@ -214,6 +214,9 @@ func validateJournalState(state journalState) error {
 		if validateJournalRunnerEnvelope(message, state.MessageSequence) != nil || !durableRunnerMessage(message) {
 			return errors.New("pending runner message is not a durable lease event")
 		}
+		if err := validateTerminalProof(message, state, ""); err != nil {
+			return errors.New("pending terminal evidence is invalid")
+		}
 		if message.GetLeaseRejected() == nil {
 			lease, attempt := runnerMessageIdentity(message)
 			if !activeMatchesIdentity(state.Active, lease, attempt) {

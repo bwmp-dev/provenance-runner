@@ -1,0 +1,103 @@
+{
+  "description": "Synthetic contract data, NOT observed host measurements. Digests of canonical assertion preimages are frozen in vectors.json.",
+  "binding": {
+    "runnerId": "runner-1",
+    "jobId": "job-1",
+    "executionId": "execution-1",
+    "leaseId": "lease-1",
+    "attemptId": "attempt-1",
+    "attemptNumber": 1,
+    "candidateId": "candidate-1",
+    "matrixEntryId": "matrix-1"
+  },
+  "requested": {
+    "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "configurationSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "environmentSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "policySha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "dependencies": [
+      {
+        "id": "dep-1",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ]
+  },
+  "observations": [
+    [
+      "01-ready",
+      "startup-ready",
+      {
+        "serverLoaded": true,
+        "stabilizationCompleted": true,
+        "serverReady": true,
+        "requirementsSatisfied": true
+      },
+      {}
+    ],
+    [
+      "02-target",
+      "plugin-enabled",
+      {
+        "targetId": "target",
+        "loaded": true,
+        "enabled": true
+      },
+      {
+        "targetId": "target"
+      }
+    ],
+    [
+      "03-dependency",
+      "dependency-present",
+      {
+        "dependencyId": "dep-1",
+        "dependencySha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "loaded": true,
+        "enabled": true
+      },
+      {
+        "dependencyId": "dep-1",
+        "dependencySha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    [
+      "04-command",
+      "console-regex",
+      {
+        "testId": "command-1",
+        "assertionId": "assertion-1",
+        "registered": true,
+        "executionCompleted": true,
+        "evaluated": true,
+        "passed": true,
+        "outputTruncated": false
+      },
+      {
+        "testId": "command-1",
+        "assertionId": "assertion-1"
+      }
+    ],
+    [
+      "05-shutdown",
+      "clean-shutdown",
+      {
+        "shutdownRequested": true,
+        "serverStopped": true,
+        "reportedShutdownRequested": true
+      },
+      {}
+    ]
+  ],
+  "runtime": {
+    "runnerVersion": "0.1.0-alpha.1",
+    "runnerExecutableSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "sandboxKind": "gvisor",
+    "sandboxVersion": "release-20260824.0",
+    "sandboxExecutableSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "networkMode": "none",
+    "rootfs": {
+      "format": "squashfs-image-sha256/v1",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    }
+  }
+}

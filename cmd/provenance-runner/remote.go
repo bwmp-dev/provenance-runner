@@ -7,6 +7,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 )
 
@@ -24,11 +25,17 @@ func (w *connectedWorker) Execute(ctx context.Context, specification *runnerv1.J
 	if err != nil {
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "remote_job_adaptation_failed", err)
 	}
+	proofContext, err := terminalevidence.NewContext(specification)
+	if err != nil {
+		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "terminal_evidence_context_invalid", terminalevidence.ErrInvalid)
+	}
 	executor, err := execution.NewExecutor(w.registry, execution.ExecutorOptions{BeforeExecute: beforeExecute})
 	if err != nil {
 		return execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err)
 	}
-	return executor.Execute(ctx, job)
+	result := executor.Execute(ctx, job)
+	result.TerminalContext = proofContext
+	return result
 }
 
 func newConnectedWorker(registry *providerRegistry) (*connectedWorker, error) {
