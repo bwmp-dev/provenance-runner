@@ -50,6 +50,22 @@ class MonitorTests(unittest.TestCase):
         result = subprocess.run(["bash", str(script)], env={"PATH": os.environ["PATH"]}, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_actual_driver_invocation_enters_user_app_scope(self):
+        script = Path(__file__).with_name("test-measured-runtime-systemd.sh").read_text()
+        invocation = script[script.rindex('setpriv --reuid'):]
+        with tempfile.TemporaryDirectory() as tmp:
+            shell = ('set -eu\n'
+                     'fixture=$1 evidence=$1 task_uid=61001 task_gid=61001 runsc=/fixture/runsc image=/fixture/image scope_root=/fixture/app.slice\n'
+                     'session_env=(HOME=/fixture XDG_RUNTIME_DIR=/fixture/session)\n'
+                     # Capture the actual emitted argv; never create users/scopes.
+                     'setpriv() { printf "%s\\0" "$@"; }\n' + invocation)
+            result = subprocess.run(["bash", "-c", shell, "driver-test", tmp], capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            args = (Path(tmp) / "smoke.log").read_bytes().split(b"\0")
+            index = args.index(b"systemd-run")
+            self.assertEqual(args[index:index+7], [b"systemd-run",b"--user",b"--scope",b"--collect",b"--quiet",b"--slice=app.slice",b"--unit=pvm-driver"])
+            self.assertEqual(args[index+7:index+10], [b"timeout",b"--foreground",b"180s"])
+
     def test_cleanup_does_not_remove_existing_user_data_or_shared_device(self):
         script = Path(__file__).with_name("test-measured-runtime-systemd.sh").read_text()
         self.assertNotIn("userdel -r", script)
