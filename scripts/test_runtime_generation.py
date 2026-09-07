@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+import json
 
 
 def module(name):
@@ -15,9 +16,30 @@ def module(name):
 
 g=module('runtime-generation')
 s=module('prepare-ubuntu-measured-source')
+b=module('runtime-generation-profile-binding')
 
 
 class GenerationTests(unittest.TestCase):
+    def test_profile_binding_exact_identity_and_exclusive_group(self):
+        path='/var/lib/provenance-measurement-ci.ABCDef12/gvisor-smoke.test'
+        expected={'path':path,'device':1,'inode':2,'sha256':'a'*64,'owner':0,'group':62001,'mode':0o550}
+        with tempfile.TemporaryDirectory() as d:
+            record=Path(d)/'binding.json'
+            record.write_text(json.dumps({'version':1,'uid':62001,'gid':62001,'executable':expected}))
+            args=['binding','verify',path,'62001','62001',str(record)]
+            with patch.object(b.sys,'argv',args),patch.object(b.os,'geteuid',return_value=0),\
+                 patch.object(b.grp,'getgrgid',return_value=SimpleNamespace(gr_mem=[])),\
+                 patch.object(b.pwd,'getpwall',return_value=[SimpleNamespace(pw_uid=62001,pw_gid=62001)]),\
+                 patch.object(b.Path,'lstat',return_value=SimpleNamespace(st_gid=62001,st_mode=0o40710)),\
+                 patch.object(b,'identity',return_value=expected) as identity:
+                b.main()
+                for key,value in [('inode',3),('sha256','b'*64),('group',62002),('path',path+'x')]:
+                    identity.return_value=expected|{key:value}
+                    with self.subTest(key=key),self.assertRaises(AssertionError):b.main()
+                identity.return_value=expected
+                with patch.object(b.grp,'getgrgid',return_value=SimpleNamespace(gr_mem=['foreign'])),self.assertRaises(AssertionError):b.main()
+                with patch.object(b.pwd,'getpwall',return_value=[SimpleNamespace(pw_uid=62002,pw_gid=62001)]),self.assertRaises(AssertionError):b.main()
+
     def plan(self):
         return {'generation':'/var/lib/example/sha256-'+'a'*64,'image':{'sha256':'a'*64}}
 

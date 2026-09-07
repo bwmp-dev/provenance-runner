@@ -2,10 +2,11 @@
 # A fresh disposable user manager and image; never the production runner host.
 set -euo pipefail
 umask 077
-[[ $(id -u) == 0 && ( $# == 7 || $# == 8 ) ]]
+[[ $(id -u) == 0 && ( $# == 7 || $# == 8 || $# == 10 ) ]]
 [[ ${GITHUB_ACTIONS:-} == true && ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ && ${GITHUB_JOB:-} == gvisor-smoke ]]
 runsc=$1 source_archive=$2 source_sha=$3 builder=$4 builder_sha=$5 test_binary=$6 evidence=$7
 libraries=${8:-}
+generation_scratch=${9:-} generation_evidence=${10:-}
 [[ "$source_sha" =~ ^[a-f0-9]{64}$ && "$builder_sha" =~ ^[a-f0-9]{64}$ ]]
 for input in "$runsc" "$source_archive" "$builder" "$test_binary"; do
   [[ "$input" == /* && -f "$input" && ! -L "$input" ]]
@@ -102,6 +103,14 @@ cleanup() {
   for record in cleanup.json image.json smoke.log executable-observations.json monitor.log preflight.json exec-probe.log profile.json profile.txt manifest.sha256; do
     if [[ -f "$evidence/$record" && ! -L "$evidence/$record" ]]; then chown "$evidence_owner" "$evidence/$record" || clean=0; fi
   done
+  if [[ -n ${generation_evidence:-} && -d "$generation_evidence" && ! -L "$generation_evidence" ]]; then
+    chown "$evidence_owner" "$generation_evidence" || clean=0
+    for record in fixture.log source-image.txt tooling-image.txt profile-binding.json manifest.sha256; do
+      if [[ -f "$generation_evidence/$record" && ! -L "$generation_evidence/$record" ]]; then
+        chown "$evidence_owner" "$generation_evidence/$record" || clean=0
+      fi
+    done
+  fi
   # Never erase a failed cleanup target. Keep it for exact operator diagnosis.
   if [[ "$clean" == 1 && "$fixture" =~ ^/var/lib/provenance-measurement-ci\.[A-Za-z0-9]{8}$ ]]; then
     rm -rf -- "$fixture" || clean=0
@@ -184,3 +193,14 @@ setpriv --reuid "$task_uid" --regid "$task_gid" --clear-groups env "${session_en
   PROVENANCE_SYSTEMD_CGROUP_ROOT="$scope_root" \
   systemd-run --user --scope --collect --quiet --slice=app.slice --unit=pvm-driver \
     timeout --foreground 180s "$fixture/gvisor-smoke.test" -test.run '^TestRunscSmoke$' -test.count=1 -test.v -test.timeout=150s > "$evidence/smoke.log" 2>&1
+if [[ -n ${generation_scratch:-} ]]; then
+  # Complete the original cgroup monitor before unrelated disposable-container
+  # work. The existing exclusive identity/profile remain owned until cleanup.
+  touch "$fixture/monitor-stop"
+  wait "$monitor_pid"
+  monitor_pid=
+  profile_present
+  [[ "$profile_loaded" == 1 && "$profile_uncertain" == 0 ]]
+  bash "$(dirname "$0")/test-runtime-generation-ci.sh" "$runsc" "$(dirname "$builder")" \
+    "$generation_scratch" "$generation_evidence" execute "$fixture/gvisor-smoke.test" "$task_uid" "$task_gid"
+fi

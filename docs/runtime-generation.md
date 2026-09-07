@@ -108,6 +108,16 @@ enable the service for unattended startup using this temporary alpha generation.
 
 ## Acceptance and remaining gate
 
+On restricted-userns CI hosts, the synthetic retained-root guest executes inside
+the already-approved measured-systemd fixture lifetime. It reuses that fixture's
+exclusive fresh UID/GID and exact protected `gvisor-smoke.test` attachment, mounted
+read-only at the same absolute path in the disposable container. Host-before,
+container-before/after and host-after records require identical device, inode,
+hash, owner and mode. No new profile rule or attachment is loaded. The original
+cgroup monitor finishes before this sequential guest proof; the container must
+stop before the existing zero-owned-process profile removal. Failed containers
+remain stopped for diagnosis, never intentionally running with the profile.
+
 `test-runtime-generation-ci.sh` runs bounded disposable-container source/image
 proof, real loop/mount/install/refusal/rollback tests and the previously skipped
 protected runtime tests. Its systemd reload calls are explicitly simulated; the

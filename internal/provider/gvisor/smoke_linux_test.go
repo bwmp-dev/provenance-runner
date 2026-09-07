@@ -24,6 +24,15 @@ import (
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == MeasuredLauncherCommand {
+		if expected := os.Getenv("PROVENANCE_MEASUREMENT_EXPECTED_PROFILE"); expected != "" {
+			label, err := os.ReadFile("/proc/self/attr/current")
+			fields := strings.Fields(string(label))
+			if err != nil || len(fields) == 0 || fields[0] != expected {
+				fmt.Fprintln(os.Stderr, "disposable guest did not enter the exact existing profile")
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stderr, "disposable guest entered existing profile:", expected)
+		}
 		os.Exit(RunMeasuredLauncher(os.Args[2:], os.Stderr))
 	}
 	if len(os.Args) > 1 && os.Args[1] == MeasuredChildCommand {
@@ -443,7 +452,15 @@ func TestMeasuredPreflightWithProtectedImageFiles(t *testing.T) {
 	if root == "" {
 		t.Skip("disposable privileged fixture required")
 	}
-	if root != "/tmp/provenance-runtime-fixture" || os.Getuid() != 1000 {
+	expectedUID := 1000
+	if raw := os.Getenv("PROVENANCE_MEASUREMENT_FIXTURE_UID"); raw != "" {
+		var err error
+		expectedUID, err = strconv.Atoi(raw)
+		if err != nil || (expectedUID != 1000 && (expectedUID < 60000 || expectedUID > 63999)) {
+			t.Fatal("unexpected fixture UID")
+		}
+	}
+	if root != "/tmp/provenance-runtime-fixture" || os.Getuid() != expectedUID {
 		t.Fatal("unexpected fixture")
 	}
 	if _, err := os.ReadFile(filepath.Join(root, "mount", "private-root-file")); !errors.Is(err, os.ErrPermission) {

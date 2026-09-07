@@ -4,6 +4,11 @@ set -euo pipefail
 [[ $(id -u) == 0 && -f /.dockerenv ]]
 [[ $# == 6 ]]
 source_tar=$1 runsc_input=$2 builder_input=$3 identity_test=$4 preflight_test=$5 runner_input=$6
+if [[ -n ${PROVENANCE_MEASUREMENT_FIXTURE_LAUNCHER:-} ]]; then
+  python3 /repo/scripts/runtime-generation-profile-binding.py container \
+    "$PROVENANCE_MEASUREMENT_FIXTURE_LAUNCHER" "$PROVENANCE_MEASUREMENT_FIXTURE_UID" \
+    "$PROVENANCE_MEASUREMENT_FIXTURE_GID" /profile-binding.json
+fi
 mkdir -m 0711 /opt/generation-fixture
 mkdir -m 0711 /opt/generation-fixture/prepared /opt/generation-fixture/output
 tar --extract --file "$source_tar" --directory /opt/generation-fixture/prepared
@@ -35,6 +40,11 @@ cp "$runsc_input" /tmp/runsc
 cp "$runner_input" /tmp/measured-runner
 cp /opt/generation-fixture/builder/mksquashfs /tmp/mksquashfs
 LD_LIBRARY_PATH=/opt/generation-fixture/builder/lib bash /repo/scripts/runtime-measurement-fixture.sh
+if [[ -n ${PROVENANCE_MEASUREMENT_FIXTURE_LAUNCHER:-} ]]; then
+  python3 /repo/scripts/runtime-generation-profile-binding.py container \
+    "$PROVENANCE_MEASUREMENT_FIXTURE_LAUNCHER" "$PROVENANCE_MEASUREMENT_FIXTURE_UID" \
+    "$PROVENANCE_MEASUREMENT_FIXTURE_GID" /profile-binding.json
+fi
 image=$(find /opt/generation-fixture/output -maxdepth 1 -name 'sha256-*.squashfs' -type f)
 [[ -n "$image" && "$image" != *$'\n'* ]]
 python3 /repo/scripts/runtime-generation-fixture.py "$image"
