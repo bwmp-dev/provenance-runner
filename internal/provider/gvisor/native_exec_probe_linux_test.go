@@ -30,33 +30,35 @@ func TestMeasuredNativeFDExecDiagnostic(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Fatal("requires owned nonroot caller")
 	}
-	path, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	file, err := os.Open("/proc/self/exe")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "-test.run=^TestMeasuredNativeFDExecChild$", "-test.count=1", "-test.v")
-	cmd.ExtraFiles = []*os.File{file}
-	cmd.Env = append(os.Environ(), "PROVENANCE_NATIVE_EXEC_PHASE=bootstrap")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS, UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}}, GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, Pdeathsig: syscall.SIGKILL}
-	output, err := cmd.CombinedOutput()
-	category := "none"
-	if err != nil {
-		category = namespaceFailureCategory(err)
-		for _, value := range []string{"permission", "access", "unsupported", "invalid", "resources", "capacity", "other"} {
-			if bytes.Contains(output, []byte("NATIVE_EXEC_ERROR_"+value)) {
-				category = value
+	for _, native := range []bool{false, true} {
+		path, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.Open("/proc/self/exe")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, path, "-test.run=^TestMeasuredNativeFDExecChild$", "-test.count=1", "-test.v")
+		cmd.ExtraFiles = []*os.File{file}
+		cmd.Env = append(os.Environ(), "PROVENANCE_NATIVE_EXEC_PHASE=bootstrap", fmt.Sprintf("PROVENANCE_NATIVE_EXEC_METHOD=%t", native))
+		cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS, UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}}, GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, Pdeathsig: syscall.SIGKILL}
+		output, err := cmd.CombinedOutput()
+		category := "none"
+		if err != nil {
+			category = namespaceFailureCategory(err)
+			for _, value := range []string{"permission", "access", "unsupported", "invalid", "resources", "capacity", "other"} {
+				if bytes.Contains(output, []byte("NATIVE_EXEC_ERROR_"+value)) {
+					category = value
+				}
 			}
 		}
+		record, _ := json.Marshal(map[string]any{"version": 1, "mapped": true, "pathnameBootstrap": true, "nativeExecveat": native, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
+		t.Log("MEASURED_NATIVE_EXEC_PROBE=" + string(record))
 	}
-	record, _ := json.Marshal(map[string]any{"version": 1, "mapped": true, "nativeExecveat": true, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
-	t.Log("MEASURED_NATIVE_EXEC_PROBE=" + string(record))
 }
 
 func TestMeasuredNativeFDExecChild(t *testing.T) {
@@ -105,7 +107,11 @@ func TestMeasuredNativeFDExecChild(t *testing.T) {
 	environment = append(environment, "PROVENANCE_NATIVE_EXEC_PHASE=terminal")
 	arguments := []string{"retained-native-probe", "-test.run=^TestMeasuredNativeFDExecChild$", "-test.count=1", "-test.v"}
 	fmt.Println("NATIVE_EXEC_PRECHECK_OK")
-	err = nativeProbeExec(3, arguments, environment)
+	if os.Getenv("PROVENANCE_NATIVE_EXEC_METHOD") == "true" {
+		err = nativeProbeExec(3, arguments, environment)
+	} else {
+		err = syscall.Exec("/proc/self/fd/3", arguments, environment)
+	}
 	t.Fatal("NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
 }
 
