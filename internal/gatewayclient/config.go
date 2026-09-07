@@ -68,9 +68,12 @@ type Config struct {
 	// DisableObjectUploadIdentity is an operator rollback control, not part of
 	// the released connect document. Restart the process to change it.
 	DisableObjectUploadIdentity bool `json:"-"`
-	credential                  []byte
-	journalFile                 string
-	credentialStore             durableCredentialStore
+	// Operator rollback control only, never serialized. Queued proof is retained
+	// and refused rather than stripped when this disables advertisement.
+	DisableTerminalEvidence bool `json:"-"`
+	credential              []byte
+	journalFile             string
+	credentialStore         durableCredentialStore
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {

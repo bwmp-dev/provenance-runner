@@ -691,7 +691,7 @@ func (p *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 	if workspaceSeedFail {
 		return output, nil
 	}
-	events, lifecycleErr := validateProbeLifecycle(output, p.plan)
+	events, lifecycleErr := validateProbeLifecycle(output, p.plan, &output.TerminalObservations)
 	output.StructuredEvents = events
 	output.EvidenceUsage.StructuredEventCount = int64(len(events))
 	output.EvidenceUsage.StructuredEventBytes = 0

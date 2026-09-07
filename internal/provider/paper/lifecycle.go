@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 )
 
 type probeEnvelope struct {
@@ -349,7 +350,15 @@ func (e *probeLifecycleFailure) Unwrap() error {
 	return e.err
 }
 
-func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]execution.StructuredEvent, error) {
+func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan, projection ...*[]terminalevidence.Observation) ([]execution.StructuredEvent, error) {
+	var observations []terminalevidence.Observation
+	defer func() {
+		for _, target := range projection {
+			if target != nil {
+				*target = append([]terminalevidence.Observation(nil), observations...)
+			}
+		}
+	}()
 	if output.StructuredEventError != "" {
 		return nil, fmt.Errorf("probe event channel is malformed: %s", output.StructuredEventError)
 	}
@@ -507,6 +516,16 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 			if err := state.accept(envelope.Type, envelope.Data); err != nil {
 				return events, fmt.Errorf("command test %q: %w", testID, err)
 			}
+			if envelope.Type == "COMMAND_ASSERTION" {
+				assertionID, _ := requiredString(envelope.Data, "assertionId")
+				for n, assertion := range plan.Console[commandIndex].Assertions {
+					if assertion.Operator == "regex" && assertionID == fmt.Sprintf("%s:%d", testID, n+1) {
+						evaluated, _ := requiredBoolean(envelope.Data, "evaluated")
+						passed, _ := requiredBoolean(envelope.Data, "passed")
+						observations = append(observations, terminalevidence.Observation{Type: "console-regex", TestID: testID, AssertionID: assertionID, Registered: state.registered, ExecutionCompleted: state.executionCompleted, Evaluated: evaluated, Passed: passed, OutputTruncated: state.outputTruncated})
+					}
+				}
+			}
 			if state.timeoutSeen {
 				timedOutCommandIndex = commandIndex
 			}
@@ -527,6 +546,11 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 					return events, fmt.Errorf("duplicate requirement result for %q", requirement.name)
 				}
 				requirements[key] = requirement.satisfied()
+				kind := "dependency-present"
+				if requirement.role == "TARGET" {
+					kind = "plugin-enabled"
+				}
+				observations = append(observations, terminalevidence.Observation{Type: kind, Name: requirement.name, Loaded: requirement.loaded, Enabled: requirement.enabled})
 			}
 			if !requirement.satisfied() && lifecycleFailure == nil {
 				lifecycleFailure = fmt.Errorf("plugin requirement %q was not loaded and enabled", requirement.name)
@@ -577,6 +601,7 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 				return events, err
 			} else {
 				serverReadySatisfied = ok
+				observations = append(observations, terminalevidence.Observation{Type: "startup-ready", ServerLoaded: seenRequired["SERVER_LOADED"], StabilizationCompleted: seenRequired["STABILIZATION_COMPLETED"], ServerReady: true, RequirementsSatisfied: ok})
 				if !ok && lifecycleFailure == nil {
 					lifecycleFailure = errors.New("probe reported unsatisfied server-ready requirements")
 				}
@@ -584,8 +609,11 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan) ([]
 		case "SERVER_STOPPED":
 			if ok, err := requiredBoolean(envelope.Data, "shutdownRequested"); err != nil {
 				return events, err
-			} else if !ok && lifecycleFailure == nil {
-				lifecycleFailure = errors.New("server stopped without the probe-requested clean shutdown")
+			} else {
+				observations = append(observations, terminalevidence.Observation{Type: "clean-shutdown", ShutdownRequested: seenRequired["CLEAN_SHUTDOWN_REQUESTED"], ServerStopped: true, ReportedShutdownRequested: ok})
+				if !ok && lifecycleFailure == nil {
+					lifecycleFailure = errors.New("server stopped without the probe-requested clean shutdown")
+				}
 			}
 		}
 		previousEnvelope = envelope

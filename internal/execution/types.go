@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 )
 
 const ResultSchemaVersion = "provenance.local-result/v1alpha1"
@@ -162,6 +164,7 @@ type ExecutionOutcome struct {
 }
 
 type CollectedOutput struct {
+	TerminalObservations []terminalevidence.Observation
 	Stdout               string
 	Stderr               string
 	CapturedBytes        int64
@@ -268,21 +271,23 @@ func NewClassifiedError(classification Classification, code string, err error) e
 }
 
 type Result struct {
-	SchemaVersion    string             `json:"schemaVersion"`
-	JobID            string             `json:"jobId,omitempty"`
-	Status           string             `json:"status"`
-	Classification   Classification     `json:"classification"`
-	Phase            Phase              `json:"phase"`
-	Environment      *EnvironmentResult `json:"environment,omitempty"`
-	Execution        *ExecutionResult   `json:"execution,omitempty"`
-	Logs             *LogsResult        `json:"logs,omitempty"`
-	StructuredEvents []StructuredEvent  `json:"structuredEvents,omitempty"`
-	CompleteLog      *CompleteLog       `json:"completeLog,omitempty"`
-	Cleanup          *CleanupResult     `json:"cleanup,omitempty"`
-	Usage            UsageResult        `json:"usage"`
-	Failure          *Failure           `json:"failure,omitempty"`
-	StartedAt        time.Time          `json:"startedAt"`
-	CompletedAt      time.Time          `json:"completedAt"`
+	TerminalObservations []terminalevidence.Observation `json:"-"`
+	TerminalContext      *terminalevidence.Context      `json:"-"`
+	SchemaVersion        string                         `json:"schemaVersion"`
+	JobID                string                         `json:"jobId,omitempty"`
+	Status               string                         `json:"status"`
+	Classification       Classification                 `json:"classification"`
+	Phase                Phase                          `json:"phase"`
+	Environment          *EnvironmentResult             `json:"environment,omitempty"`
+	Execution            *ExecutionResult               `json:"execution,omitempty"`
+	Logs                 *LogsResult                    `json:"logs,omitempty"`
+	StructuredEvents     []StructuredEvent              `json:"structuredEvents,omitempty"`
+	CompleteLog          *CompleteLog                   `json:"completeLog,omitempty"`
+	Cleanup              *CleanupResult                 `json:"cleanup,omitempty"`
+	Usage                UsageResult                    `json:"usage"`
+	Failure              *Failure                       `json:"failure,omitempty"`
+	StartedAt            time.Time                      `json:"startedAt"`
+	CompletedAt          time.Time                      `json:"completedAt"`
 }
 
 type EnvironmentResult struct {

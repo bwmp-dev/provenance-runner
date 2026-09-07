@@ -1,0 +1,5 @@
+[
+  {"Type":"plugin-enabled","Name":"SuccessFixture","Loaded":true,"Enabled":false},
+  {"Type":"startup-ready","ServerLoaded":true,"StabilizationCompleted":true,"ServerReady":true,"RequirementsSatisfied":false},
+  {"Type":"clean-shutdown","ShutdownRequested":true,"ServerStopped":true,"ReportedShutdownRequested":true}
+]

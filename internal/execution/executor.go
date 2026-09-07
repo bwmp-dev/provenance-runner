@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
@@ -187,6 +188,7 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 		OutputTruncated: output.OutputTruncated,
 	}
 	result.StructuredEvents = append([]StructuredEvent(nil), output.StructuredEvents...)
+	result.TerminalObservations = append([]terminalevidence.Observation(nil), output.TerminalObservations...)
 	for index := range result.StructuredEvents {
 		result.StructuredEvents[index].Payload = append([]byte(nil), result.StructuredEvents[index].Payload...)
 	}

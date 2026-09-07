@@ -53,7 +53,7 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	const authority = "v0.0.0-20260905212614-84070765b1b2"
+	const authority = "v0.0.0-20260907002217-f17e6b0db950"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)

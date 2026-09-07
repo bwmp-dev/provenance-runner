@@ -1,0 +1,44 @@
+[
+  {
+    "name": "unknown private field",
+    "path": ["secret"],
+    "value": "HOSTILE_SECRET"
+  },
+  { "name": "zero attempt", "path": ["binding", "attemptNumber"], "value": 0 },
+  {
+    "name": "attempt overflow",
+    "path": ["binding", "attemptNumber"],
+    "value": 4294967296
+  },
+  {
+    "name": "identifier newline",
+    "path": ["binding", "runnerId"],
+    "value": "runner-1\n"
+  },
+  {
+    "name": "requested hash newline",
+    "path": ["requested", "artifactSha256"],
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+  },
+  {
+    "name": "operator rootfs is not measured",
+    "path": ["runtime", "rootfs", "format"],
+    "value": "normalized-tar-sha256"
+  },
+  {
+    "name": "process unsupported",
+    "path": ["runtime", "sandboxKind"],
+    "value": "process"
+  },
+  {
+    "name": "container unsupported",
+    "path": ["runtime", "sandboxKind"],
+    "value": "container"
+  },
+  {
+    "name": "runtime version newline",
+    "path": ["runtime", "sandboxVersion"],
+    "value": "v1\n"
+  },
+  { "name": "unmeasured complete", "path": ["runtime"], "value": null }
+]

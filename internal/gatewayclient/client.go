@@ -344,6 +344,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		jobCorrelationV1:      jobCorrelationV1,
 		restartUploadRecovery: restartUploadRecovery,
 		objectUploadIdentity:  objectUploadIdentity,
+		terminalEvidenceV1:    advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V1),
 		seen:                  make(map[string][sha256.Size]byte),
 		rootContext:           ctx,
 		cancelSession:         cancel,
@@ -357,7 +358,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		if err := proto.Unmarshal(pending, message); err != nil {
 			return true, permanent("decode pending runner message: %v", err)
 		}
-		if err := send(message); err != nil {
+		if err := session.sendRetained(message); err != nil {
 			return true, err
 		}
 	}
@@ -520,6 +521,9 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	// result after authoritative reconciliation instead.
 	if c.journal.snapshot().Active == nil || c.activeRestartEvidence() != nil {
 		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY)
+	}
+	if !c.config.DisableTerminalEvidence {
+		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V1)
 	}
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,
