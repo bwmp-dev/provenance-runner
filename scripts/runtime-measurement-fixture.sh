@@ -2,13 +2,17 @@
 # Disposable container fixture ONLY. Never mount the installed runner rootfs.
 set -euo pipefail
 [[ $(id -u) == 0 && -f /.dockerenv ]]
+fixture_uid=${PROVENANCE_MEASUREMENT_FIXTURE_UID:-1000}
+fixture_gid=${PROVENANCE_MEASUREMENT_FIXTURE_GID:-1000}
+[[ "$fixture_uid" == 1000 || "$fixture_uid" =~ ^6[0-3][0-9]{3}$ ]]
+[[ "$fixture_gid" =~ ^[1-9][0-9]*$ ]]
 fixture=/tmp/provenance-runtime-fixture
 [[ ! -e "$fixture" ]]
 mkdir -m 0711 "$fixture"
 mkdir -m 0711 "$fixture/source" "$fixture/mount"
-chown 1000:1000 "$fixture/source"
+chown "$fixture_uid:$fixture_gid" "$fixture/source"
 mkdir -m 0700 "$fixture/work"
-chown 1000:1000 "$fixture/work"
+chown "$fixture_uid:$fixture_gid" "$fixture/work"
 loop=
 cleanup() {
   if mountpoint -q "$fixture/mount"; then umount "$fixture/mount"; fi
@@ -49,7 +53,7 @@ done
 # read access is needed for status ioctls. No host device node mode is changed.
 chmod 0444 "$loop"
 mount -t squashfs -o ro,nosuid,nodev "$loop" "$fixture/mount"
-setpriv --reuid 1000 --regid 1000 --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/runtimeidentity.test -test.run '^TestRuntimeMountFixture$' -test.v -test.count=1
+setpriv --reuid "$fixture_uid" --regid "$fixture_gid" --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/runtimeidentity.test -test.run '^TestRuntimeMountFixture$' -test.v -test.count=1
 if [[ -f /tmp/gvisor-preflight.test ]]; then
-  setpriv --reuid 1000 --regid 1000 --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/gvisor-preflight.test -test.run '^TestMeasuredPreflightWithProtectedImageFiles$' -test.v -test.count=1
+  setpriv --reuid "$fixture_uid" --regid "$fixture_gid" --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/gvisor-preflight.test -test.run '^TestMeasuredPreflightWithProtectedImageFiles$' -test.v -test.count=1
 fi

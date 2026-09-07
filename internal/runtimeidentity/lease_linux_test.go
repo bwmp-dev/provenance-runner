@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -95,7 +96,15 @@ func TestRuntimeMountFixture(t *testing.T) {
 	if root == "" {
 		t.Skip("disposable privileged fixture not provisioned")
 	}
-	if os.Geteuid() != 1000 || root != "/tmp/provenance-runtime-fixture" {
+	expectedUID := 1000
+	if raw := os.Getenv("PROVENANCE_MEASUREMENT_FIXTURE_UID"); raw != "" {
+		var err error
+		expectedUID, err = strconv.Atoi(raw)
+		if err != nil || (expectedUID != 1000 && (expectedUID < 60000 || expectedUID > 63999)) {
+			t.Fatal("unexpected fixture UID")
+		}
+	}
+	if os.Geteuid() != expectedUID || root != "/tmp/provenance-runtime-fixture" {
 		t.Fatal("unexpected fixture identity")
 	}
 	lease, err := Acquire(context.Background(), filepath.Join(root, "runsc"), filepath.Join(root, "mount"), filepath.Join(root, "image.squashfs"))
@@ -172,12 +181,23 @@ func TestRuntimeMountFixture(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, lease.SandboxPath(), "--debug", "--debug-log="+filepath.Join(root, "work", "sandbox-debug.log"), "--root="+filepath.Join(root, "work", "runsc-state"), "--ignore-cgroups", "--network=none", "--platform=systrap", "run", "--bundle="+bundle, "measurement-fixture")
+	cmd := exec.CommandContext(ctx, lease.SandboxPath(), "--debug", "--debug-log="+filepath.Join(root, "work", "sandbox-debug.log"), "--root="+filepath.Join(root, "work", "runsc-state"), "--ignore-cgroups", "--rootless=true", "--network=none", "--platform=systrap", "run", "--bundle="+bundle, "measurement-fixture")
 	args := append([]string{"__gvisor-measured-launch", lease.RootPath(), lease.SandboxPath(), lease.ImagePath(), lease.LoopPath(), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable", "--"}, cmd.Args[1:]...)
-	cmd = exec.CommandContext(ctx, "/tmp/measured-runner", args...)
+	launcher := os.Getenv("PROVENANCE_MEASUREMENT_FIXTURE_LAUNCHER")
+	if launcher == "" {
+		launcher = "/tmp/measured-runner"
+	} else if expectedUID == 1000 || !filepath.IsAbs(launcher) || filepath.Base(launcher) != "gvisor-smoke.test" || !strings.HasPrefix(launcher, "/var/lib/provenance-measurement-ci.") {
+		t.Fatal("unexpected profiled fixture launcher")
+	}
+	cmd = exec.CommandContext(ctx, launcher, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// This is a synthetic fixture with no customer data or credentials.
 		t.Fatalf("actual retained-root execution: %v %s", err, output)
+	} else if expected := os.Getenv("PROVENANCE_MEASUREMENT_EXPECTED_PROFILE"); expected != "" {
+		if !strings.Contains(string(output), "disposable guest entered existing profile: "+expected) {
+			t.Fatal("missing actual existing-profile guest proof")
+		}
+		t.Log("actual guest entered existing profile:", expected)
 	}
 	if err := lease.Validate(); err != nil {
 		t.Fatal(err)
