@@ -20,6 +20,8 @@ cleanup() {
 trap cleanup EXIT
 cp /tmp/runtimeidentity.test "$fixture/source/fixture-test"
 chmod 0555 "$fixture/source/fixture-test"
+touch "$fixture/source/private-root-file"
+chmod 0600 "$fixture/source/private-root-file"
 /tmp/mksquashfs "$fixture/source" "$fixture/image.squashfs" -noappend -no-recovery -processors 1 -mkfs-time 0 -all-time 0 >/dev/null
 chmod 0444 "$fixture/image.squashfs"
 cp "$fixture/image.squashfs" "$fixture/wrong-inode.squashfs"
@@ -48,3 +50,6 @@ done
 chmod 0444 "$loop"
 mount -t squashfs -o ro,nosuid,nodev "$loop" "$fixture/mount"
 setpriv --reuid 1000 --regid 1000 --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/runtimeidentity.test -test.run '^TestRuntimeMountFixture$' -test.v -test.count=1
+if [[ -f /tmp/gvisor-preflight.test ]]; then
+  setpriv --reuid 1000 --regid 1000 --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/gvisor-preflight.test -test.run '^TestMeasuredPreflightWithProtectedImageFiles$' -test.v -test.count=1
+fi

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 )
 
 func TestMain(m *testing.M) {
@@ -49,12 +50,17 @@ func TestRunscSmoke(t *testing.T) {
 	if rootFS == "" {
 		t.Fatal("PROVENANCE_RUNSC_SMOKE=1 requires PROVENANCE_RUNSC_ROOTFS containing /bin/sh")
 	}
-	rootFSIdentityBefore, err := normalizedRootFSTreeSHA256(rootFS)
+	identity, closeIdentity, err := smokeRootIdentity(rootFS, resolvedRunsc, os.Getenv("PROVENANCE_MEASURED_ROOTFS_IMAGE"), os.Getenv("PROVENANCE_MEASURED_LOOP_DEVICE"))
+	if err != nil {
+		t.Fatalf("capture measured root identity before smoke: %v", err)
+	}
+	defer closeIdentity()
+	rootFSIdentityBefore, err := identity()
 	if err != nil {
 		t.Fatalf("capture root filesystem identity before smoke: %v", err)
 	}
 	defer func() {
-		rootFSIdentityAfter, err := normalizedRootFSTreeSHA256(rootFS)
+		rootFSIdentityAfter, err := identity()
 		if err != nil {
 			t.Errorf("capture root filesystem identity after smoke: %v", err)
 			return
@@ -349,6 +355,64 @@ func TestRunscSmoke(t *testing.T) {
 		assertNoSandboxResidue(t, restarted, containerID)
 		cleanupNeeded = false
 	})
+}
+
+func smokeRootIdentity(root, sandbox, image, loop string) (func() (string, error), func() error, error) {
+	if image == "" {
+		return func() (string, error) { return normalizedRootFSTreeSHA256(root) }, func() error { return nil }, nil
+	}
+	// Preserve root-owned private files; the measured contract is the complete
+	// immutable image and its retained mount/loop binding, not a nonroot tar.
+	measurement, err := runtimeidentity.Acquire(context.Background(), sandbox, root, image, loop)
+	if err != nil {
+		return nil, nil, err
+	}
+	return func() (string, error) {
+		if err := measurement.Validate(); err != nil {
+			return "", err
+		}
+		return measurement.Snapshot().RootFS.SHA256, nil
+	}, measurement.Close, nil
+}
+
+func TestMeasuredPreflightWithProtectedImageFiles(t *testing.T) {
+	root := os.Getenv("PROVENANCE_MEASUREMENT_FIXTURE_ROOT")
+	if root == "" {
+		t.Skip("disposable privileged fixture required")
+	}
+	if root != "/tmp/provenance-runtime-fixture" || os.Getuid() != 1000 {
+		t.Fatal("unexpected fixture")
+	}
+	if _, err := os.ReadFile(filepath.Join(root, "mount", "private-root-file")); !errors.Is(err, os.ErrPermission) {
+		t.Fatal("protected file was weakened")
+	}
+	legacy, closeLegacy, err := smokeRootIdentity(filepath.Join(root, "mount"), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeLegacy()
+	if _, err := legacy(); err == nil {
+		t.Fatal("expected legacy tar permission failure")
+	}
+	identity, closeIdentity, err := smokeRootIdentity(filepath.Join(root, "mount"), filepath.Join(root, "runsc"), filepath.Join(root, "image.squashfs"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeIdentity()
+	before, err := identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := identity()
+	if err != nil || before != after {
+		t.Fatal("measured identity drift")
+	}
+	if err := closeIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity(); err == nil {
+		t.Fatal("closed identity accepted")
+	}
 }
 
 func normalizedRootFSTreeSHA256(rootFS string) (string, error) {
