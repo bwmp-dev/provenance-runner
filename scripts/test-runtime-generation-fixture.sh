@@ -33,7 +33,7 @@ builder_sha=${builder_sha%% *}
 LD_LIBRARY_PATH=/opt/generation-fixture/builder/lib python3 /repo/scripts/build-measured-rootfs.py \
   --source /opt/generation-fixture/source.tar --source-sha256 "$source_sha" \
   --builder /opt/generation-fixture/builder/mksquashfs --builder-sha256 "$builder_sha" \
-  --output /opt/generation-fixture/output --uid 1001 --gid 1001
+  --output /opt/generation-fixture/output --uid 1001 --gid 1001 | tee /opt/generation-fixture/image-manifest.json
 cp "$identity_test" /tmp/runtimeidentity.test
 cp "$preflight_test" /tmp/gvisor-preflight.test
 cp "$runsc_input" /tmp/runsc

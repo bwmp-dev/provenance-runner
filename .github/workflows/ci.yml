@@ -127,7 +127,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_runtime_profile.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_runtime_preflight.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_prepare_measured_builder.py -v
-          bash -n scripts/test-measured-runtime-systemd.sh scripts/prepare-measured-builder.sh
+          bash -n scripts/test-measured-runtime-systemd.sh scripts/prepare-measured-builder.sh \
+            scripts/test-runtime-generation-ci.sh scripts/test-runtime-generation-fixture.sh
           provision=$(sudo bash scripts/prepare-measured-builder.sh "${PROVENANCE_INSTALL_ROOT}/measured-builder")
           builder=$(jq -er '.builder' <<< "$provision")
           libraries=$(jq -er '.libraryDirectory' <<< "$provision")

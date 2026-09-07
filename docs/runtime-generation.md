@@ -125,6 +125,23 @@ existing separate measured-systemd smoke still proves actual launcher scopes.
 Unit tests cover exact environment/unit deltas and stale/foreign/incomplete drain
 refusal. No full Paper gate is dispatched by this package's normal CI.
 
+The operator-entrypoint fixture additionally invokes the actual command-line
+parser, protected plan/manifest loading, generation lock, both drain checks and
+legacy-tree hashing against real disposable files and read-only bind mounts.
+Its exclusive container-local `systemctl` fake models loaded unit identity and
+`NeedDaemonReload`; it is not a real manager or an assertion of production drain.
+The fault matrix records each reached injection, owned recovery versus retained
+pre-allocation incomplete files, and observed loop/mount absence. Cleanup success
+is emitted only after explicit cleanup and fresh observations, not a literal flag.
+Early unjournalled/partial copies are retained rather than adopted automatically.
+
+Replacement-file tests cover partial write, flush, fsync and ownership failures,
+exact retry, pre-existing/substituted temporary files, and a directory-sync failure
+after atomic replacement. Only the exact exclusively created temporary inode may
+be removed on pre-replacement failure; successful replacement is never silently
+undone when the following directory sync fails. General installation-journal
+retention behavior is unchanged.
+
 After implementation acceptance, the real hosted gate still needs approved
 drained installation, any separately approved exact AppArmor attachment, actual
 Paper execution with measured provider-to-terminal-to-platform identity,

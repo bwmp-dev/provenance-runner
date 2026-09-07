@@ -5,6 +5,10 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 import json
+import io
+import os
+import subprocess
+import sys
 
 
 def module(name):
@@ -20,6 +24,121 @@ b=module('runtime-generation-profile-binding')
 
 
 class GenerationTests(unittest.TestCase):
+    def test_replace_write_flush_and_sync_failures_preserve_original_and_retry(self):
+        real_fdopen=g.os.fdopen
+        class FailingOutput:
+            def __init__(self,fd,mode,failure):self.file=real_fdopen(fd,mode);self.failure=failure
+            def __enter__(self):return self
+            def __exit__(self,*args):self.file.close()
+            def write(self,data):
+                if self.failure=='write':self.file.write(data[:2]);raise OSError('partial write')
+                return self.file.write(data)
+            def flush(self):
+                if self.failure=='flush':raise OSError('flush failure')
+                return self.file.flush()
+            def fileno(self):return self.file.fileno()
+        for failure in ('write','flush','fsync'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
+                path=Path(directory)/'current.env';path.write_bytes(b'old')
+                digest=g.hashlib.sha256(b'old').hexdigest()
+                temp=path.parent/'.current.env.runtime-generation'
+                injection=(patch.object(g.os,'fsync',side_effect=OSError('sync failure')) if failure=='fsync' else
+                           patch.object(g.os,'fdopen',side_effect=lambda fd,mode:FailingOutput(fd,mode,failure)))
+                with patch.object(g,'protected',side_effect=lambda value,*args:Path(value)):
+                    with injection,self.assertRaises(OSError):g.replace_file(path,digest,b'new')
+                    self.assertEqual(path.read_bytes(),b'old');self.assertFalse(temp.exists())
+                    g.replace_file(path,digest,b'new');self.assertEqual(path.read_bytes(),b'new')
+
+    def test_replace_substituted_or_missing_temp_never_deletes_foreign_data(self):
+        real_fchown=g.os.fchown
+        for missing in (False,True):
+            with self.subTest(missing=missing),tempfile.TemporaryDirectory() as directory:
+                path=Path(directory)/'current.env';path.write_bytes(b'old')
+                foreign=Path(directory)/'foreign';foreign.write_bytes(b'unrelated')
+                temp=path.parent/'.current.env.runtime-generation'
+                def substitute(*args):
+                    real_fchown(*args);temp.unlink()
+                    if not missing:temp.symlink_to(foreign)
+                with patch.object(g,'protected',side_effect=lambda value,*args:Path(value)),\
+                     patch.object(g.os,'fchown',side_effect=substitute),self.assertRaises((g.Refusal,FileNotFoundError)):
+                    g.replace_file(path,g.hashlib.sha256(b'old').hexdigest(),b'new')
+                self.assertEqual(path.read_bytes(),b'old');self.assertEqual(foreign.read_bytes(),b'unrelated')
+                self.assertEqual(temp.is_symlink(),not missing)
+
+    def test_replace_post_rename_sync_failure_keeps_selected_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'current.env';path.write_bytes(b'old')
+            real_sync=g.sync_directory;calls=[]
+            def sync(value):
+                calls.append(value)
+                if len(calls)==2:raise OSError('post-rename sync failure')
+                real_sync(value)
+            with patch.object(g,'protected',side_effect=lambda value,*args:Path(value)):
+                with patch.object(g,'sync_directory',side_effect=sync),self.assertRaises(OSError):
+                    g.replace_file(path,g.hashlib.sha256(b'old').hexdigest(),b'new')
+                self.assertEqual(path.read_bytes(),b'new')
+                self.assertFalse((path.parent/'.current.env.runtime-generation').exists())
+                g.replace_file(path,g.hashlib.sha256(b'new').hexdigest(),b'new')
+
+    def test_replace_metadata_failure_cleans_only_owned_temp_and_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'current.env';path.write_bytes(b'old')
+            digest=g.hashlib.sha256(b'old').hexdigest()
+            temp=path.parent/'.current.env.runtime-generation'
+            with patch.object(g,'protected',side_effect=lambda value,*args:Path(value)):
+                with patch.object(g.os,'fchown',side_effect=OSError('injected metadata failure')):
+                    with self.assertRaises(OSError):g.replace_file(path,digest,b'new')
+                self.assertEqual(path.read_bytes(),b'old')
+                self.assertFalse(temp.exists())
+                g.replace_file(path,digest,b'new')
+                self.assertEqual(path.read_bytes(),b'new')
+                temp.write_bytes(b'foreign-owned-before-invocation')
+                with self.assertRaises(FileExistsError):g.replace_file(path,g.hashlib.sha256(b'new').hexdigest(),b'again')
+                self.assertEqual(temp.read_bytes(),b'foreign-owned-before-invocation')
+                self.assertEqual(path.read_bytes(),b'new')
+
+    def test_legacy_tar_failure_and_digest_drift(self):
+        p={'legacyRootfs':{'path':'/fixture','treeSha256':'a'*64}}
+        for status in (0,2):
+            process=SimpleNamespace(stdout=io.BytesIO(b'fixture tree'),wait=lambda timeout:status)
+            with patch.object(g,'mount_info',return_value={'options':'ro,nodev'}),\
+                 patch.object(g.subprocess,'Popen',return_value=process),self.assertRaises(g.Refusal):g.legacy(p)
+
+    def test_main_rechecks_drain_after_legacy_before_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p={'generation':str(Path(directory)/'generation')}
+            order=[]
+            def drained(*args):
+                order.append('drain')
+                if len(order)==3:raise g.Refusal('expired while checking legacy')
+            args=['operator','install','--plan','unused','--plan-sha256','a'*64,'--drain','unused','--drain-sha256','b'*64]
+            with patch.object(g.sys,'argv',args),patch.dict(g.os.environ),patch.object(g.os,'geteuid',return_value=0),\
+                 patch.object(g,'load_plan',return_value=p),patch.object(g,'protected',side_effect=lambda value,*args:Path(value)),\
+                 patch.object(g,'legacy',side_effect=lambda p:order.append('legacy')),\
+                 patch.object(g,'drained',side_effect=drained),patch.object(g,'install') as install:
+                with self.assertRaises(g.Refusal):g.main()
+                install.assert_not_called()
+            self.assertEqual(order,['drain','legacy','drain'])
+
+    def test_ci_requires_observed_cleanup_and_complete_failure_matrix(self):
+        driver=Path(__file__).with_name('test-runtime-generation-ci.sh').read_text()
+        code=driver.split('python3 - "$evidence/fixture.log" <<\'PY\'\n',1)[1].split('\nPY\n',1)[0]
+        passes='\n'.join('--- PASS: TestRuntimeMountFixture/'+name for name in ('wrong-image-inode','writable-image','executable-symlink','not-squashfs'))+'\n--- PASS: TestMeasuredPreflightWithProtectedImageFiles\n'
+        row={'associatedLoops':[],'mounted':False}
+        records=[{'failureMatrix':[{'stage':str(i),'injectionReached':True,'postCleanup':row} for i in range(45)]},
+                 {'cliTests':['full-cli-install-verify-select-rollback-idempotence','full-cli-journalled-recovery']},
+                 {'cleanupObservations':[row],'allOwnedLoopsDetached':True}]
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'fixture.log'
+            def run(values):
+                path.write_text(passes+'\n'.join(json.dumps(x) for x in values))
+                return subprocess.run([sys.executable,'-',str(path)],input=code,text=True,capture_output=True).returncode
+            self.assertEqual(run(records),0)
+            self.assertNotEqual(run([{'allOwnedLoopsDetached':True}]),0)
+            bad=json.loads(json.dumps(records));bad[-1]['cleanupObservations'][0]['associatedLoops']=['/dev/loop999']
+            self.assertNotEqual(run(bad),0)
+            self.assertNotEqual(run(records[1:]),0)
+
     def test_profile_binding_exact_identity_and_exclusive_group(self):
         path='/var/lib/provenance-measurement-ci.ABCDef12/gvisor-smoke.test'
         expected={'path':path,'device':1,'inode':2,'sha256':'a'*64,'owner':0,'group':62001,'mode':0o550}
