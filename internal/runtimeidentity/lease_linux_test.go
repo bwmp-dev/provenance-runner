@@ -172,7 +172,7 @@ func TestRuntimeMountFixture(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, lease.SandboxPath(), "--debug", "--debug-log="+filepath.Join(root, "work", "sandbox-debug.log"), "--root="+filepath.Join(root, "work", "runsc-state"), "--ignore-cgroups", "--network=none", "--platform=systrap", "run", "--bundle="+bundle, "measurement-fixture")
+	cmd := exec.CommandContext(ctx, lease.SandboxPath(), "--debug", "--debug-log="+filepath.Join(root, "work", "sandbox-debug.log"), "--root="+filepath.Join(root, "work", "runsc-state"), "--ignore-cgroups", "--rootless=true", "--network=none", "--platform=systrap", "run", "--bundle="+bundle, "measurement-fixture")
 	args := append([]string{"__gvisor-measured-launch", lease.RootPath(), lease.SandboxPath(), lease.ImagePath(), lease.LoopPath(), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable", "--"}, cmd.Args[1:]...)
 	cmd = exec.CommandContext(ctx, "/tmp/measured-runner", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {

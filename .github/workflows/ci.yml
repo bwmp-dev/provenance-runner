@@ -24,6 +24,8 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      - name: Runtime generation operator unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_runtime_generation.py -v
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - name: Build
@@ -143,6 +145,24 @@ jobs:
         with:
           name: measured-runtime-${{ github.sha }}
           path: ${{ env.PROVENANCE_MEASURED_EVIDENCE }}
+          if-no-files-found: error
+      - name: Run disposable Ubuntu generation and protected negatives
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/runtime-generation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "PROVENANCE_GENERATION_EVIDENCE=${evidence}" >> "${GITHUB_ENV}"
+          bash scripts/test-runtime-generation-ci.sh \
+            "${PROVENANCE_INSTALL_ROOT}/gvisor/runsc" \
+            "${PROVENANCE_INSTALL_ROOT}/measured-builder" \
+            "${RUNNER_TEMP}/runtime-generation-work-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "${evidence}"
+      - name: Retain disposable Ubuntu generation evidence
+        if: always() && env.PROVENANCE_GENERATION_EVIDENCE != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-generation-${{ github.sha }}
+          path: ${{ env.PROVENANCE_GENERATION_EVIDENCE }}
           if-no-files-found: error
       - name: Remove delegated cgroup subtree
         if: always()
