@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -69,7 +70,14 @@ func TestMeasuredNativeFDExecDiagnostic(t *testing.T) {
 				confinement = value
 			}
 		}
-		record, _ := json.Marshal(map[string]any{"version": 1, "goVersion": runtime.Version(), "confinement": confinement, "stage": stage, "mapped": true, "pathnameBootstrap": true, "nativeExecveat": native, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
+		var attribution map[string]string
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.HasPrefix(line, "NATIVE_FD_ATTRIBUTION=") {
+				_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "NATIVE_FD_ATTRIBUTION=")), &attribution)
+				break
+			}
+		}
+		record, _ := json.Marshal(map[string]any{"version": 1, "goVersion": runtime.Version(), "descriptorAttribution": attribution, "confinement": confinement, "stage": stage, "mapped": true, "pathnameBootstrap": true, "nativeExecveat": native, "uid": os.Getuid(), "identityPrechecked": bytes.Contains(output, []byte("NATIVE_EXEC_PRECHECK_OK")), "childConfirmed": err == nil && bytes.Contains(output, []byte("NATIVE_EXEC_SAME_OBJECT_OK")), "errorCategory": category})
 		t.Log("MEASURED_NATIVE_EXEC_PROBE=" + string(record))
 	}
 }
@@ -82,6 +90,8 @@ func TestMeasuredNativeFDExecChild(t *testing.T) {
 	if os.Getuid() != 0 || os.Getgid() != 0 {
 		t.Fatal("NATIVE_EXEC_STAGE_mapped_identity")
 	}
+	attributes, _ := json.Marshal(nativeDescriptorAttribution())
+	fmt.Println("NATIVE_FD_ATTRIBUTION=" + string(attributes))
 	if value, err := os.ReadFile("/proc/self/attr/current"); err == nil {
 		if strings.TrimSpace(string(value)) == "unconfined" {
 			fmt.Println("NATIVE_EXEC_CONFINEMENT_unconfined")
@@ -138,6 +148,58 @@ func TestMeasuredNativeFDExecChild(t *testing.T) {
 		fmt.Println("NATIVE_EXEC_STAGE_proc_exec")
 	}
 	t.Fatal("NATIVE_EXEC_ERROR_" + namespaceFailureCategory(err))
+}
+
+func nativeDescriptorAttribution() map[string]string {
+	closedErr := func(err error) string {
+		if err == nil {
+			return "none"
+		}
+		if errors.Is(err, syscall.EBADF) {
+			return "bad_descriptor"
+		}
+		return namespaceFailureCategory(err)
+	}
+	result := map[string]string{}
+	target, err := os.Readlink("/proc/self/fd/3")
+	result["readlinkError"] = closedErr(err)
+	actualPath, actualErr := os.Readlink("/proc/self/exe")
+	result["target"] = "other"
+	if err == nil {
+		switch target {
+		case "apparmor/.null", "/apparmor/.null", "apparmor/.null (deleted)", "/apparmor/.null (deleted)":
+			result["target"] = "apparmor-null"
+		default:
+			if actualErr == nil && target == actualPath {
+				result["target"] = "expected"
+			}
+		}
+	}
+	_, err = unix.FcntlInt(3, unix.F_GETFD, 0)
+	result["getfdError"] = closedErr(err)
+	var st unix.Stat_t
+	result["rawFstatError"] = closedErr(unix.Fstat(3, &st))
+	actual, err := os.Open("/proc/self/exe")
+	result["freshOpenError"] = closedErr(err)
+	result["freshStatError"] = "unavailable"
+	if err == nil {
+		_, err = actual.Stat()
+		result["freshStatError"] = closedErr(err)
+		actual.Close()
+	}
+	result["profile"] = "unavailable"
+	if value, err := os.ReadFile("/proc/self/attr/current"); err == nil {
+		profile := strings.TrimSpace(string(value))
+		switch profile {
+		case "unconfined":
+			result["profile"] = "unconfined"
+		case "unprivileged_userns", "unprivileged_userns (enforce)", "unprivileged_userns (complain)":
+			result["profile"] = "unprivileged_userns"
+		default:
+			result["profile"] = "other"
+		}
+	}
+	return result
 }
 
 func nativeProbeExec(fd int, args, env []string) error {
