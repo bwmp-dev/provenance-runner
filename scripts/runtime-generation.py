@@ -326,19 +326,42 @@ def replace_file(path, expected, data):
     fingerprint(path, expected)
     st = path.stat()
     temp = path.parent / ('.'+path.name+'.runtime-generation')
-    write_new(temp, data, stat.S_IMODE(st.st_mode))
-    os.chown(temp, st.st_uid, st.st_gid)
+    # Own the exclusive descriptor before any operation that can fail. General
+    # write_new journals intentionally retain partial state; replacement temps
+    # have a different lifecycle and must not poison an exact retry.
+    fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, stat.S_IMODE(st.st_mode))
+    created = None
+    installed = False
     try:
+        created = os.fstat(fd)
+        output = os.fdopen(fd, 'wb')
+        fd = -1  # output now owns the descriptor, including exceptional close.
+        with output:
+            output.write(data)
+            output.flush()
+            os.fchown(output.fileno(), st.st_uid, st.st_gid)
+            os.fsync(output.fileno())
+        sync_directory(path.parent)
+        current = temp.lstat()
+        require((current.st_dev, current.st_ino) == (created.st_dev, created.st_ino),
+                'replacement temp identity drift')
         fingerprint(path, expected)
         os.replace(temp, path)
-        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        installed = True
+        sync_directory(path.parent)
     finally:
-        if temp.exists():
+        if fd != -1:
+            os.close(fd)
+        if not installed:
+            # Never erase a substituted, foreign or unidentifiable object.
+            # After successful replace, a failed directory sync is reported,
+            # but the selected bytes are not blindly rolled back.
+            protected(path.parent, True)
+            current = temp.lstat()
+            require(created is not None and (current.st_dev, current.st_ino) ==
+                    (created.st_dev, created.st_ino), 'replacement cleanup identity drift')
             temp.unlink()
+            sync_directory(path.parent)
 
 
 def select(p, plan_sha):

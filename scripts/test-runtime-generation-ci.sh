@@ -78,12 +78,21 @@ if [[ "$phase" == execute ]]; then
 fi
 docker logs "$test_container" > "$evidence/fixture.log" 2>&1
 python3 - "$evidence/fixture.log" <<'PY'
-import pathlib,sys
+import json,pathlib,sys
 t=pathlib.Path(sys.argv[1]).read_text()
 assert '--- SKIP:' not in t
 for name in ['wrong-image-inode','writable-image','executable-symlink','not-squashfs']:
     assert '--- PASS: TestRuntimeMountFixture/'+name in t
 assert '--- PASS: TestMeasuredPreflightWithProtectedImageFiles' in t
 assert '"allOwnedLoopsDetached": true' in t
+records=[json.loads(line) for line in t.splitlines() if line.startswith('{')]
+matrix=next(row['failureMatrix'] for row in records if 'failureMatrix' in row)
+assert len(matrix)==45 and len({row['stage'] for row in matrix})==45
+assert all(row['injectionReached'] and not row['postCleanup']['associatedLoops'] and not row['postCleanup']['mounted'] for row in matrix)
+cli=next(row for row in records if 'cliTests' in row)
+assert 'full-cli-install-verify-select-rollback-idempotence' in cli['cliTests']
+assert 'full-cli-journalled-recovery' in cli['cliTests']
+summary=next(row for row in records if 'cleanupObservations' in row)
+assert summary['cleanupObservations'] and all(not row['associatedLoops'] and not row['mounted'] for row in summary['cleanupObservations'])
 PY
 ( cd "$evidence" && shopt -s nullglob && sha256sum -- *.log *.txt *.json > manifest.sha256 )
