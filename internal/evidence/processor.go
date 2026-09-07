@@ -3,7 +3,6 @@ package evidence
 import (
 	"bytes"
 	"io"
-	"sort"
 	"sync"
 	"unicode/utf8"
 )
@@ -17,6 +16,9 @@ type rawProcessor struct {
 	redactor   secretRedactor
 	line       lineLimiter
 	finished   bool
+	prefix     []byte
+	probe      []byte
+	route      uint8
 }
 
 func newRawProcessor(collector *Collector, stream Stream, config Config) *rawProcessor {
@@ -34,8 +36,11 @@ func newRawProcessor(collector *Collector, stream Stream, config Config) *rawPro
 			collector.emitRawLine(stream, line, truncated, partial, redacted)
 		},
 	}
-	processor.redactor = newSecretRedactor(config.Secrets, processor.line.write)
-	processor.ansi.emit = processor.redactor.write
+	processor.redactor = newSecretRedactor(config.patterns, processor.line.write)
+	if stream == StreamStdout {
+		processor.prefix = []byte(config.StructuredLinePrefix)
+	}
+	processor.ansi.emit = processor.routeBytes
 	processor.normalizer.emit = processor.ansi.write
 	return processor
 }
@@ -59,9 +64,45 @@ func (p *rawProcessor) finish() {
 	}
 	p.normalizer.finish()
 	p.ansi.finish()
+	if len(p.probe) > 0 {
+		p.redactor.write(p.probe)
+		p.probe = nil
+	}
 	p.redactor.finish()
 	p.line.finish()
 	p.finished = true
+}
+
+// Recognize the controlled structured prefix before redacting, never by
+// modifying serialized JSON. Non-structured bytes keep the streaming matcher.
+func (p *rawProcessor) routeBytes(content []byte) {
+	if len(p.prefix) == 0 {
+		p.redactor.write(content)
+		return
+	}
+	for _, value := range content {
+		if p.route == 0 {
+			p.probe = append(p.probe, value)
+			if !bytes.HasPrefix(p.prefix, p.probe) {
+				p.route = 1
+				p.redactor.write(p.probe)
+				p.probe = p.probe[:0]
+			} else if len(p.probe) == len(p.prefix) {
+				p.redactor.finish()
+				p.redactor = newSecretRedactor(p.redactor.patterns, p.line.write)
+				p.route = 2
+				p.line.write(p.probe, false)
+				p.probe = p.probe[:0]
+			}
+		} else if p.route == 1 {
+			p.redactor.write([]byte{value})
+		} else {
+			p.line.write([]byte{value}, false)
+		}
+		if value == '\n' {
+			p.route = 0
+		}
+	}
 }
 
 type utf8Normalizer struct {
@@ -194,62 +235,6 @@ func (s *ansiStripper) write(content []byte) {
 
 func (s *ansiStripper) finish() {
 	s.state = ansiText
-}
-
-type secretRedactor struct {
-	pending []byte
-	secrets [][]byte
-	maximum int
-	emit    func([]byte, bool)
-}
-
-func newSecretRedactor(secrets []string, emit func([]byte, bool)) secretRedactor {
-	unique := make(map[string]struct{}, len(secrets))
-	redactor := secretRedactor{emit: emit}
-	for _, secret := range secrets {
-		if _, exists := unique[secret]; exists {
-			continue
-		}
-		unique[secret] = struct{}{}
-		encoded := []byte(secret)
-		redactor.secrets = append(redactor.secrets, encoded)
-		if len(encoded) > redactor.maximum {
-			redactor.maximum = len(encoded)
-		}
-	}
-	sort.Slice(redactor.secrets, func(left, right int) bool {
-		return len(redactor.secrets[left]) > len(redactor.secrets[right])
-	})
-	return redactor
-}
-
-func (r *secretRedactor) write(content []byte) {
-	if len(r.secrets) == 0 {
-		r.emit(content, false)
-		return
-	}
-	r.pending = append(r.pending, content...)
-	for len(r.pending) >= r.maximum {
-		r.emitNext()
-	}
-}
-
-func (r *secretRedactor) finish() {
-	for len(r.pending) > 0 {
-		r.emitNext()
-	}
-}
-
-func (r *secretRedactor) emitNext() {
-	for _, secret := range r.secrets {
-		if bytes.HasPrefix(r.pending, secret) {
-			r.emit([]byte(RedactionMarker), true)
-			r.pending = r.pending[len(secret):]
-			return
-		}
-	}
-	r.emit(r.pending[:1], false)
-	r.pending = r.pending[1:]
 }
 
 type lineLimiter struct {

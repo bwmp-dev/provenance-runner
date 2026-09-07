@@ -99,6 +99,12 @@ func (c *Collector) RecordEvent(ctx context.Context, input EventInput) error {
 }
 
 func (c *Collector) recordEventLocked(input EventInput) {
+	clean, err := sanitizeEvent(input, c.config.patterns, c.config.MaxEventBytes)
+	if err != nil {
+		c.setStructuredEventError("structured event cannot be safely sanitized")
+		return
+	}
+	input = clean
 	if len(c.events) >= c.config.MaxEvents {
 		c.eventsTruncated = true
 		return
