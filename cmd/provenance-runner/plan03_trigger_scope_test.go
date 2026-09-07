@@ -23,7 +23,6 @@ const (
 )
 
 var plan03RemoteOnlyPackages = map[string]map[string]bool{
-	runnerModule + "/internal/buildinfo":      {"runConnect": true},
 	runnerModule + "/internal/enrollment":     {"runEnroll": true},
 	runnerModule + "/internal/gatewayclient":  {"runConnect": true},
 	runnerModule + "/internal/runneridentity": {},

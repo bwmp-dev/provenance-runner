@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -20,113 +21,134 @@ import (
 
 func TestTerminalEvidenceDurableReopenReplayAndDowngrade(t *testing.T) {
 	for _, passed := range []bool{true, false} {
-		t.Run(map[bool]string{true: "completed", false: "failed"}[passed], func(t *testing.T) {
-			now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
-			client, offer := activeEvidenceClient(t, now)
-			raw, err := os.ReadFile("../terminalevidence/testdata/platform-created-job.json")
-			if err != nil {
-				t.Fatal(err)
-			}
-			job := new(runnerv1.JobSpecification)
-			if err := protojson.Unmarshal(raw, job); err != nil {
-				t.Fatal(err)
-			}
-			job.Lease = offer.Job.Lease
-			job.Attempt = offer.Job.Attempt
-			job.JobCorrelation = nil
-			if !passed {
-				job.TargetPluginName = "SuccessFixture"
-			}
-			contextEvidence, err := terminalevidence.NewContext(job)
-			if err != nil {
-				t.Fatal(err)
-			}
-			encoded, err := proto.Marshal(job)
-			if err != nil {
-				t.Fatal(err)
-			}
-			client.journal.path = filepath.Join(t.TempDir(), "journal.json")
-			if err := client.journal.update(func(s *journalState) error { s.Active.Specification = encoded; return nil }); err != nil {
-				t.Fatal(err)
-			}
-			uploader := &recordingCompleteLogUploader{object: testLogObject()}
-			client.logUploader = uploader
-			result := execution.Result{StartedAt: now, CompletedAt: now.Add(time.Second), TerminalContext: contextEvidence, TerminalObservations: []terminalevidence.Observation{{Type: "plugin-enabled", Name: job.TargetPluginName, Loaded: true, Enabled: passed}}, CompleteLog: testCompleteLog(t, []byte("safe complete log\n"))}
-			if !passed {
-				// This exact projection is mutation-checked against actual Paper
-				// Collect -> Executor output in provider_test.go. Only the target
-				// materialization name is selected for this synthetic dispatch.
-				observationBytes, err := os.ReadFile("testdata/paper-terminal-observations.json")
+		for _, measured := range []bool{false, true} {
+			t.Run(map[bool]string{true: "completed", false: "failed"}[passed]+map[bool]string{true: "/measured", false: "/legacy"}[measured], func(t *testing.T) {
+				now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+				client, offer := activeEvidenceClient(t, now)
+				raw, err := os.ReadFile("../terminalevidence/testdata/platform-created-job.json")
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := json.Unmarshal(observationBytes, &result.TerminalObservations); err != nil {
+				job := new(runnerv1.JobSpecification)
+				if err := protojson.Unmarshal(raw, job); err != nil {
 					t.Fatal(err)
 				}
-				result.Classification = execution.ClassificationWorkloadFailure
-				result.Failure = execution.NewFailure(execution.ClassificationWorkloadFailure, "on_enable_failure", "plugin startup failed")
-				result.Failure.Stage = execution.FailureStageStartup
-			} else {
-				result.Classification = execution.ClassificationPassed
-			}
-			var sent *runnerv1.RunnerMessage
-			session := &clientSession{client: client, rootContext: context.Background(), authenticated: authenticatedMessage(now, nil).GetAuthenticated(), terminalEvidenceV1: true, send: func(m *runnerv1.RunnerMessage) error {
-				sent = proto.Clone(m).(*runnerv1.RunnerMessage)
-				return errors.New("disconnected")
-			}}
-			if err := session.queueResult(result); err == nil {
-				t.Fatal("expected disconnect")
-			}
-			if sent == nil || terminalProof(sent) == nil {
-				t.Fatal("production queue omitted evidence")
-			}
-			if (sent.GetCompleted() != nil) != passed {
-				t.Fatal("terminal outcome changed")
-			}
-			if err := terminalevidence.ValidateFrozen(terminalProof(sent), job, testRunnerID); err != nil {
-				t.Fatal(err)
-			}
-			original := client.journal.snapshot().PendingMessage
-			reopened, err := openJournal(client.journal.path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			client.journal = reopened
-			calls := 0
-			session.send = func(m *runnerv1.RunnerMessage) error {
-				calls++
-				if !proto.Equal(m, sent) {
-					t.Fatal("replay changed proof/message")
+				job.Lease = offer.Job.Lease
+				job.Attempt = offer.Job.Attempt
+				job.JobCorrelation = nil
+				if !passed {
+					job.TargetPluginName = "SuccessFixture"
 				}
-				return nil
-			}
-			session.terminalEvidenceV1 = false
-			if err := session.replayPending(); err == nil || calls != 0 {
-				t.Fatal("downgrade sent or stripped queued evidence")
-			}
-			if !bytes.Equal(original, client.journal.snapshot().PendingMessage) {
-				t.Fatal("downgrade mutated durable bytes")
-			}
-			session.terminalEvidenceV1 = true
-			if err := session.replayPending(); err != nil {
-				t.Fatal(err)
-			}
-			if calls != 1 || uploader.calls != 1 {
-				t.Fatal("replay did not send exactly once without upload")
-			}
-			ack := eventAcknowledgement(now.Add(2*time.Second), "proof-ack", sent, runnerv1.LeaseStatus_LEASE_STATUS_COMPLETED, runnerv1.JobPhase_JOB_PHASE_RUNNING).GetEventAcknowledgement()
-			bad := proto.Clone(ack).(*runnerv1.RunnerEventAcknowledgement)
-			bad.Reconciliation.Attempt.AttemptId = "wrong"
-			if session.handleEventAcknowledgement(bad, now.Add(2*time.Second)) == nil {
-				t.Fatal("foreign acknowledgement accepted")
-			}
-			if err := session.handleEventAcknowledgement(ack, now.Add(2*time.Second)); err != nil {
-				t.Fatal(err)
-			}
-			if client.journal.snapshot().Active != nil || len(client.journal.snapshot().PendingMessage) != 0 {
-				t.Fatal("ack did not clear durable proof")
-			}
-		})
+				contextEvidence, err := terminalevidence.NewContext(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				encoded, err := proto.Marshal(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.journal.path = filepath.Join(t.TempDir(), "journal.json")
+				if err := client.journal.update(func(s *journalState) error { s.Active.Specification = encoded; return nil }); err != nil {
+					t.Fatal(err)
+				}
+				uploader := &recordingCompleteLogUploader{object: testLogObject()}
+				client.logUploader = uploader
+				result := execution.Result{StartedAt: now, CompletedAt: now.Add(time.Second), TerminalContext: contextEvidence, TerminalObservations: []terminalevidence.Observation{{Type: "plugin-enabled", Name: job.TargetPluginName, Loaded: true, Enabled: passed}}, CompleteLog: testCompleteLog(t, []byte("safe complete log\n"))}
+				if measured {
+					result.MeasuredRuntime = &runtimeidentity.Snapshot{RunnerVersion: "test-v1", RunnerExecutableSHA256: strings.Repeat("1", 64), SandboxKind: "gvisor", SandboxVersion: "test-v2", SandboxExecutableSHA256: strings.Repeat("2", 64), NetworkMode: "none", RootFS: runtimeidentity.RootFS{Format: "squashfs-image-sha256/v1", SHA256: strings.Repeat("3", 64)}}
+				}
+				if !passed {
+					// This exact projection is mutation-checked against actual Paper
+					// Collect -> Executor output in provider_test.go. Only the target
+					// materialization name is selected for this synthetic dispatch.
+					observationBytes, err := os.ReadFile("testdata/paper-terminal-observations.json")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal(observationBytes, &result.TerminalObservations); err != nil {
+						t.Fatal(err)
+					}
+					result.Classification = execution.ClassificationWorkloadFailure
+					result.Failure = execution.NewFailure(execution.ClassificationWorkloadFailure, "on_enable_failure", "plugin startup failed")
+					result.Failure.Stage = execution.FailureStageStartup
+				} else {
+					result.Classification = execution.ClassificationPassed
+				}
+				var sent *runnerv1.RunnerMessage
+				session := &clientSession{client: client, rootContext: context.Background(), authenticated: authenticatedMessage(now, nil).GetAuthenticated(), terminalEvidenceV1: true, send: func(m *runnerv1.RunnerMessage) error {
+					sent = proto.Clone(m).(*runnerv1.RunnerMessage)
+					return errors.New("disconnected")
+				}}
+				if err := session.queueResult(result); err == nil {
+					t.Fatal("expected disconnect")
+				}
+				if sent == nil || terminalProof(sent) == nil {
+					t.Fatal("production queue omitted evidence")
+				}
+				if (sent.GetCompleted() != nil) != passed {
+					t.Fatal("terminal outcome changed")
+				}
+				if err := terminalevidence.ValidateFrozen(terminalProof(sent), job, testRunnerID); err != nil {
+					t.Fatal(err)
+				}
+				if measured {
+					if !bytes.Contains(terminalProof(sent).CanonicalJson, []byte(`"sandboxExecutableSha256":"`+strings.Repeat("2", 64)+`"`)) {
+						t.Fatal("queue lost measured runtime")
+					}
+					result.MeasuredRuntime.SandboxExecutableSHA256 = strings.Repeat("9", 64)
+				}
+				original := client.journal.snapshot().PendingMessage
+				reopened, err := openJournal(client.journal.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.journal = reopened
+				calls := 0
+				session.send = func(m *runnerv1.RunnerMessage) error {
+					calls++
+					if !proto.Equal(m, sent) {
+						t.Fatal("replay changed proof/message")
+					}
+					return nil
+				}
+				session.terminalEvidenceV1 = false
+				if err := session.replayPending(); err == nil || calls != 0 {
+					t.Fatal("downgrade sent or stripped queued evidence")
+				}
+				if !bytes.Equal(original, client.journal.snapshot().PendingMessage) {
+					t.Fatal("downgrade mutated durable bytes")
+				}
+				session.terminalEvidenceV1 = true
+				if err := session.replayPending(); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 1 || uploader.calls != 1 {
+					t.Fatal("replay did not send exactly once without upload")
+				}
+				ack := eventAcknowledgement(now.Add(2*time.Second), "proof-ack", sent, runnerv1.LeaseStatus_LEASE_STATUS_COMPLETED, runnerv1.JobPhase_JOB_PHASE_RUNNING).GetEventAcknowledgement()
+				bad := proto.Clone(ack).(*runnerv1.RunnerEventAcknowledgement)
+				bad.Reconciliation.Attempt.AttemptId = "wrong"
+				if session.handleEventAcknowledgement(bad, now.Add(2*time.Second)) == nil {
+					t.Fatal("foreign acknowledgement accepted")
+				}
+				if err := session.handleEventAcknowledgement(ack, now.Add(2*time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if client.journal.snapshot().Active != nil || len(client.journal.snapshot().PendingMessage) != 0 {
+					t.Fatal("ack did not clear durable proof")
+				}
+			})
+		}
+	}
+}
+
+func TestDurableSessionRejectsProofOverflowBeforePersistOrSend(t *testing.T) {
+	client, _ := activeEvidenceClient(t, time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC))
+	sent, mutated := false, false
+	session := &clientSession{client: client, send: func(*runnerv1.RunnerMessage) error { sent = true; return nil }}
+	err := session.queueDurable(&runnerv1.RunnerMessage_Failed{Failed: &runnerv1.JobFailed{ExecutionEvidence: &runnerv1.ExecutionEvidence{CanonicalJson: []byte(`{}`)}, Failure: &runnerv1.FailureDetail{Summary: strings.Repeat("x", MaximumMessageBytes)}}}, func(*journalState) error { mutated = true; return nil })
+	if err == nil || err.Error() != "terminal evidence message exceeds supported bounds" || sent || mutated || len(client.journal.snapshot().PendingMessage) != 0 {
+		t.Fatal("durable session bypassed exact overflow guard")
 	}
 }
 

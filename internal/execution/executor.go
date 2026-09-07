@@ -189,6 +189,10 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 	}
 	result.StructuredEvents = append([]StructuredEvent(nil), output.StructuredEvents...)
 	result.TerminalObservations = append([]terminalevidence.Observation(nil), output.TerminalObservations...)
+	if output.MeasuredRuntime != nil {
+		measured := *output.MeasuredRuntime
+		result.MeasuredRuntime = &measured
+	}
 	for index := range result.StructuredEvents {
 		result.StructuredEvents[index].Payload = append([]byte(nil), result.StructuredEvents[index].Payload...)
 	}

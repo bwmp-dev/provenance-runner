@@ -22,6 +22,7 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 )
 
 const (
@@ -56,9 +57,13 @@ type Config struct {
 	InputsRoot        string
 	Platform          string
 	RootFSIdentity    string
-	runtimeIdentity   string
-	cgroupIdentity    string
-	systemdLauncher   string
+	// Empty preserves legacy unmeasured behavior. Never selected by a job.
+	RootFSImagePath      string
+	RootFSLoopDevicePath string
+	MeasuredRuntimeMode  string
+	runtimeIdentity      string
+	cgroupIdentity       string
+	systemdLauncher      string
 }
 
 type Provider struct {
@@ -90,6 +95,9 @@ func New(config Config) (*Provider, error) {
 	config.runtimeIdentity = runtimeIdentity
 	if config.CgroupDriver == "" {
 		config.CgroupDriver = CgroupDriverRunsc
+	}
+	if config.RootFSImagePath != "" && config.CgroupDriver != CgroupDriverSystemdUser {
+		return nil, errors.New("create gVisor provider: measured runtime requires the systemd-user accounting boundary")
 	}
 	if config.CgroupDriver == CgroupDriverSystemdUser {
 		systemdRunPath := config.SystemdRunPath
@@ -128,6 +136,12 @@ func New(config Config) (*Provider, error) {
 }
 
 func newProvider(config Config, runner commandRunner) (*Provider, error) {
+	if config.RootFSImagePath != "" && config.MeasuredRuntimeMode != "embedded-executable" {
+		return nil, errors.New("create gVisor provider: measured runtime requires explicit embedded-executable mode")
+	}
+	if config.RootFSImagePath == "" && (config.MeasuredRuntimeMode != "" || config.RootFSLoopDevicePath != "") {
+		return nil, errors.New("create gVisor provider: measured configuration requires an image")
+	}
 	if runner == nil {
 		return nil, errors.New("create gVisor provider: command runner is nil")
 	}
@@ -145,6 +159,9 @@ func newProvider(config Config, runner commandRunner) (*Provider, error) {
 	}
 	switch config.CgroupDriver {
 	case CgroupDriverRunsc:
+		if config.RootFSImagePath != "" {
+			return nil, errors.New("create gVisor provider: measured runtime requires the systemd-user accounting boundary")
+		}
 		if config.SystemdRunPath != "" || config.SystemdCgroupRoot != "" || config.cgroupIdentity != "" {
 			return nil, errors.New("create gVisor provider: systemd cgroup settings require the systemd-user driver")
 		}
@@ -589,6 +606,20 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 			return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_rootfs_invalid", err)
 		}
 	}
+	var measured *runtimeidentity.Lease
+	transferred := false
+	defer func() {
+		if measured != nil && !transferred {
+			measured.Close()
+		}
+	}()
+	if e.provider.config.RootFSImagePath != "" {
+		var err error
+		measured, err = runtimeidentity.Acquire(ctx, e.provider.config.RunscPath, e.provider.config.RootFS, e.provider.config.RootFSImagePath, e.provider.config.RootFSLoopDevicePath)
+		if err != nil {
+			return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_runtime_measurement_unavailable", err)
+		}
+	}
 	collector, err := evidence.NewCollector(e.evidenceConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create gVisor evidence collector: %w", err)
@@ -602,6 +633,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		return nil, errors.Join(fmt.Errorf("create gVisor bundle: %w", err), collector.Close())
 	}
 	prepared := &preparedEnvironment{
+		measurement:           measured,
 		provider:              e.provider,
 		containerID:           containerID,
 		bundle:                bundle,
@@ -615,6 +647,17 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 			pids:        e.config.PIDs,
 		},
 	}
+	rootReference := e.provider.config.RootFS
+	if measured != nil {
+		copy := *e.provider
+		copy.config.RunscPath = measured.SandboxPath()
+		copy.config.systemdLauncher = measured.RunnerPath()
+		prepared.provider = &copy
+		rootReference = filepath.Join(bundle, ".measured-root")
+		if err := os.Mkdir(rootReference, 0700); err != nil {
+			return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
+		}
+	}
 	if err := prepared.writeMetadata(); err != nil {
 		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
@@ -627,7 +670,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		}
 		eventMount = &structuredEventMount{source: prepared.structuredEventPath, destination: e.structuredEventFile.Destination}
 	}
-	spec, err := buildSpec(e.config, e.provider.config.RootFS, e.inputs, containerID, e.mounts, eventMount)
+	spec, err := buildSpec(e.config, rootReference, e.inputs, containerID, e.mounts, eventMount)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("build OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
@@ -637,10 +680,13 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err := ctx.Err(); err != nil {
 		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
+	transferred = true
 	return prepared, nil
 }
 
 type preparedEnvironment struct {
+	measurement                *runtimeidentity.Lease
+	measuredRuntime            *runtimeidentity.Snapshot
 	mu                         sync.Mutex
 	usageMu                    sync.Mutex
 	provider                   *Provider
@@ -676,7 +722,23 @@ func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserve
 	})
 }
 
-func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionOutcome, error) {
+func (e *preparedEnvironment) Execute(ctx context.Context) (outcome execution.ExecutionOutcome, executionErr error) {
+	if e.measurement != nil {
+		if err := e.measurement.Validate(); err != nil {
+			return execution.ExecutionOutcome{}, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_runtime_measurement_drift", runtimeidentity.ErrDrift)
+		}
+		defer func() {
+			if err := e.measurement.Validate(); err != nil {
+				e.measuredRuntime = nil
+				executionErr = execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_runtime_measurement_drift", runtimeidentity.ErrDrift)
+				return
+			}
+			if outcome.ExitCode != nil && *outcome.ExitCode != runscFailureExitCode && executionErr == nil {
+				value := e.measurement.Snapshot()
+				e.measuredRuntime = &value
+			}
+		}()
+	}
 	if err := ctx.Err(); err != nil {
 		return execution.ExecutionOutcome{}, err
 	}
@@ -714,12 +776,17 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (execution.ExecutionO
 	samplingDone := make(chan struct{})
 	go e.sampleUsageUntil(stopSampling, samplingDone)
 	launchMarker := filepath.Join(e.bundle, systemdLaunchMarker)
-	runCommand, err := e.provider.wrapRunCommand(command{
+	invocation := command{
 		Path:   e.provider.config.RunscPath,
 		Args:   e.provider.runArguments("run", "--bundle="+e.bundle, e.containerID),
 		Stdout: stdout,
 		Stderr: stderr,
-	}, e.cgroupLimits, e.containerID, launchMarker)
+	}
+	if e.measurement != nil {
+		invocation.Path = e.measurement.RunnerPath()
+		invocation.Args = append([]string{MeasuredLauncherCommand, e.measurement.RootPath(), e.measurement.SandboxPath(), e.measurement.ImagePath(), e.measurement.LoopPath(), filepath.Join(e.bundle, ".measured-root"), e.measurement.Snapshot().RootFS.SHA256, e.provider.config.MeasuredRuntimeMode, "--"}, invocation.Args...)
+	}
+	runCommand, err := e.provider.wrapRunCommand(invocation, e.cgroupLimits, e.containerID, launchMarker)
 	if err != nil {
 		close(stopSampling)
 		<-samplingDone
@@ -873,7 +940,13 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 	for index, event := range bundle.Events {
 		events[index] = execution.StructuredEvent{Sequence: event.Sequence, Kind: event.Kind, Payload: append([]byte(nil), event.Payload...)}
 	}
+	var measured *runtimeidentity.Snapshot
+	if e.measuredRuntime != nil {
+		value := *e.measuredRuntime
+		measured = &value
+	}
 	return execution.CollectedOutput{
+		MeasuredRuntime:  measured,
 		Stdout:           bundle.Stdout,
 		Stderr:           bundle.Stderr,
 		CapturedBytes:    bundle.Usage.CapturedBytes,
@@ -997,6 +1070,11 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 		return err
 	}
 	e.cleaned = true
+	if e.measurement != nil {
+		// Failed cleanup may be retried. Keep the exact sandbox executable and
+		// root/image references alive until teardown is actually confirmed.
+		return e.measurement.Close()
+	}
 	return nil
 }
 
@@ -1033,6 +1111,9 @@ func (p *Provider) runArguments(arguments ...string) []string {
 	}
 	if p.config.CgroupDriver == CgroupDriverSystemdUser {
 		global = append(global, "--ignore-cgroups=true")
+	}
+	if p.config.RootFSImagePath != "" {
+		global = append(global, "--gofer-network-namespace=new")
 	}
 	return append(global, arguments...)
 }

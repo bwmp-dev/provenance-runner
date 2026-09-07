@@ -21,6 +21,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == MeasuredLauncherCommand {
+		os.Exit(RunMeasuredLauncher(os.Args[2:], os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == MeasuredChildCommand {
+		os.Exit(RunMeasuredChild(os.Args[2:], os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == SystemdLauncherCommand {
 		os.Exit(RunSystemdLauncher(os.Args[2:], os.Stderr))
 	}
@@ -68,16 +74,19 @@ func TestRunscSmoke(t *testing.T) {
 	stateRoot := filepath.Join(temporaryRoot, "state")
 	bundleRoot := filepath.Join(temporaryRoot, "bundles")
 	providerConfig := Config{
-		RunscPath:         resolvedRunsc,
-		CgroupDriver:      os.Getenv("PROVENANCE_GVISOR_CGROUP_DRIVER"),
-		SystemdRunPath:    os.Getenv("PROVENANCE_SYSTEMD_RUN_PATH"),
-		SystemdCgroupRoot: os.Getenv("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
-		RootFS:            rootFS,
-		RootFSIdentity:    "sha256:" + rootFSIdentityBefore,
-		StateRoot:         stateRoot,
-		BundleRoot:        bundleRoot,
-		InputsRoot:        inputsRoot,
-		Platform:          "systrap",
+		RunscPath:            resolvedRunsc,
+		CgroupDriver:         os.Getenv("PROVENANCE_GVISOR_CGROUP_DRIVER"),
+		SystemdRunPath:       os.Getenv("PROVENANCE_SYSTEMD_RUN_PATH"),
+		SystemdCgroupRoot:    os.Getenv("PROVENANCE_SYSTEMD_CGROUP_ROOT"),
+		RootFS:               rootFS,
+		RootFSImagePath:      os.Getenv("PROVENANCE_MEASURED_ROOTFS_IMAGE"),
+		RootFSLoopDevicePath: os.Getenv("PROVENANCE_MEASURED_LOOP_DEVICE"),
+		MeasuredRuntimeMode:  os.Getenv("PROVENANCE_MEASURED_RUNTIME_MODE"),
+		RootFSIdentity:       "sha256:" + rootFSIdentityBefore,
+		StateRoot:            stateRoot,
+		BundleRoot:           bundleRoot,
+		InputsRoot:           inputsRoot,
+		Platform:             "systrap",
 	}
 	provider, err := New(providerConfig)
 	if err != nil {
@@ -85,6 +94,24 @@ func TestRunscSmoke(t *testing.T) {
 	}
 	if err := provider.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if provider.config.RootFSImagePath != "" {
+		t.Run("cancelled cleanup retains exact objects for retry", func(t *testing.T) {
+			prepared := prepareSmokeEnvironment(t, provider, "smoke", configuration{Command: "/bin/true", Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20})
+			defer cleanupSmokeEnvironment(t, prepared)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if !errors.Is(prepared.Cleanup(ctx), context.Canceled) {
+				t.Fatal("cancelled cleanup unexpectedly succeeded")
+			}
+			if prepared.measurement == nil || prepared.measurement.Validate() != nil {
+				t.Fatal("failed cleanup lost retained runtime identity")
+			}
+			cleanupSmokeEnvironment(t, prepared)
+			if prepared.measurement.Validate() == nil {
+				t.Fatal("successful cleanup retained open identity lease")
+			}
+		})
 	}
 	if provider.config.CgroupDriver == CgroupDriverSystemdUser {
 		t.Run("systemd user scope applies exact limits", func(t *testing.T) {
@@ -161,6 +188,21 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		if output.ResourceUsage == nil || output.ResourceUsage.CPUTime <= 0 || output.ResourceUsage.PeakMemoryBytes == 0 || output.ResourceUsage.NetworkReceiveBytes != 0 || output.ResourceUsage.NetworkTransmitBytes != 0 {
 			t.Fatalf("sandbox measured usage = %#v", output.ResourceUsage)
+		}
+		if providerConfig.RootFSImagePath != "" && (output.MeasuredRuntime == nil || !output.MeasuredRuntime.Valid()) {
+			t.Fatal("actual measured execution omitted runtime identity")
+		}
+		if output.MeasuredRuntime != nil {
+			original := *output.MeasuredRuntime
+			output.MeasuredRuntime.RootFS.SHA256 = strings.Repeat("0", 64)
+			again, err := prepared.Collect(ctx)
+			if err != nil || again.MeasuredRuntime == nil || *again.MeasuredRuntime != original {
+				t.Fatal("collected runtime aliases caller mutation")
+			}
+			output.MeasuredRuntime = again.MeasuredRuntime
+		}
+		if providerConfig.RootFSImagePath == "" && output.MeasuredRuntime != nil {
+			t.Fatal("legacy root reported measured runtime")
 		}
 		cleanupSmokeEnvironment(t, prepared)
 		assertNoSandboxResidue(t, provider, containerID)

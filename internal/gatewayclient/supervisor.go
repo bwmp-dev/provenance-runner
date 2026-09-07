@@ -1106,7 +1106,7 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		if !result.TerminalContext.Matches(lease, attempt) || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
 			return permanent("terminal evidence executed identity mismatch")
 		}
-		proof, err = terminalevidence.Build(result.TerminalContext, s.authenticated.GetRunnerId(), result.TerminalObservations)
+		proof, err = terminalevidence.Build(result.TerminalContext, s.authenticated.GetRunnerId(), result.TerminalObservations, result.MeasuredRuntime)
 		if err != nil {
 			return permanent("terminal evidence could not be frozen")
 		}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 )
 
@@ -164,6 +165,7 @@ type ExecutionOutcome struct {
 }
 
 type CollectedOutput struct {
+	MeasuredRuntime      *runtimeidentity.Snapshot
 	TerminalObservations []terminalevidence.Observation
 	Stdout               string
 	Stderr               string
@@ -271,6 +273,7 @@ func NewClassifiedError(classification Classification, code string, err error) e
 }
 
 type Result struct {
+	MeasuredRuntime      *runtimeidentity.Snapshot      `json:"-"`
 	TerminalObservations []terminalevidence.Observation `json:"-"`
 	TerminalContext      *terminalevidence.Context      `json:"-"`
 	SchemaVersion        string                         `json:"schemaVersion"`
