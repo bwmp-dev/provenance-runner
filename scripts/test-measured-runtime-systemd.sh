@@ -156,7 +156,7 @@ setpriv --reuid "$task_uid" --regid "$task_gid" --clear-groups env "${session_en
     python3 "$fixture/preflight.py" > "$evidence/preflight.json"
 setpriv --reuid "$task_uid" --regid "$task_gid" --clear-groups env "${session_env[@]}" PROVENANCE_MEASURED_EXEC_DIAGNOSTIC=1 \
   systemd-run --user --scope --collect --quiet --slice=app.slice --unit=pvm-execdiag \
-    "$fixture/gvisor-smoke.test" -test.run '^TestMeasuredNamespaceExecDiagnostic$' -test.v -test.count=1 > "$evidence/exec-probe.log" 2>&1
+    "$fixture/gvisor-smoke.test" -test.run '^TestMeasured(NamespaceExec|NativeFDExec)Diagnostic$' -test.v -test.count=1 > "$evidence/exec-probe.log" 2>&1
 python3 "$(dirname "$0")/measured-runtime-monitor.py" --uid "$task_uid" \
   --scope-root "${scope_root#/sys/fs/cgroup}" --frontend "$runsc" \
   --stop-file "$fixture/monitor-stop" --output "$evidence/executable-observations.json" \
