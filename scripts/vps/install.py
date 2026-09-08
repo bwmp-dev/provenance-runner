@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Platform-hosted Ubuntu 24.04 amd64 runner installation; never upgrades existing state."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -28,7 +29,7 @@ TREE = '55b3d6002a16c74e9f37638a451a4b4c32b4078b06377d85a8633b89c2506500'
 RUNSC = '456ea862b62b48bb7ff27ae38c262b52315bf3d68ea0733164e4817cadc518a1'
 PROBE = '040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868'
 FILES = {'runner', 'runsc', 'rootfs.tar', 'install.sh', 'install.py',
-         'prepare-gvisor-rootfs.sh', 'settings.example.json', 'SOURCE_COMMIT'}
+         'prepare-gvisor-rootfs.sh', 'settings.example.json', 'SOURCE_COMMIT', 'updater.py', 'sign-release.py'}
 SYSTEM_UNIT = Path('/etc/systemd/system') / UNIT
 USER_UNIT = Path('/etc/systemd/user') / UNIT
 PROFILE = Path('/etc/apparmor.d/opt.provenance-runner.runsc')
@@ -350,17 +351,70 @@ def activate():
     print('Runner service is running and enabled for boot. Confirm online status in the console; this is not a completed Paper job test.')
 
 
+def enable_updater(bundle, settings_path):
+    verify_bundle(bundle)
+    protected(ROOT/'installed.json', private=True)
+    require(not (ROOT/'INSTALLING').exists(), 'Runner installation is incomplete')
+    protected(settings_path, private=True)
+    config = read_json(settings_path)
+    exact(config, 'apiOrigin credentialFile releasePublicKey')
+    https(config['apiOrigin'], origin=True)
+    require(len(base64.b64decode(config['releasePublicKey'], validate=True)) == 32, 'Release key must be base64 Ed25519 public bytes')
+    credential_path = Path(config['credentialFile'])
+    protected(credential_path, private=True)
+    require(credential_path.stat().st_size <= 128, 'Updater credential is oversized')
+    credential = credential_path.read_text().strip()
+    require(re.fullmatch(r'pru_[a-f0-9]{64}', credential), 'Updater credential must be pru_ followed by 64 random hex digits')
+    installed_settings = read_json(ROOT/'settings.json')
+    unit = Path('/etc/systemd/system/provenance-runner-updater.service')
+    for path in (unit, ROOT/'updater.json', ROOT/'updater.py', ROOT/'updater-credential'):
+        require(not path.exists() and not path.is_symlink(), 'Updater already exists; refusing overwrite')
+    run('apt-get', 'install', '-y', '--no-install-recommends', 'openssl')
+    write(ROOT/'updater-credential', credential)
+    config['credentialFile'] = str(ROOT/'updater-credential')
+    config['runnerId'] = installed_settings['runnerId']
+    write(ROOT/'updater.json', json.dumps(config)+'\n')
+    shutil.copyfile(bundle/'updater.py', ROOT/'updater.py')
+    os.chmod(ROOT/'updater.py', 0o700)
+    write(unit, """[Unit]
+Description=Provenance hosted runner binary updater
+Wants=network-online.target
+After=network-online.target provenance-runner.service
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /opt/provenance-runner/updater.py
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+[Install]
+WantedBy=multi-user.target
+""", 0o644)
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', 'provenance-runner-updater.service')
+    print('Updater installed. Register these nonsecret values in the admin console:')
+    print('Runner ID: '+config['runnerId'])
+    print('Credential SHA256: '+hashlib.sha256(credential.encode()).hexdigest())
+    print('Release public key: '+config['releasePublicKey'])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('install')
     p.add_argument('settings', type=Path)
     p.add_argument('--prepare-only', action='store_true', help='Install without starting the worker; run activate later')
+    updater = sub.add_parser('enable-updater', help='One-time hosted binary updater installation')
+    updater.add_argument('settings', type=Path)
     sub.add_parser('activate', help='Retry activation of a completed installation; preserves identity/journal')
     args = parser.parse_args()
     require(os.geteuid() == 0, 'Run as root')
     if args.action == 'install':
         install(Path(__file__).resolve().parent, args.settings.absolute(), args.prepare_only)
+    elif args.action == 'enable-updater':
+        enable_updater(Path(__file__).resolve().parent, args.settings.absolute())
     else:
         activate()
 

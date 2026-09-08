@@ -139,3 +139,9 @@ unit tests and rootfs fixture checks are not live deployment evidence.
 python3 -m unittest discover -s scripts/vps -v
 bash -n scripts/vps/install.sh scripts/vps/build-bundle.sh
 ```
+
+## Enable future console updates
+
+The bundle also supports the one-time `enable-updater` command. See
+[console-managed hosted binary updates](hosted-runner-updates.md) for per-node
+credentials, signing-key setup, publishing releases and rollback behavior.
