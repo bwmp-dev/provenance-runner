@@ -165,5 +165,66 @@ class BootstrapPermissions(unittest.TestCase):
             i.validate(value)
 
 
+class InstallationFlow(unittest.TestCase):
+    def test_prepare_installs_exact_credentials_modes_and_verified_cache(self):
+        import os
+        import hashlib
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            bundle = base/'bundle'
+            bundle.mkdir()
+            for name in ['runner', 'runsc', 'prepare-gvisor-rootfs.sh', 'SOURCE_COMMIT']:
+                (bundle/name).write_text('fixture-'+name)
+            value = settings()
+            token = 'phc_v1_' + __import__('base64').urlsafe_b64encode(bytes(32)).decode().rstrip('=')
+            (base/'credential').write_text(token+'\n')
+            value['platformCredentialFile'] = str(base/'credential')
+            payloads = {'probe': b'verified probe bytes', 'preparedRuntime': b'verified runtime bytes'}
+            for name, payload in payloads.items():
+                value[name]['sha256'] = hashlib.sha256(payload).hexdigest()
+                value[name]['sizeBytes'] = len(payload)
+            settings_path = base/'settings.json'
+            settings_path.write_text(json.dumps(value))
+            def run(*args, **kwargs):
+                if args[0] == 'curl':
+                    target = Path(args[args.index('--output')+1])
+                    target.write_bytes(payloads[target.name])
+                if args[0].endswith('prepare-gvisor-rootfs.sh'):
+                    return i.TREE
+                return ''
+            real_temp = tempfile.TemporaryDirectory
+            with ExitStack() as stack:
+                for key, val in {'ROOT':base/'opt', 'STATE':base/'state', 'SYSTEM_UNIT':base/'system.service', 'USER_UNIT':base/'user.service', 'PROFILE':base/'apparmor'}.items():
+                    stack.enter_context(patch.object(i,key,val))
+                stack.enter_context(patch.object(i,'protected'))
+                stack.enter_context(patch.object(i,'validate',side_effect=lambda v:v))
+                stack.enter_context(patch.object(i,'verify_bundle'))
+                stack.enter_context(patch.object(i,'host_preflight'))
+                stack.enter_context(patch.object(i,'run',side_effect=run))
+                stack.enter_context(patch.object(i,'as_user'))
+                stack.enter_context(patch.object(i.os,'chown'))
+                stack.enter_context(patch.object(i.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())))
+                stack.enter_context(patch.object(i.tempfile,'TemporaryDirectory',side_effect=lambda **kwargs:real_temp(dir=base)))
+                previous = os.umask(0o077)
+                try:
+                    i.install(bundle,settings_path,True)
+                finally:
+                    os.umask(previous)
+                self.assertEqual(i.ROOT.stat().st_mode & 0o777,0o755)
+                self.assertEqual(i.STATE.stat().st_mode & 0o777,0o711)
+                self.assertEqual((i.ROOT/'runner.env').stat().st_mode & 0o777,0o640)
+                self.assertEqual((i.STATE/'config/credential').read_bytes(),token.encode())
+                self.assertEqual(i.USER_UNIT.stat().st_mode & 0o777,0o644)
+                for name,payload in payloads.items():
+                    sha=value[name]['sha256']
+                    cached=i.STATE/'cache/content/sha256'/sha[:2]/sha[2:]
+                    self.assertEqual(cached.read_bytes(),payload)
+                    self.assertEqual(cached.stat().st_mode & 0o777,0o444)
+                self.assertTrue((i.ROOT/'installed.json').exists())
+                self.assertFalse((i.ROOT/'INSTALLING').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

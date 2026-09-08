@@ -231,14 +231,7 @@ def connection_credential(value):
     return value
 
 
-def install(bundle, settings_path, prepare_only):
-    protected(settings_path, private=True)
-    settings = validate(read_json(settings_path))
-    verify_bundle(bundle)
-    credential_path = Path(settings['platformCredentialFile'])
-    protected(credential_path, private=True)
-    require(0 < credential_path.stat().st_size <= 4096, 'Runner credential size is invalid')
-    credential = connection_credential(credential_path.read_text(encoding='utf-8'))
+def host_preflight(settings):
     require(platform.machine() == 'x86_64' and Path('/run/systemd/system').is_dir(), 'Requires amd64 VPS booted with systemd')
     os_release = Path('/etc/os-release').read_text()
     require('ID=ubuntu\n' in os_release and 'VERSION_ID="24.04"' in os_release, 'Supported host: Ubuntu 24.04 LTS')
@@ -258,10 +251,21 @@ def install(bundle, settings_path, prepare_only):
     memory = int(re.search(r'MemTotal:\s+(\d+)', Path('/proc/meminfo').read_text())[1])*1024
     require(settings['resources']['memoryBytes'] <= memory, 'Advertised memory exceeds host capacity')
     require(settings['resources']['diskBytes'] + 4*1024**3 <= shutil.disk_usage('/var/lib').free, 'Insufficient disk for advertised capacity and runtime')
+    require(Path('/sys/module/apparmor/parameters/enabled').read_text().strip() == 'Y', 'AppArmor must be enabled; no global sysctl changes are made')
+
+
+def install(bundle, settings_path, prepare_only):
+    protected(settings_path, private=True)
+    settings = validate(read_json(settings_path))
+    verify_bundle(bundle)
+    credential_path = Path(settings['platformCredentialFile'])
+    protected(credential_path, private=True)
+    require(0 < credential_path.stat().st_size <= 4096, 'Runner credential size is invalid')
+    credential = connection_credential(credential_path.read_text(encoding='utf-8'))
+    host_preflight(settings)
     print('Installing host packages and isolated service account...', flush=True)
     run('apt-get', 'update')
     run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl', 'apparmor', 'apparmor-utils', 'dbus-user-session', 'systemd-container', 'uidmap')
-    require(Path('/sys/module/apparmor/parameters/enabled').read_text().strip() == 'Y', 'AppArmor must be enabled; no global sysctl changes are made')
     print('Checking published Paper assets against their hashes...', flush=True)
     assets = tempfile.TemporaryDirectory(prefix='provenance-assets-', dir='/root')
     temporary = assets.name
@@ -288,9 +292,9 @@ def install(bundle, settings_path, prepare_only):
         sha = settings[name]['sha256']
         parent = STATE/'cache'/'content'/'sha256'/sha[:2]
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for directory in (STATE/'cache'/'content', STATE/'cache'/'content'/'sha256', parent):
-            os.chown(directory, account.pw_uid, account.pw_gid)
-            directory.chmod(0o700)
+        for cache_directory in (STATE/'cache'/'content', STATE/'cache'/'content'/'sha256', parent):
+            os.chown(cache_directory, account.pw_uid, account.pw_gid)
+            cache_directory.chmod(0o700)
         target = parent/sha[2:]
         shutil.copyfile(Path(temporary)/name, target)
         os.chown(target, account.pw_uid, account.pw_gid)
@@ -464,4 +468,7 @@ if __name__ == '__main__':
         main()
     except (ValueError, OSError, KeyError, TypeError) as error:
         print('Installation stopped: '+str(error), file=sys.stderr)
+        sys.exit(1)
+    except Exception:
+        print('Installation stopped due to an internal error; retain the staged files for inspection.', file=sys.stderr)
         sys.exit(1)
