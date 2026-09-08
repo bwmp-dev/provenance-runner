@@ -126,8 +126,7 @@ class Failures(unittest.TestCase):
             self.assertEqual(p.read_text(), 'original')
 
 
-if __name__ == '__main__':
-    unittest.main()
+
 
 class SignedInstallationURLs(unittest.TestCase):
     def test_bounded_sigv4_assets_only(self):
@@ -138,3 +137,7 @@ class SignedInstallationURLs(unittest.TestCase):
         for bad in (url+'&token=secret', url+'&X-Amz-Expires=1', url.replace('86400','86401')):
             with self.assertRaises(ValueError): i.https(bad)
         with self.assertRaises(ValueError): i.https(url, origin=True)
+
+
+if __name__ == '__main__':
+    unittest.main()

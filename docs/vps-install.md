@@ -73,7 +73,10 @@ or independent proof of origin. Do not use an untrusted bundle/checksum pair.
 Register a platform-pool runner through the platform operator workflow and obtain
 its runner connection credential. Save it to a root-only file on the VPS, not in
 a command argument, shell history or this repository. This installer consumes an
-already-issued credential; it does not create platform registrations.
+already-issued credential; it does not create platform registrations. The installed
+connection credential must be exact bytes without a trailing newline. The installer
+normalizes surrounding whitespace from a manual input file and validates the hosted
+credential before writing its exact bytes.
 
 Copy `settings.example.json` to `/root/runner-settings.json`, then fill in:
 

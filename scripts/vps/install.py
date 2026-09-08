@@ -217,6 +217,14 @@ def environment(settings, account):
     return ''.join(k+'='+json.dumps(v)+'\n' for k, v in sorted(env.items()))
 
 
+def connection_credential(value):
+    value = value.strip()
+    require(re.fullmatch(r'phc_v1_[A-Za-z0-9_-]{43}', value), 'Expected a platform-hosted connection credential')
+    raw = base64.urlsafe_b64decode(value[7:]+'=')
+    require(base64.urlsafe_b64encode(raw).decode().rstrip('=') == value[7:], 'Noncanonical connection credential')
+    return value
+
+
 def install(bundle, settings_path, prepare_only):
     protected(settings_path, private=True)
     settings = validate(read_json(settings_path))
@@ -224,7 +232,7 @@ def install(bundle, settings_path, prepare_only):
     credential_path = Path(settings['platformCredentialFile'])
     protected(credential_path, private=True)
     require(0 < credential_path.stat().st_size <= 4096, 'Runner credential size is invalid')
-    credential = credential_path.read_text(encoding='utf-8')
+    credential = connection_credential(credential_path.read_text(encoding='utf-8'))
     require(platform.machine() == 'x86_64' and Path('/run/systemd/system').is_dir(), 'Requires amd64 VPS booted with systemd')
     os_release = Path('/etc/os-release').read_text()
     require('ID=ubuntu\n' in os_release and 'VERSION_ID="24.04"' in os_release, 'Supported host: Ubuntu 24.04 LTS')

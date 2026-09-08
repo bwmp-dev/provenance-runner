@@ -69,9 +69,10 @@ type Client struct {
 	journal   *journal
 	close     func() error
 
-	now              func() time.Time
-	wait             func(context.Context, time.Duration) error
-	handshakeTimeout time.Duration
+	now                func() time.Time
+	newExpirationTimer func(time.Duration) *time.Timer
+	wait               func(context.Context, time.Duration) error
+	handshakeTimeout   time.Duration
 
 	draining atomic.Bool
 
@@ -143,15 +144,16 @@ func newClientWithWorker(config Config, connector streamConnector, worker Remote
 		return nil, err
 	}
 	client := &Client{
-		config:           config,
-		connector:        connector,
-		worker:           worker,
-		journal:          journal,
-		now:              time.Now,
-		wait:             waitContext,
-		handshakeTimeout: maximumHandshakeDuration,
-		workerEvents:     make(chan workerEvent, 64),
-		logUploader:      newHTTPCompleteLogUploader(),
+		config:             config,
+		connector:          connector,
+		worker:             worker,
+		journal:            journal,
+		now:                time.Now,
+		newExpirationTimer: time.NewTimer,
+		wait:               waitContext,
+		handshakeTimeout:   maximumHandshakeDuration,
+		workerEvents:       make(chan workerEvent, 64),
+		logUploader:        newHTTPCompleteLogUploader(),
 	}
 	restartEvidence, err := openRestartEvidenceStore(config.journalFile, journal.snapshot().Active)
 	if err != nil {
@@ -373,7 +375,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	maintenance := time.NewTicker(maintenanceInterval)
 	defer maintenance.Stop()
 	expirationDelay, hostedRenewal := sessionExpiration(c.config.credential, authenticated.CredentialExpiresAt.AsTime().Sub(now))
-	expiration := time.NewTimer(expirationDelay)
+	expiration := c.newExpirationTimer(expirationDelay)
 	defer expiration.Stop()
 
 	for {

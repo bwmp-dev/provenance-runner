@@ -100,9 +100,9 @@ def extract(archive, destination):
     require(seen == FILES, 'Incomplete bundle')
 
 
-def private(path, content):
+def private(path, content, newline=True):
     with path.open('x', encoding='utf-8') as output:
-        output.write(content+'\n')
+        output.write(content+('\n' if newline else ''))
     path.chmod(0o600)
 
 
@@ -128,8 +128,8 @@ def main():
     bundle = stage/'runner-bundle'
     bundle.mkdir(mode=0o700)
     extract(stage/'bundle.tar.gz', bundle)
-    private(stage/'credential', data['credential'])
-    private(stage/'updater-credential', data['updaterCredential'])
+    private(stage/'credential', data['credential'], newline=False)
+    private(stage/'updater-credential', data['updaterCredential'], newline=False)
     settings = {k: profile[k] for k in ('gatewayAddress', 'artifactHosts', 'probe', 'preparedRuntime', 'resources')}
     settings.update(runnerId=data['runnerId'], platformCredentialFile=str(stage/'credential'))
     private(stage/'settings.json', json.dumps(settings))

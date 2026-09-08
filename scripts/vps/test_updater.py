@@ -157,8 +157,7 @@ class Recovery(unittest.TestCase):
                 u.local_quiet()
 
 
-if __name__ == '__main__':
-    unittest.main()
+
 
 class ReleaseCredentialScope(unittest.TestCase):
     def test_credentials_only_on_exact_assigned_api_path(self):
@@ -178,3 +177,7 @@ class ReleaseCredentialScope(unittest.TestCase):
                 client.opener = Opener()
                 client.download({'url':url,'sha256':sha,'sizeBytes':len(payload)},Path(tmp)/'runner')
                 self.assertEqual(client.opener.request.get_header('Authorization'), 'Bearer '+client.token if url==expected else None)
+
+
+if __name__ == '__main__':
+    unittest.main()
