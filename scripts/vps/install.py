@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""Fresh Ubuntu 24.04 amd64 runner installation; never upgrades existing state."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import platform
+import pwd
+import re
+import shutil
+import socket
+import ssl
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import tempfile
+import uuid
+from urllib.parse import urlsplit
+
+ROOT = Path('/opt/provenance-runner')
+STATE = Path('/var/lib/provenance-runner')
+USER = 'provenance-worker'
+UNIT = 'provenance-runner.service'
+TREE = '55b3d6002a16c74e9f37638a451a4b4c32b4078b06377d85a8633b89c2506500'
+RUNSC = '456ea862b62b48bb7ff27ae38c262b52315bf3d68ea0733164e4817cadc518a1'
+PROBE = '040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868'
+FILES = {'runner', 'runsc', 'rootfs.tar', 'install.sh', 'install.py',
+         'prepare-gvisor-rootfs.sh', 'settings.example.json', 'SOURCE_COMMIT'}
+SYSTEM_UNIT = Path('/etc/systemd/system') / UNIT
+USER_UNIT = Path('/etc/systemd/user') / UNIT
+PROFILE = Path('/etc/apparmor.d/opt.provenance-runner.runsc')
+
+
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+
+
+def run(*args, capture=False):
+    # Never echo arguments or enrollment stderr: they may contain private state.
+    result = subprocess.run(args, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+    require(result.returncode == 0, f'{Path(args[0]).name} failed (exit {result.returncode}); installation retained')
+    return result.stdout.strip() if capture else ''
+
+
+def digest(path):
+    with path.open('rb') as f:
+        return hashlib.file_digest(f, 'sha256').hexdigest()
+
+
+def protected(path, private=False):
+    require(path.is_absolute() and path.resolve() == path, 'Input must have a canonical absolute path without symlinks')
+    for parent in path.parents:
+        s = parent.stat()
+        require(s.st_uid == 0 and not s.st_mode & 0o022, 'Input parent must be root-owned and not group/world writable')
+    s = path.lstat()
+    require(stat.S_ISREG(s.st_mode) and s.st_uid == 0 and s.st_nlink == 1
+            and not s.st_mode & 0o7022, 'Input must be a root-owned regular single-link file without special/write bits')
+    if private:
+        require(stat.S_IMODE(s.st_mode) in (0o400, 0o600), 'Private input must have mode 0400 or 0600')
+
+
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, 'Duplicate JSON field')
+        result[key] = value
+    return result
+
+
+def read_json(path):
+    require(path.stat().st_size <= 65536, 'JSON input exceeds 64 KiB')
+    return json.loads(path.read_text(), object_pairs_hook=unique)
+
+
+def exact(obj, keys):
+    require(isinstance(obj, dict) and set(obj) == set(keys.split()), 'Missing or unsupported settings fields')
+
+
+def number(value, maximum):
+    require(type(value) is int and 0 < value <= maximum, 'Resource or artifact bound is invalid')
+
+
+def host(value):
+    require(isinstance(value, str) and len(value) <= 253 and re.fullmatch(r'[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?', value), 'Use a lowercase DNS hostname')
+    require(all(label and len(label) <= 63 and not label.startswith('-') and not label.endswith('-') for label in value.split('.')), 'Invalid DNS hostname')
+
+
+def https(value, origin=False):
+    require(isinstance(value, str) and not any(c.isspace() for c in value), 'Invalid HTTPS URL')
+    parsed = urlsplit(value)
+    require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
+            and not parsed.password and not parsed.query and not parsed.fragment
+            and not any(c in value for c in '\"\\\'`$'), 'Use HTTPS without credentials, query or fragment')
+    host(parsed.hostname)
+    require(parsed.port in (None, 443), 'HTTPS endpoints must use port 443')
+    if origin:
+        require(not parsed.path, 'API origin must not include a path')
+    return parsed
+
+
+def validate(settings):
+    organization = 'organizationId' in settings
+    exact(settings, 'apiOrigin gatewayAddress runnerId artifactHosts probe preparedRuntime resources ' +
+          ('organizationId registrationTokenFile' if organization else 'platformCredentialFile'))
+    https(settings['apiOrigin'], origin=True)
+    address = settings['gatewayAddress'].split(':')
+    require(len(address) == 2 and address[1].isdigit() and 0 < int(address[1]) < 65536, 'gatewayAddress must be DNS:port')
+    host(address[0])
+    for key in (('runnerId', 'organizationId') if organization else ('runnerId',)):
+        require(str(uuid.UUID(settings[key])) == settings[key], 'Use canonical UUIDs')
+    token = Path(settings['registrationTokenFile'] if organization else settings['platformCredentialFile'])
+    require(token.is_absolute(), 'Credential/token file must be absolute')
+    hosts = settings['artifactHosts']
+    require(isinstance(hosts, list) and 0 < len(hosts) <= 32 and len(set(hosts)) == len(hosts), 'Provide unique artifact DNS hosts')
+    for name in hosts:
+        host(name)
+    for key in ('probe', 'preparedRuntime'):
+        artifact = settings[key]
+        exact(artifact, 'uri sha256 sizeBytes' + (' maximumExpandedBytes' if key == 'preparedRuntime' else ''))
+        require(https(artifact['uri']).hostname in hosts, 'Artifact host is absent from artifactHosts')
+        require(isinstance(artifact['sha256'], str) and re.fullmatch('[0-9a-f]{64}', artifact['sha256']), 'Invalid artifact SHA256')
+        number(artifact['sizeBytes'], 1024**3)
+    require(settings['probe']['sha256'] == PROBE and settings['probe']['sizeBytes'] == 478853, 'Probe must match the accepted catalog')
+    number(settings['preparedRuntime']['maximumExpandedBytes'], 1024**3)
+    exact(settings['resources'], 'cpuMillis memoryBytes diskBytes processCount')
+    for key, limit in {'cpuMillis': 1024000, 'memoryBytes': 1024**4, 'diskBytes': 16*1024**4, 'processCount': 2**20}.items():
+        number(settings['resources'][key], limit)
+    return settings
+
+
+def archive_check(path):
+    # Inspect every name before extracting even this checksum-pinned operator image.
+    with tarfile.open(path) as archive:
+        entries = archive.getmembers()
+        require(len(entries) < 100000 and sum(m.size for m in entries) < 4*1024**3, 'Rootfs archive exceeds bounds')
+        links = set()
+        names = {}
+        for m in entries:
+            p = PurePosixPath(m.name)
+            require(not p.is_absolute() and '..' not in p.parts, 'Rootfs archive path traversal')
+            require(m.isdir() or m.isfile() or m.issym() or m.islnk(), 'Rootfs archive has a special device')
+            require(str(p) not in names, 'Duplicate rootfs member')
+            names[str(p)] = m
+            if m.issym():
+                links.add(p)
+        for m in entries:
+            require(not any(p in links for p in PurePosixPath(m.name).parents), 'Rootfs archive writes through a symlink')
+            if m.islnk():
+                target = PurePosixPath(m.linkname)
+                require(not target.is_absolute() and '..' not in target.parts
+                        and str(target) in names and names[str(target)].isfile(), 'Unsafe rootfs hardlink')
+
+
+def write(path, text, mode=0o600, owner=None):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, 'w') as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    if owner:
+        os.chown(path, owner.pw_uid, owner.pw_gid)
+
+
+def as_user(account, *args, capture=False):
+    return run('runuser', '-u', USER, '--', 'env', '-i',
+               'PATH=/usr/bin:/bin', f'HOME={STATE}/home',
+               f'XDG_RUNTIME_DIR=/run/user/{account.pw_uid}',
+               f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{account.pw_uid}/bus',
+               *args, capture=capture)
+
+
+def verify_bundle(bundle):
+    protected(bundle/'SHA256SUMS')
+    records = {}
+    for line in (bundle/'SHA256SUMS').read_text().splitlines():
+        match = re.fullmatch(r'([a-f0-9]{64})  ([A-Za-z0-9_.-]+)', line)
+        require(match and match[2] not in records, 'Invalid bundle checksum manifest')
+        records[match[2]] = match[1]
+    require(set(records) == FILES, 'Bundle inventory mismatch')
+    for name, expected in records.items():
+        protected(bundle/name)
+        require(digest(bundle/name) == expected, 'Bundle checksum mismatch: '+name)
+    require(records['runsc'] == RUNSC, 'gVisor is not the accepted pinned build')
+    require(re.fullmatch('[0-9a-f]{40}\n', (bundle/'SOURCE_COMMIT').read_text()), 'Invalid source commit')
+    with (bundle/'runner').open('rb') as executable:
+        header = executable.read(20)
+    require(header[:5] == b'\x7fELF\x02' and header[5] == 1 and header[18:20] == b'\x3e\x00', 'Runner must be an amd64 ELF binary')
+    archive_check(bundle/'rootfs.tar')
+
+
+def environment(settings, account):
+    env = {
+        'PROVENANCE_RUNSC_PATH': str(ROOT/'runsc-rootless'),
+        'PROVENANCE_ROOTFS': str(ROOT/'rootfs'),
+        'PROVENANCE_ROOTFS_IDENTITY': 'sha256:'+TREE,
+        'PROVENANCE_GVISOR_CGROUP_DRIVER': 'systemd-user',
+        'PROVENANCE_SYSTEMD_CGROUP_ROOT': f'/sys/fs/cgroup/user.slice/user-{account.pw_uid}.slice/user@{account.pw_uid}.service/app.slice',
+        'PROVENANCE_ARTIFACT_HOSTS': ','.join(settings['artifactHosts']),
+    }
+    for key, name in {'WORKSPACE_ROOT': 'workspaces', 'CACHE_ROOT': 'cache', 'GVISOR_STATE_ROOT': 'gvisor-state', 'GVISOR_BUNDLE_ROOT': 'bundles'}.items():
+        env['PROVENANCE_'+key] = str(STATE/name)
+    for key, prefix in [('probe', 'PROVENANCE_PAPER_PROBE'), ('preparedRuntime', 'PROVENANCE_PAPER_PREPARED_RUNTIME')]:
+        for field, suffix in [('uri', 'URI'), ('sha256', 'SHA256'), ('sizeBytes', 'SIZE_BYTES')]:
+            env[prefix+'_'+suffix] = str(settings[key][field])
+    env['PROVENANCE_PAPER_PREPARED_RUNTIME_MAX_EXPANDED_BYTES'] = str(settings['preparedRuntime']['maximumExpandedBytes'])
+    # Values were strictly validated; quote for systemd, never source as shell.
+    return ''.join(k+'='+json.dumps(v)+'\n' for k, v in sorted(env.items()))
+
+
+def install(bundle, settings_path, prepare_only):
+    protected(settings_path, private=True)
+    settings = validate(read_json(settings_path))
+    verify_bundle(bundle)
+    protected(Path(settings['registrationTokenFile']), private=True)
+    token = Path(settings['registrationTokenFile'] if organization else settings['platformCredentialFile']).read_bytes()
+    require(0 < len(token) <= 4096, 'Registration token size is invalid')
+    token.decode('utf-8')
+    require(platform.machine() == 'x86_64' and Path('/run/systemd/system').is_dir(), 'Requires amd64 VPS booted with systemd')
+    os_release = Path('/etc/os-release').read_text()
+    require('ID=ubuntu\n' in os_release and 'VERSION_ID="24.04"' in os_release, 'Supported host: Ubuntu 24.04 LTS')
+    require(Path('/sys/fs/cgroup/cgroup.controllers').is_file(), 'cgroup v2 is required')
+    for path in (ROOT, STATE, SYSTEM_UNIT, USER_UNIT, PROFILE):
+        for parent in path.parents:
+            require(parent.resolve() == parent and parent.is_dir() and parent.stat().st_uid == 0
+                    and not parent.stat().st_mode & 0o022, 'Installation parent must be protected: '+str(parent))
+        require(not path.exists() and not path.is_symlink(), 'Existing installation or foreign path; refusing overwrite: '+str(path))
+    try:
+        pwd.getpwnam(USER)
+    except KeyError:
+        pass
+    else:
+        raise ValueError('Service account already exists; fresh install only')
+    require(settings['resources']['cpuMillis'] <= (os.cpu_count() or 1)*1000, 'Advertised CPU exceeds host capacity')
+    memory = int(re.search(r'MemTotal:\s+(\d+)', Path('/proc/meminfo').read_text())[1])*1024
+    require(settings['resources']['memoryBytes'] <= memory, 'Advertised memory exceeds host capacity')
+    require(settings['resources']['diskBytes'] + 4*1024**3 <= shutil.disk_usage('/var/lib').free, 'Insufficient disk for advertised capacity and runtime')
+    print('Installing host packages and isolated service account...', flush=True)
+    run('apt-get', 'update')
+    run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl', 'apparmor', 'apparmor-utils', 'dbus-user-session', 'systemd-container', 'uidmap')
+    require(Path('/sys/module/apparmor/parameters/enabled').read_text().strip() == 'Y', 'AppArmor must be enabled; no global sysctl changes are made')
+    print('Checking published Paper assets against their hashes...', flush=True)
+    with tempfile.TemporaryDirectory(prefix='provenance-assets-', dir='/root') as temporary:
+        for name in ('probe', 'preparedRuntime'):
+            artifact = settings[name]
+            target = Path(temporary)/name
+            run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
+                '--proto-redir', '=https', '--max-time', '300', '--max-filesize', str(artifact['sizeBytes']),
+                '--output', str(target), artifact['uri'])
+            require(target.stat().st_size == artifact['sizeBytes'] and digest(target) == artifact['sha256'],
+                    'Published artifact bytes do not match pin: '+name)
+    ROOT.mkdir(mode=0o755)
+    STATE.mkdir(mode=0o711)
+    write(ROOT/'INSTALLING', 'Incomplete installation: retain and inspect; do not automatically overwrite.\n')
+    run('useradd', '--system', '--user-group', '--home-dir', str(STATE/'home'), '--shell', '/usr/sbin/nologin', USER)
+    account = pwd.getpwnam(USER)
+    for name in ('home', 'config', 'workspaces', 'cache', 'gvisor-state', 'bundles'):
+        p = STATE/name
+        p.mkdir(mode=0o700)
+        os.chown(p, account.pw_uid, account.pw_gid)
+    for name in ('runner', 'runsc', 'prepare-gvisor-rootfs.sh'):
+        shutil.copyfile(bundle/name, ROOT/name)
+        os.chmod(ROOT/name, 0o755)
+    write(ROOT/'settings.json', json.dumps(settings)+'\n')
+    write(ROOT/'runner.env', environment(settings, account), 0o644)
+    write(ROOT/'runsc-rootless', '#!/bin/sh\nexec /opt/provenance-runner/runsc --rootless=true --gofer-network-namespace=new "$@"\n', 0o755)
+    write(PROFILE, 'abi <abi/4.0>,\ninclude <tunables/global>\n/opt/provenance-runner/runsc flags=(default_allow) {\n  userns,\n}\n', 0o644)
+    run('apparmor_parser', '-r', str(PROFILE))
+    rootfs = ROOT/'rootfs'
+    rootfs.mkdir(mode=0o700)
+    run('tar', '--extract', '--file', str(bundle/'rootfs.tar'), '--directory', str(rootfs), '--no-same-owner')
+    # Guest mount targets must belong to the runtime UID. The backing tree is
+    # hidden by a read-only mount; its parent and service executable stay root-owned.
+    run('chown', '-hR', f'{account.pw_uid}:{account.pw_gid}', str(rootfs))
+    actual = run(str(ROOT/'prepare-gvisor-rootfs.sh'), 'prepare', str(rootfs), capture=True)
+    require(actual == TREE, 'Prepared rootfs tree differs from the accepted pin; activation refused')
+    write(ROOT/'verify-rootfs', '#!/bin/sh\nset -eu\nactual=$(/opt/provenance-runner/prepare-gvisor-rootfs.sh prepare /opt/provenance-runner/rootfs)\n[ "$actual" = "'+TREE+'" ]\n', 0o755)
+    connect = {'schemaVersion': 'provenance.runner-connect/v1alpha1', 'gatewayAddress': settings['gatewayAddress'],
+               'runnerId': settings['runnerId'], 'instanceId': 'vps-'+str(uuid.uuid4()),
+               'credentialFile': 'credential', 'identityKeyFile': 'identity.json',
+               'expectedScope': ({'kind': 'organization', 'organizationId': settings['organizationId']} if organization else {'kind': 'platform'}),
+               'resources': settings['resources']}
+    if not organization:
+        del connect['identityKeyFile']
+    write(STATE/'config/connect.json', json.dumps(connect)+'\n', owner=account)
+    write(STATE/('config/registration-token' if organization else 'config/credential'), token.decode(), owner=account)
+    enrollment = {'schemaVersion': 'provenance.runner-enrollment/v1alpha1', 'apiBaseUrl': settings['apiOrigin'],
+                  'connectConfigFile': 'connect.json', 'registrationTokenFile': 'registration-token', 'credentialTtlSeconds': 3600}
+    if organization:
+        write(STATE/'config/enrollment.json', json.dumps(enrollment)+'\n', owner=account)
+    write(USER_UNIT, '''[Unit]
+Description=Provenance sandboxed runner
+[Service]
+Type=simple
+ExecStart=/opt/provenance-runner/runner connect /var/lib/provenance-runner/config/connect.json
+EnvironmentFile=/opt/provenance-runner/runner.env
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+KillMode=control-group
+NoNewPrivileges=yes
+UMask=0077
+Slice=app.slice
+''', 0o644)
+    # Only the system unit is enabled. It verifies/mounts the tree before starting
+    # the user unit on every boot, even though the lingering manager starts early.
+    write(SYSTEM_UNIT, f'''[Unit]
+Description=Provenance runner lifecycle
+Wants=network-online.target
+Requires=user@{account.pw_uid}.service
+After=network-online.target user@{account.pw_uid}.service apparmor.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/opt/provenance-runner/verify-rootfs
+ExecStart=/usr/sbin/runuser -u {USER} -- /usr/bin/env XDG_RUNTIME_DIR=/run/user/{account.pw_uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{account.pw_uid}/bus /usr/bin/systemctl --user start {UNIT}
+ExecStop=/usr/sbin/runuser -u {USER} -- /usr/bin/env XDG_RUNTIME_DIR=/run/user/{account.pw_uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{account.pw_uid}/bus /usr/bin/systemctl --user stop {UNIT}
+TimeoutStartSec=120
+TimeoutStopSec=150
+[Install]
+WantedBy=multi-user.target
+''', 0o644)
+    run('loginctl', 'enable-linger', USER)
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'start', f'user@{account.pw_uid}.service')
+    as_user(account, 'systemctl', '--user', 'daemon-reload')
+    write(ROOT/'installed.json', json.dumps({'sourceCommit': (bundle/'SOURCE_COMMIT').read_text().strip(),
+          'runnerSha256': digest(ROOT/'runner'), 'runscSha256': RUNSC, 'rootfsTreeSha256': TREE})+'\n')
+    (ROOT/'INSTALLING').unlink()
+    print('Installed. Rootfs verified; runner is inactive.', flush=True)
+    if not prepare_only:
+        activate()
+
+
+def activate():
+    protected(ROOT/'installed.json')
+    require(not (ROOT/'INSTALLING').exists(), 'Incomplete installation requires inspection')
+    protected(ROOT/'settings.json', private=True)
+    settings = validate(read_json(ROOT/'settings.json'))
+    installed = read_json(ROOT/'installed.json')
+    for name, key in [('runner', 'runnerSha256'), ('runsc', 'runscSha256')]:
+        protected(ROOT/name)
+        require(digest(ROOT/name) == installed[key], 'Installed executable drift; refusing activation')
+    account = pwd.getpwnam(USER)
+    # Certificate and HTTP/2 checks precede one-time registration redemption.
+    address, port = settings['gatewayAddress'].split(':')
+    context = ssl.create_default_context()
+    context.set_alpn_protocols(['h2'])
+    with socket.create_connection((address, int(port)), timeout=15) as sock:
+        with context.wrap_socket(sock, server_hostname=address) as tls:
+            require(tls.selected_alpn_protocol() == 'h2', 'Gateway must negotiate trusted TLS with HTTP/2')
+    print('Gateway TLS verified. Enrolling runner...', flush=True)
+    if not (STATE/'config/credential').exists():
+        as_user(account, str(ROOT/'runner'), 'enroll', str(STATE/'config/enrollment.json'))
+    run('systemctl', 'enable', '--now', UNIT)
+    time.sleep(3)
+    status = as_user(account, 'systemctl', '--user', 'show', UNIT, '-p', 'ActiveState', '-p', 'SubState', '-p', 'NRestarts', capture=True)
+    require('ActiveState=active' in status and 'SubState=running' in status and 'NRestarts=0' in status, 'Runner did not remain running; inspect the private journal')
+    print('Runner service is running and enabled for boot. Confirm online status in the console; this is not a completed Paper job test.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='action', required=True)
+    p = sub.add_parser('install')
+    p.add_argument('settings', type=Path)
+    p.add_argument('--prepare-only', action='store_true', help='Install without enrollment/start; run activate later')
+    sub.add_parser('activate', help='Retry activation of a completed installation; preserves identity/journal')
+    args = parser.parse_args()
+    require(os.geteuid() == 0, 'Run as root')
+    if args.action == 'install':
+        install(Path(__file__).resolve().parent, args.settings.absolute(), args.prepare_only)
+    else:
+        activate()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        print('Installation stopped: '+str(error), file=sys.stderr)
+        sys.exit(1)
