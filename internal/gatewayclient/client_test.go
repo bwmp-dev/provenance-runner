@@ -672,3 +672,82 @@ func fileMode(t *testing.T, path string) os.FileMode {
 	}
 	return info.Mode()
 }
+
+func TestHostedRenewalDoesNotApplyToSelfHostedOrExpiringKeys(t *testing.T) {
+	for _, tc := range []struct {
+		credential      string
+		remaining, want time.Duration
+		renew           bool
+	}{
+		{"phc_v1_test", time.Hour, 59 * time.Minute, true},
+		{"prc_v1_test", time.Hour, time.Hour, false},
+		{"phc_v1_test", 90 * time.Second, 90 * time.Second, false},
+	} {
+		delay, renew := sessionExpiration([]byte(tc.credential), tc.remaining)
+		if delay != tc.want || renew != tc.renew {
+			t.Fatalf("expiration %v %v", delay, renew)
+		}
+	}
+	if !transient(errHostedSessionRenewal) {
+		t.Fatal("hosted renewal must retain the worker and retry")
+	}
+}
+
+type renewalConnector struct {
+	base         *scriptedConnector
+	beforeSecond func()
+}
+
+func (r renewalConnector) connect(ctx context.Context) (gatewayStream, error) {
+	if r.base.calls.Load() == 1 {
+		r.beforeSecond()
+	}
+	return r.base.connect(ctx)
+}
+func TestHostedRenewalReconnectsWithoutStoppingWorker(t *testing.T) {
+	for _, hosted := range []bool{true, false} {
+		t.Run(fmt.Sprint(hosted), func(t *testing.T) {
+			now := time.Now().UTC()
+			auth := authenticatedMessage(now, platformScope())
+			auth.GetAuthenticated().CredentialExpiresAt = timestamppb.New(now.Add(time.Hour))
+			first := newScriptedStream(context.Background(), auth)
+			connector := &scriptedConnector{results: []connectResult{{stream: first}, {stream: scriptedSession(now)}}}
+			config := validConfig()
+			config.credential = []byte("prc_v1_test")
+			if hosted {
+				config.credential = []byte("phc_v1_test")
+			}
+			var cancellations atomic.Int32
+			client := newClient(config, renewalConnector{base: connector, beforeSecond: func() {
+				if cancellations.Load() != 0 {
+					t.Error("worker stopped during renewal")
+				}
+			}})
+			client.now = func() time.Time { return now }
+			client.workerRunning = true
+			client.workerCancel = func() { cancellations.Add(1) }
+			client.newExpirationTimer = func(delay time.Duration) *time.Timer {
+				want := time.Hour
+				if hosted {
+					want = 59 * time.Minute
+				}
+				if delay != want {
+					t.Errorf("expiration delay %v", delay)
+				}
+				return time.NewTimer(10 * time.Millisecond)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := client.Run(ctx)
+			if hosted {
+				if !errors.Is(err, ErrServerShutdown) || connector.calls.Load() != 2 {
+					t.Fatalf("renewal: %v connections=%d", err, connector.calls.Load())
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "expired") || connector.calls.Load() != 1 {
+					t.Fatalf("self-hosted expiry: %v connections=%d", err, connector.calls.Load())
+				}
+			}
+		})
+	}
+}
