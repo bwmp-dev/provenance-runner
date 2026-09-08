@@ -179,5 +179,28 @@ class ReleaseCredentialScope(unittest.TestCase):
                 self.assertEqual(client.opener.request.get_header('Authorization'), 'Bearer '+client.token if url==expected else None)
 
 
+class MalformedCommands(unittest.TestCase):
+    def test_actionable_command_requires_operation_identity(self):
+        from unittest.mock import MagicMock
+        client = object.__new__(u.Client)
+        client.config = {'apiOrigin': 'https://api.example', 'runnerId': '10000000-0000-0000-0000-000000000001'}
+        client.token = 'synthetic'
+        client.opener = MagicMock()
+        for phase in ['install', 'verify', 'complete']:
+            client.opener.open.return_value.__enter__.return_value.read.return_value = json.dumps({'operationId':'', 'phase':phase, 'release':None, 'previousVersion':'', 'healthy':False, 'outcome':''}).encode()
+            with self.subTest(phase=phase), self.assertRaises(ValueError):
+                client.poll()
+
+    def test_malformed_release_reports_failure_before_any_service_change(self):
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as temp, patch.object(u, 'WORK', Path(temp)), patch.object(u, 'service') as service:
+            client = MagicMock()
+            client.poll.return_value = {'phase':'install','operationId':'10000000-0000-0000-0000-000000000001','release':None}
+            updater = u.Updater({'releasePublicKey':'unused'}, client)
+            updater.step()
+            client.poll.assert_called_with('10000000-0000-0000-0000-000000000001', 'failed')
+            service.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

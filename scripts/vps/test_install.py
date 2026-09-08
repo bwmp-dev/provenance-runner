@@ -139,5 +139,31 @@ class SignedInstallationURLs(unittest.TestCase):
         with self.assertRaises(ValueError): i.https(url, origin=True)
 
 
+class BootstrapPermissions(unittest.TestCase):
+    def test_explicit_service_modes_survive_private_bootstrap_umask(self):
+        import os
+        import stat
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            previous = os.umask(0o077)
+            try:
+                for name, mode in [('root', 0o755), ('state', 0o711)]:
+                    i.directory(root/name, mode)
+                    self.assertEqual(stat.S_IMODE((root/name).stat().st_mode), mode)
+                for name, mode in [('runner.env', 0o640), ('runsc-rootless', 0o755), ('user.service', 0o644), ('credential', 0o600)]:
+                    i.write(root/name, 'test', mode)
+                    self.assertEqual(stat.S_IMODE((root/name).stat().st_mode), mode)
+            finally:
+                os.umask(previous)
+
+    def test_asset_bound_matches_default_runner_cache_entry_limit(self):
+        value = settings()
+        value['preparedRuntime'].update(sizeBytes=512*1024**2, maximumExpandedBytes=1024**3)
+        i.validate(value)
+        value['preparedRuntime']['sizeBytes'] += 1
+        with self.assertRaises(ValueError):
+            i.validate(value)
+
+
 if __name__ == '__main__':
     unittest.main()

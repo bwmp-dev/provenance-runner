@@ -132,6 +132,7 @@ class Client:
         result = decode(data)
         check(set(result) == {'operationId', 'phase', 'release', 'previousVersion', 'healthy', 'outcome'}, 'Invalid update command')
         check(result['phase'] in ('wait', 'install', 'verify', 'complete'), 'Invalid update phase')
+        check(result['phase'] == 'wait' or bool(result['operationId']), 'Missing operation identity')
         if result['operationId']:
             check(str(uuid.UUID(result['operationId'])) == result['operationId'], 'Invalid operation identity')
         if operation:
@@ -295,7 +296,7 @@ class Updater:
                     self.client.download(release, downloaded)
                     atomic(target, downloaded.read_bytes(), 0o755)
             check(sha(target) == release['sha256'], 'Staged binary drift')
-        except ValueError:
+        except (ValueError, TypeError, KeyError):
             self.client.poll(command['operationId'], 'failed')
             return  # No binary was replaced; backend retains drain for inspection.
         op = {'id': command['operationId'], 'release': release, 'oldSha256': old_hash, 'phase': 'staged'}

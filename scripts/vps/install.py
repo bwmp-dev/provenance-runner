@@ -129,7 +129,7 @@ def validate(settings):
         exact(artifact, 'uri sha256 sizeBytes' + (' maximumExpandedBytes' if key == 'preparedRuntime' else ''))
         require(https(artifact['uri']).hostname in hosts, 'Artifact host is absent from artifactHosts')
         require(isinstance(artifact['sha256'], str) and re.fullmatch('[0-9a-f]{64}', artifact['sha256']), 'Invalid artifact SHA256')
-        number(artifact['sizeBytes'], 1024**3)
+        number(artifact['sizeBytes'], 512*1024**2)
     require(settings['probe']['sha256'] == PROBE and settings['probe']['sizeBytes'] == 478853, 'Probe must match the accepted catalog')
     number(settings['preparedRuntime']['maximumExpandedBytes'], 1024**3)
     exact(settings['resources'], 'cpuMillis memoryBytes diskBytes processCount')
@@ -161,9 +161,15 @@ def archive_check(path):
                         and str(target) in names and names[str(target)].isfile(), 'Unsafe rootfs hardlink')
 
 
+def directory(path, mode):
+    path.mkdir(mode=mode)
+    path.chmod(mode)
+
+
 def write(path, text, mode=0o600, owner=None):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     with os.fdopen(fd, 'w') as f:
+        os.fchmod(f.fileno(), mode)
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
@@ -267,8 +273,8 @@ def install(bundle, settings_path, prepare_only):
             '--output', str(target), artifact['uri'])
         require(target.stat().st_size == artifact['sizeBytes'] and digest(target) == artifact['sha256'],
                 'Published artifact bytes do not match pin: '+name)
-    ROOT.mkdir(mode=0o755)
-    STATE.mkdir(mode=0o711)
+    directory(ROOT, 0o755)
+    directory(STATE, 0o711)
     write(ROOT/'INSTALLING', 'Incomplete installation: retain and inspect; do not automatically overwrite.\n')
     run('useradd', '--system', '--user-group', '--home-dir', str(STATE/'home'), '--shell', '/usr/sbin/nologin', USER)
     account = pwd.getpwnam(USER)
@@ -434,6 +440,7 @@ WantedBy=multi-user.target
 
 
 def main():
+    os.umask(0o022)  # Bootstrap starts private; service files need their explicit shared modes.
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('install')
