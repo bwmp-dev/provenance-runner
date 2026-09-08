@@ -118,7 +118,7 @@ failure, and update/rollback during gateway outages, before production activatio
 ## Private release downloads
 
 New console registrations configure the updater automatically. The platform can
-serve private binaries at `/v1/runner-updater/releases/{sha256}` from object storage
+serve private binaries at `/v1/runner-releases/{sha256}` from object storage
 key `platform/hosted-runner-releases/{sha256}/runner`. Publish the content-addressed
 object, then sign a manifest with that exact API URL and publish the manifest in
 the console. The download requires the node's updater credential and its currently

@@ -141,7 +141,7 @@ class Client:
     def download(self, release, destination):
         headers = {}
         origin = self.config['apiOrigin']
-        if release['url'] == origin+'/v1/runner-updater/releases/'+release['sha256']:
+        if release['url'] == origin+'/v1/runner-releases/'+release['sha256']:
             headers['Authorization'] = 'Bearer '+self.token
         request = urllib.request.Request(release['url'], headers=headers)
         count = 0

@@ -164,8 +164,8 @@ class ReleaseCredentialScope(unittest.TestCase):
     def test_credentials_only_on_exact_assigned_api_path(self):
         payload = b'\x7fELF\x02\x01' + b'\x00'*12 + b'\x3e\x00'
         sha = hashlib.sha256(payload).hexdigest()
-        expected = 'https://api.example/v1/runner-updater/releases/'+sha
-        for url in (expected, 'https://other.example/v1/runner-updater/releases/'+sha, expected+'?x=1'):
+        expected = 'https://api.example/v1/runner-releases/'+sha
+        for url in (expected, 'https://other.example/v1/runner-releases/'+sha, expected+'?x=1'):
             with self.subTest(url=url), tempfile.TemporaryDirectory() as tmp:
                 client = object.__new__(u.Client)
                 client.config = {'apiOrigin':'https://api.example'}
