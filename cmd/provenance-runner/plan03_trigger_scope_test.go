@@ -139,10 +139,10 @@ func assertSelfHostedJobPolicy(t *testing.T, repositoryRoot string) {
 	t.Helper()
 	ci := readPlan03ContractFile(t, filepath.Join(repositoryRoot, ".github", "workflows", "ci.yml"))
 	ciJobs := workflowJobBlocks(t, ci)
-	if len(ciJobs) != 3 {
+	if len(ciJobs) != 4 {
 		t.Fatalf("normal CI job set = %v", sortedKeys(ciJobs))
 	}
-	for _, name := range []string{"test", "gvisor-smoke", "systemd-user-smoke"} {
+	for _, name := range []string{"test", "runtime-baseline", "gvisor-smoke", "systemd-user-smoke"} {
 		job, ok := ciJobs[name]
 		if !ok {
 			t.Fatalf("normal CI lacks %q job", name)
