@@ -19,7 +19,7 @@ import tarfile
 import time
 import tempfile
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qsl
 
 ROOT = Path('/opt/provenance-runner')
 STATE = Path('/var/lib/provenance-runner')
@@ -95,8 +95,17 @@ def https(value, origin=False):
     require(isinstance(value, str) and not any(c.isspace() for c in value), 'Invalid HTTPS URL')
     parsed = urlsplit(value)
     require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
-            and not parsed.password and not parsed.query and not parsed.fragment
-            and not any(c in value for c in '\"\\\'`$'), 'Use HTTPS without credentials, query or fragment')
+            and not parsed.password and not parsed.fragment
+            and not any(c in value for c in '\"\\\'`$'), 'Use HTTPS without credentials or fragment')
+    if parsed.query:
+        pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        query = dict(pairs)
+        allowed = {'X-Amz-Algorithm', 'X-Amz-Credential', 'X-Amz-Date', 'X-Amz-Expires', 'X-Amz-SignedHeaders', 'X-Amz-Signature', 'X-Amz-Security-Token', 'x-id', 'X-Amz-Checksum-Mode'}
+        required = {'X-Amz-Algorithm', 'X-Amz-Credential', 'X-Amz-Date', 'X-Amz-Expires', 'X-Amz-SignedHeaders', 'X-Amz-Signature'}
+        require(not origin and len(parsed.query) <= 8192 and len(pairs) == len(query)
+                and required <= set(query) <= allowed and query['X-Amz-Algorithm'] == 'AWS4-HMAC-SHA256'
+                and query['X-Amz-Expires'].isdigit() and 0 < int(query['X-Amz-Expires']) <= 86400,
+                'Only bounded S3 signed asset downloads may include a query')
     host(parsed.hostname)
     require(parsed.port in (None, 443), 'HTTPS endpoints must use port 443')
     if origin:
@@ -240,15 +249,16 @@ def install(bundle, settings_path, prepare_only):
     run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl', 'apparmor', 'apparmor-utils', 'dbus-user-session', 'systemd-container', 'uidmap')
     require(Path('/sys/module/apparmor/parameters/enabled').read_text().strip() == 'Y', 'AppArmor must be enabled; no global sysctl changes are made')
     print('Checking published Paper assets against their hashes...', flush=True)
-    with tempfile.TemporaryDirectory(prefix='provenance-assets-', dir='/root') as temporary:
-        for name in ('probe', 'preparedRuntime'):
-            artifact = settings[name]
-            target = Path(temporary)/name
-            run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
-                '--proto-redir', '=https', '--max-time', '300', '--max-filesize', str(artifact['sizeBytes']),
-                '--output', str(target), artifact['uri'])
-            require(target.stat().st_size == artifact['sizeBytes'] and digest(target) == artifact['sha256'],
-                    'Published artifact bytes do not match pin: '+name)
+    assets = tempfile.TemporaryDirectory(prefix='provenance-assets-', dir='/root')
+    temporary = assets.name
+    for name in ('probe', 'preparedRuntime'):
+        artifact = settings[name]
+        target = Path(temporary)/name
+        run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
+            '--proto-redir', '=https', '--max-time', '300', '--max-filesize', str(artifact['sizeBytes']),
+            '--output', str(target), artifact['uri'])
+        require(target.stat().st_size == artifact['sizeBytes'] and digest(target) == artifact['sha256'],
+                'Published artifact bytes do not match pin: '+name)
     ROOT.mkdir(mode=0o755)
     STATE.mkdir(mode=0o711)
     write(ROOT/'INSTALLING', 'Incomplete installation: retain and inspect; do not automatically overwrite.\n')
@@ -258,11 +268,26 @@ def install(bundle, settings_path, prepare_only):
         p = STATE/name
         p.mkdir(mode=0o700)
         os.chown(p, account.pw_uid, account.pw_gid)
+    # Keep verified pins in the content cache: installation URLs expire after 24h.
+    # The cache rechecks hashes on reads and does not evict entries automatically.
+    for name in ('probe', 'preparedRuntime'):
+        sha = settings[name]['sha256']
+        parent = STATE/'cache'/'content'/'sha256'/sha[:2]
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for directory in (STATE/'cache'/'content', STATE/'cache'/'content'/'sha256', parent):
+            os.chown(directory, account.pw_uid, account.pw_gid)
+            directory.chmod(0o700)
+        target = parent/sha[2:]
+        shutil.copyfile(Path(temporary)/name, target)
+        os.chown(target, account.pw_uid, account.pw_gid)
+        target.chmod(0o444)
+    assets.cleanup()
     for name in ('runner', 'runsc', 'prepare-gvisor-rootfs.sh'):
         shutil.copyfile(bundle/name, ROOT/name)
         os.chmod(ROOT/name, 0o755)
     write(ROOT/'settings.json', json.dumps(settings)+'\n')
-    write(ROOT/'runner.env', environment(settings, account), 0o644)
+    write(ROOT/'runner.env', environment(settings, account), 0o640)
+    os.chown(ROOT/'runner.env', 0, account.pw_gid)
     write(ROOT/'runsc-rootless', '#!/bin/sh\nexec /opt/provenance-runner/runsc --rootless=true --gofer-network-namespace=new "$@"\n', 0o755)
     write(PROFILE, 'abi <abi/4.0>,\ninclude <tunables/global>\n/opt/provenance-runner/runsc flags=(default_allow) {\n  userns,\n}\n', 0o644)
     run('apparmor_parser', '-r', str(PROFILE))

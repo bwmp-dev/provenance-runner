@@ -672,3 +672,23 @@ func fileMode(t *testing.T, path string) os.FileMode {
 	}
 	return info.Mode()
 }
+
+func TestHostedRenewalDoesNotApplyToSelfHostedOrExpiringKeys(t *testing.T) {
+	for _, tc := range []struct {
+		credential      string
+		remaining, want time.Duration
+		renew           bool
+	}{
+		{"phc_v1_test", time.Hour, 59 * time.Minute, true},
+		{"prc_v1_test", time.Hour, time.Hour, false},
+		{"phc_v1_test", 90 * time.Second, 90 * time.Second, false},
+	} {
+		delay, renew := sessionExpiration([]byte(tc.credential), tc.remaining)
+		if delay != tc.want || renew != tc.renew {
+			t.Fatalf("expiration %v %v", delay, renew)
+		}
+	}
+	if !transient(errHostedSessionRenewal) {
+		t.Fatal("hosted renewal must retain the worker and retry")
+	}
+}

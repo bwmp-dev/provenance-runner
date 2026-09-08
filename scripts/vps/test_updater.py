@@ -159,3 +159,22 @@ class Recovery(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class ReleaseCredentialScope(unittest.TestCase):
+    def test_credentials_only_on_exact_assigned_api_path(self):
+        payload = b'\x7fELF\x02\x01' + b'\x00'*12 + b'\x3e\x00'
+        sha = hashlib.sha256(payload).hexdigest()
+        expected = 'https://api.example/v1/runner-updater/releases/'+sha
+        for url in (expected, 'https://other.example/v1/runner-updater/releases/'+sha, expected+'?x=1'):
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as tmp:
+                client = object.__new__(u.Client)
+                client.config = {'apiOrigin':'https://api.example'}
+                client.token = 'pru_'+'a'*64
+                class Opener:
+                    def open(self, request, timeout):
+                        self.request = request
+                        import io
+                        return io.BytesIO(payload)
+                client.opener = Opener()
+                client.download({'url':url,'sha256':sha,'sizeBytes':len(payload)},Path(tmp)/'runner')
+                self.assertEqual(client.opener.request.get_header('Authorization'), 'Bearer '+client.token if url==expected else None)

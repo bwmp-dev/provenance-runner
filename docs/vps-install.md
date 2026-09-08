@@ -16,6 +16,37 @@ journals. A dedicated locked `provenance-worker` account runs jobs, distinct fro
 your SSH account. The VPS does not need Go, Docker, GitHub credentials or access
 to platform data services.
 
+## Install from the console
+
+In **Administration → Hosted runners**, register a node and download its private
+`hosted-runner.json` plus `install-hosted-runner.py`. Copy both files to the VPS:
+
+```sh
+chmod 600 hosted-runner.json
+sudo python3 install-hosted-runner.py hosted-runner.json
+```
+
+The bootstrap downloads the operator-pinned bundle, verifies its size and SHA256,
+rejects unsafe archive entries, and installs the sandboxed worker plus privileged
+binary updater. Only node-specific credentials reach the VPS. Installation asset
+links expire after 24 hours; installed assets stay in the verified persistent
+content cache. Do not remove this cache without preparing replacement asset URLs.
+Delete the downloaded manifest after confirming the node is online. The console
+cannot recover its secrets after you leave the page. Revoke an unused registration
+and create a replacement if its manifest is lost or expired.
+
+Only fresh installations are accepted. Failures retain a private directory under
+`/root/provenance-hosted-*` for diagnosis. If runner installation succeeded but
+updater setup failed, fix the reported prerequisite and rerun the staged bundle's
+`install.sh enable-updater /root/provenance-hosted-.../updater.json`. Never delete
+an active installation's state to retry bootstrap.
+
+Use **Drain jobs** before maintenance, **Resume jobs** afterward, and **Revoke node**
+to disable a retired or compromised node. Revocation closes its gateway connection
+within 30 seconds (plus an in-flight verifier timeout). Hosted session renewal is
+automatic and preserves the running worker. Node credentials expire after one year;
+rotate them on a drained node before that date using the operator API.
+
 ## Build once, reuse the bundle
 
 On your trusted Linux build machine, with Go, Docker, curl and Python 3 installed:

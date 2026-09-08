@@ -214,7 +214,7 @@ func (c *Client) Run(ctx context.Context) error {
 		if !transient(err) {
 			return sanitizeStreamError(err)
 		}
-		if errors.Is(err, errCredentialRotationReconnect) {
+		if errors.Is(err, errCredentialRotationReconnect) || errors.Is(err, errHostedSessionRenewal) {
 			delay = initialReconnectDelay
 			continue
 		}
@@ -372,7 +372,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	maintenanceInterval := 100 * time.Millisecond
 	maintenance := time.NewTicker(maintenanceInterval)
 	defer maintenance.Stop()
-	expirationDelay := authenticated.CredentialExpiresAt.AsTime().Sub(now)
+	expirationDelay, hostedRenewal := sessionExpiration(c.config.credential, authenticated.CredentialExpiresAt.AsTime().Sub(now))
 	expiration := time.NewTimer(expirationDelay)
 	defer expiration.Stop()
 
@@ -381,6 +381,9 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		case <-ctx.Done():
 			return true, ctx.Err()
 		case <-expiration.C:
+			if hostedRenewal {
+				return true, errHostedSessionRenewal
+			}
 			return true, permanent("connection credential expired")
 		case tick := <-ticker.C:
 			if err := session.sendHeartbeat(tick.UTC()); err != nil {
@@ -666,11 +669,13 @@ func validateDuration(field string, value *durationpb.Duration, minimum, maximum
 	return nil
 }
 
+var errHostedSessionRenewal = errors.New("hosted session renewal")
+
 func transient(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, errCredentialRotationReconnect) {
+	if errors.Is(err, errCredentialRotationReconnect) || errors.Is(err, errHostedSessionRenewal) {
 		return true
 	}
 	var permanentFailure *permanentError
@@ -712,4 +717,14 @@ func waitContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// Only renewable platform credentials reconnect before the session deadline.
+// Near the actual key expiry, retain the deadline to avoid a reconnect loop.
+func sessionExpiration(credential []byte, remaining time.Duration) (time.Duration, bool) {
+	renewable := bytes.HasPrefix(credential, []byte("phc_v1_")) && remaining > 2*time.Minute
+	if renewable {
+		return remaining - time.Minute, true
+	}
+	return remaining, false
 }

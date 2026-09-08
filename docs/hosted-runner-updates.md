@@ -114,3 +114,16 @@ Rootfs/gVisor changes, credential rotation, full signing-key rotation, backup
 retention and automatic fleet rollout are separate work. New update deployments
 require disposable VPS acceptance, including reboot, an actual Paper job, process
 failure, and update/rollback during gateway outages, before production activation.
+
+## Private release downloads
+
+New console registrations configure the updater automatically. The platform can
+serve private binaries at `/v1/runner-updater/releases/{sha256}` from object storage
+key `platform/hosted-runner-releases/{sha256}/runner`. Publish the content-addressed
+object, then sign a manifest with that exact API URL and publish the manifest in
+the console. The download requires the node's updater credential and its currently
+assigned installation operation. Credentials are sent only to that exact path on
+the configured API origin, never to an arbitrary signed release URL or redirect.
+
+Keep the Ed25519 private key offline on the trusted release machine. The updater
+and backend independently verify manifests against the node's pinned public key.

@@ -128,3 +128,13 @@ class Failures(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class SignedInstallationURLs(unittest.TestCase):
+    def test_bounded_sigv4_assets_only(self):
+        url = ('https://assets.example.com/pin?X-Amz-Algorithm=AWS4-HMAC-SHA256'
+               '&X-Amz-Credential=key%2Fscope&X-Amz-Date=20260908T000000Z'
+               '&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=abc')
+        i.https(url)
+        for bad in (url+'&token=secret', url+'&X-Amz-Expires=1', url.replace('86400','86401')):
+            with self.assertRaises(ValueError): i.https(bad)
+        with self.assertRaises(ValueError): i.https(url, origin=True)
