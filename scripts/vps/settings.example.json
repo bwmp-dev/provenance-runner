@@ -1,10 +1,9 @@
 {
-  "apiOrigin": "https://api.provenance.bwmp.dev",
   "gatewayAddress": "REPLACE_WITH_GATEWAY_HOST:443",
   "runnerId": "REPLACE_WITH_REGISTERED_RUNNER_UUID",
-  "organizationId": "REPLACE_WITH_ORGANIZATION_UUID",
-  "registrationTokenFile": "/root/runner-registration-token",
-  "artifactHosts": ["REPLACE_WITH_ARTIFACT_HOST"],
+  "artifactHosts": [
+    "REPLACE_WITH_ARTIFACT_HOST"
+  ],
   "probe": {
     "uri": "https://REPLACE_WITH_ARTIFACT_HOST/paper-probe-0.1.0.jar",
     "sha256": "040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868",
@@ -16,5 +15,11 @@
     "sizeBytes": 0,
     "maximumExpandedBytes": 1073741824
   },
-  "resources": {"cpuMillis": 2000, "memoryBytes": 4294967296, "diskBytes": 21474836480, "processCount": 512}
+  "resources": {
+    "cpuMillis": 2000,
+    "memoryBytes": 4294967296,
+    "diskBytes": 21474836480,
+    "processCount": 512
+  },
+  "platformCredentialFile": "/root/platform-runner-credential"
 }

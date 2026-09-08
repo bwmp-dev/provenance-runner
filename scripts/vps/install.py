@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fresh Ubuntu 24.04 amd64 runner installation; never upgrades existing state."""
+"""Platform-hosted Ubuntu 24.04 amd64 runner installation; never upgrades existing state."""
 import argparse
 import hashlib
 import json
@@ -40,7 +40,7 @@ def require(ok, message):
 
 
 def run(*args, capture=False):
-    # Never echo arguments or enrollment stderr: they may contain private state.
+    # Never echo arguments or worker stderr: they may contain private state.
     result = subprocess.run(args, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                             stderr=subprocess.PIPE, text=True)
     require(result.returncode == 0, f'{Path(args[0]).name} failed (exit {result.returncode}); installation retained')
@@ -104,17 +104,12 @@ def https(value, origin=False):
 
 
 def validate(settings):
-    organization = 'organizationId' in settings
-    exact(settings, 'apiOrigin gatewayAddress runnerId artifactHosts probe preparedRuntime resources ' +
-          ('organizationId registrationTokenFile' if organization else 'platformCredentialFile'))
-    https(settings['apiOrigin'], origin=True)
+    exact(settings, 'gatewayAddress runnerId artifactHosts probe preparedRuntime resources platformCredentialFile')
     address = settings['gatewayAddress'].split(':')
     require(len(address) == 2 and address[1].isdigit() and 0 < int(address[1]) < 65536, 'gatewayAddress must be DNS:port')
     host(address[0])
-    for key in (('runnerId', 'organizationId') if organization else ('runnerId',)):
-        require(str(uuid.UUID(settings[key])) == settings[key], 'Use canonical UUIDs')
-    token = Path(settings['registrationTokenFile'] if organization else settings['platformCredentialFile'])
-    require(token.is_absolute(), 'Credential/token file must be absolute')
+    require(str(uuid.UUID(settings['runnerId'])) == settings['runnerId'], 'Use a canonical runner UUID')
+    require(Path(settings['platformCredentialFile']).is_absolute(), 'platformCredentialFile must be absolute')
     hosts = settings['artifactHosts']
     require(isinstance(hosts, list) and 0 < len(hosts) <= 32 and len(set(hosts)) == len(hosts), 'Provide unique artifact DNS hosts')
     for name in hosts:
@@ -216,10 +211,10 @@ def install(bundle, settings_path, prepare_only):
     protected(settings_path, private=True)
     settings = validate(read_json(settings_path))
     verify_bundle(bundle)
-    protected(Path(settings['registrationTokenFile']), private=True)
-    token = Path(settings['registrationTokenFile'] if organization else settings['platformCredentialFile']).read_bytes()
-    require(0 < len(token) <= 4096, 'Registration token size is invalid')
-    token.decode('utf-8')
+    credential_path = Path(settings['platformCredentialFile'])
+    protected(credential_path, private=True)
+    require(0 < credential_path.stat().st_size <= 4096, 'Runner credential size is invalid')
+    credential = credential_path.read_text(encoding='utf-8')
     require(platform.machine() == 'x86_64' and Path('/run/systemd/system').is_dir(), 'Requires amd64 VPS booted with systemd')
     os_release = Path('/etc/os-release').read_text()
     require('ID=ubuntu\n' in os_release and 'VERSION_ID="24.04"' in os_release, 'Supported host: Ubuntu 24.04 LTS')
@@ -281,17 +276,10 @@ def install(bundle, settings_path, prepare_only):
     write(ROOT/'verify-rootfs', '#!/bin/sh\nset -eu\nactual=$(/opt/provenance-runner/prepare-gvisor-rootfs.sh prepare /opt/provenance-runner/rootfs)\n[ "$actual" = "'+TREE+'" ]\n', 0o755)
     connect = {'schemaVersion': 'provenance.runner-connect/v1alpha1', 'gatewayAddress': settings['gatewayAddress'],
                'runnerId': settings['runnerId'], 'instanceId': 'vps-'+str(uuid.uuid4()),
-               'credentialFile': 'credential', 'identityKeyFile': 'identity.json',
-               'expectedScope': ({'kind': 'organization', 'organizationId': settings['organizationId']} if organization else {'kind': 'platform'}),
+               'credentialFile': 'credential', 'expectedScope': {'kind': 'platform'},
                'resources': settings['resources']}
-    if not organization:
-        del connect['identityKeyFile']
     write(STATE/'config/connect.json', json.dumps(connect)+'\n', owner=account)
-    write(STATE/('config/registration-token' if organization else 'config/credential'), token.decode(), owner=account)
-    enrollment = {'schemaVersion': 'provenance.runner-enrollment/v1alpha1', 'apiBaseUrl': settings['apiOrigin'],
-                  'connectConfigFile': 'connect.json', 'registrationTokenFile': 'registration-token', 'credentialTtlSeconds': 3600}
-    if organization:
-        write(STATE/'config/enrollment.json', json.dumps(enrollment)+'\n', owner=account)
+    write(STATE/'config/credential', credential, owner=account)
     write(USER_UNIT, '''[Unit]
 Description=Provenance sandboxed runner
 [Service]
@@ -346,16 +334,15 @@ def activate():
         protected(ROOT/name)
         require(digest(ROOT/name) == installed[key], 'Installed executable drift; refusing activation')
     account = pwd.getpwnam(USER)
-    # Certificate and HTTP/2 checks precede one-time registration redemption.
+    # Verify gateway trust before starting the platform worker.
     address, port = settings['gatewayAddress'].split(':')
     context = ssl.create_default_context()
     context.set_alpn_protocols(['h2'])
     with socket.create_connection((address, int(port)), timeout=15) as sock:
         with context.wrap_socket(sock, server_hostname=address) as tls:
             require(tls.selected_alpn_protocol() == 'h2', 'Gateway must negotiate trusted TLS with HTTP/2')
-    print('Gateway TLS verified. Enrolling runner...', flush=True)
-    if not (STATE/'config/credential').exists():
-        as_user(account, str(ROOT/'runner'), 'enroll', str(STATE/'config/enrollment.json'))
+    require((STATE/'config/credential').is_file(), 'Installed platform runner credential is missing')
+    print('Gateway TLS verified. Starting hosted runner...', flush=True)
     run('systemctl', 'enable', '--now', UNIT)
     time.sleep(3)
     status = as_user(account, 'systemctl', '--user', 'show', UNIT, '-p', 'ActiveState', '-p', 'SubState', '-p', 'NRestarts', capture=True)
@@ -368,7 +355,7 @@ def main():
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('install')
     p.add_argument('settings', type=Path)
-    p.add_argument('--prepare-only', action='store_true', help='Install without enrollment/start; run activate later')
+    p.add_argument('--prepare-only', action='store_true', help='Install without starting the worker; run activate later')
     sub.add_parser('activate', help='Retry activation of a completed installation; preserves identity/journal')
     args = parser.parse_args()
     require(os.geteuid() == 0, 'Run as root')

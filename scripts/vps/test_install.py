@@ -14,10 +14,9 @@ spec.loader.exec_module(i)
 
 
 def settings():
-    return {'apiOrigin': 'https://api.example.com', 'gatewayAddress': 'gateway.example.com:443',
+    return {'gatewayAddress': 'gateway.example.com:443',
             'runnerId': '10000000-0000-0000-0000-000000000001',
-            'organizationId': '20000000-0000-0000-0000-000000000002',
-            'registrationTokenFile': '/root/token', 'artifactHosts': ['assets.example.com'],
+            'platformCredentialFile': '/root/platform-runner-credential', 'artifactHosts': ['assets.example.com'],
             'probe': {'uri': 'https://assets.example.com/probe.jar', 'sha256': i.PROBE, 'sizeBytes': 478853},
             'preparedRuntime': {'uri': 'https://assets.example.com/runtime.tar.gz', 'sha256': 'a'*64,
                                 'sizeBytes': 100, 'maximumExpandedBytes': 1000},
@@ -25,16 +24,12 @@ def settings():
 
 
 class Settings(unittest.TestCase):
-    def test_organization_and_platform(self):
+    def test_platform_settings(self):
         value = settings()
         self.assertEqual(i.validate(value), value)
-        del value['organizationId']
-        del value['registrationTokenFile']
-        value['platformCredentialFile'] = '/root/platform-credential'
-        self.assertEqual(i.validate(value), value)
 
-    def test_mixed_credentials_and_management_credentials_refused(self):
-        for field in ('platformCredentialFile', 'DATABASE_URL', 'managementToken'):
+    def test_self_hosted_and_management_fields_refused(self):
+        for field in ('organizationId', 'registrationTokenFile', 'apiOrigin', 'DATABASE_URL', 'managementToken'):
             value = settings()
             value[field] = 'private'
             with self.assertRaises(ValueError):

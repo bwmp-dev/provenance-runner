@@ -138,7 +138,8 @@ Unit and hosted CI exercise preparation, bounded live evidence, complete-log ret
 
 Probe lifecycle output is bounded and fails closed on missing, malformed, duplicate, out-of-order, or failed assertions. It is not cryptographically attributable: the tested plugin shares the JVM and sandbox UID and could attempt to forge or modify the reserved event channel.
 
-## Fresh VPS installation
+## Platform-hosted runner installation
 
-Use the [fresh VPS installer](docs/vps-install.md) to build a portable bundle and
-provision Ubuntu 24.04 with a non-root gVisor runner, boot services, and enrollment.
+Use the [platform-hosted VPS installer](docs/vps-install.md) to build a portable bundle and
+provision Ubuntu 24.04 with a non-root gVisor runner, boot services, and a platform runner credential. Customer self-hosted runners use
+a separate future installation workflow.

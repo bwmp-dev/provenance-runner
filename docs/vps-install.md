@@ -1,4 +1,8 @@
-# Fresh VPS installation
+# Platform-hosted runner VPS installation
+
+This installer is exclusively for operator-owned runners in the Provenance platform
+pool. Customer self-hosted runners will have a separate installation workflow.
+Organization enrollment fields are rejected.
 
 Use `scripts/vps/build-bundle.sh` on a trusted build machine, then run the bundled
 `install.sh` as root on a **fresh Ubuntu 24.04 LTS amd64 VPS with systemd, cgroup
@@ -35,15 +39,17 @@ or independent proof of origin. Do not use an untrusted bundle/checksum pair.
 
 ## Configure each VPS
 
-Create the runner in your organization and obtain its single-use registration
-token using the platform's runner registration flow. Save the token to a root-only
-file on the VPS, not in a command argument, shell history or this repository.
+Register a platform-pool runner through the platform operator workflow and obtain
+its runner connection credential. Save it to a root-only file on the VPS, not in
+a command argument, shell history or this repository. This installer consumes an
+already-issued credential; it does not create platform registrations.
 
 Copy `settings.example.json` to `/root/runner-settings.json`, then fill in:
 
-- The API origin, deployed gateway DNS name and TLS port, runner UUID and
-  organization UUID. The gateway must support trusted native TLS with HTTP/2.
-- `registrationTokenFile`: the absolute path to the root-only token file.
+- The deployed gateway DNS name, TLS port, and registered platform runner UUID.
+  The gateway must support trusted native TLS with HTTP/2.
+- `platformCredentialFile`: the absolute path to the root-only runner connection
+  credential. Never supply API management, database, Temporal or storage credentials.
 - `artifactHosts`: exact DNS hosts used by jobs and pinned runtime assets, including
   any Java/Paper/dependency hosts the platform's jobs require.
 - Published HTTPS URIs for the accepted probe and prepared Paper runtime, with the
@@ -59,27 +65,20 @@ This installer configures the supported single-runtime composition:
 publish platform artifacts on the execution VPS. Full three-environment catalog
 provisioning remains separate from this first-install helper.
 
-For a **platform pool runner**, remove `organizationId` and
-`registrationTokenFile`, and supply `platformCredentialFile` instead: an absolute
-path to a root-only, already-issued **runner connection credential**. Keep
-`runnerId` equal to the registered platform runner. This skips organization
-enrollment. Never supply API management, database, Temporal or storage credentials.
-
 ```sh
-chmod 600 /root/runner-settings.json /root/runner-registration-token
+chmod 600 /root/runner-settings.json /root/platform-runner-credential
 /root/runner-bundle/install.sh install /root/runner-settings.json
 ```
 
 The command installs host packages, verifies published assets, creates the account,
 installs gVisor and its path-specific AppArmor user-namespace permission, prepares
-and verifies the pinned root filesystem, installs boot services, enrolls the runner
-and starts it. It does not disable AppArmor, change global sysctls, modify SSH,
+and verifies the pinned root filesystem, installs boot services and starts the platform runner. It does not disable AppArmor, change global sysctls, modify SSH,
 open inbound ports, grant sudo or add the worker to the Docker group.
 
-The backend must already provide the API, gateway, registration and artifact
-hosting. Organization credentials have a one-hour initial lifetime; configure the
-platform's supported credential rotation before relying on unattended operation.
-This installer cannot provision that separate backend or renew a revoked identity.
+The backend must already provide the gateway, platform runner registration and
+artifact hosting. Credential issuance, rotation and revocation remain part of
+platform operations; no organization enrollment or one-time registration token is
+used by this installer.
 
 ## Prepare now, activate later
 
@@ -88,11 +87,11 @@ This installer cannot provision that separate backend or renew a revoked identit
 /root/runner-bundle/install.sh activate
 ```
 
-Preparation still requires valid settings, published assets and a token/credential
-file, but it does not contact the gateway, redeem enrollment or start the runner.
-Activation verifies gateway TLS/HTTP2 before redeeming the token. If activation
-fails after installation completes, fix the gateway or enrollment prerequisite
-and rerun `activate`; it preserves the installed identity and journal.
+Preparation still requires valid settings, published assets and a platform runner
+credential file, but it does not contact the gateway or start the runner.
+Activation verifies gateway TLS/HTTP2 before starting the worker. If activation
+fails after installation completes, fix the gateway or credential prerequisite
+and rerun `activate`; it preserves the installed credential and journal.
 
 If preparation itself fails after provisioning starts, `/opt/provenance-runner/INSTALLING`
 marks the incomplete installation. Inspect the retained state or rebuild the fresh
@@ -128,7 +127,7 @@ reconciles stale work after restarts.
 
 Confirm the runner is online in the console, submit a known-safe Paper smoke job,
 and confirm its outcome and complete logs. The installer's short process check
-only proves startup, not enrollment longevity, gateway heartbeat acceptance or a
+only proves startup, not credential longevity, gateway heartbeat acceptance or a
 successful sandboxed job. Record the installation identity from
 `/opt/provenance-runner/installed.json` and verify reboot behavior before admitting
 customer work. This new installer needs a disposable fresh-VPS acceptance run;
