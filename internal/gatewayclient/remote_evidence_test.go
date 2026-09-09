@@ -285,3 +285,75 @@ func activeEvidenceClient(t *testing.T, now time.Time) (*Client, *runnerv1.Lease
 func testLogObject() *runnerv1.LogObject {
 	return &runnerv1.LogObject{ObjectKey: "staging/execution/attempt/log.gz", Digest: &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: bytes.Repeat([]byte{2}, 32)}, CompressedSizeBytes: 123, ContentType: completeLogUploadContentType}
 }
+
+func TestRemoteEarlyFailureWithoutArchivePreservesOriginalFailure(t *testing.T) {
+	for _, phase := range []execution.Phase{execution.PhaseValidation, execution.PhaseResolution, execution.PhasePreparation} {
+		t.Run(string(phase), func(t *testing.T) {
+			now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+			client, offer := activeEvidenceClient(t, now)
+			uploader := &recordingCompleteLogUploader{object: testLogObject()}
+			client.logUploader = uploader
+			var sent *runnerv1.RunnerMessage
+			session := &clientSession{client: client, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+				sent = proto.Clone(message).(*runnerv1.RunnerMessage)
+				return nil
+			}}
+			result := execution.FailedResult(offer.GetJob().GetLease().GetJobId(), phase, execution.ClassificationInvalidJob, "remote_job_adaptation_failed", errors.New("unsupported environment"))
+			expected := resultFailure(result)
+			if err := session.handleWorkerEvent(workerEvent{result: &result}); err != nil {
+				t.Fatal(err)
+			}
+			failed := sent.GetFailed()
+			if uploader.calls != 0 || failed == nil || !proto.Equal(failed.GetFailure(), expected) || failed.GetCompleteLog() != nil || sent.GetCompleted() != nil {
+				t.Fatal("original pre-execution failure was masked or uploaded")
+			}
+		})
+	}
+}
+
+func TestRemoteMissingArchiveStillRefusesSuccessAndPostExecutionFailure(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		phase    execution.Phase
+		passed   bool
+		executed bool
+		partial  bool
+	}{
+		{name: "success", phase: execution.PhaseCompleted, passed: true},
+		{name: "success-early-phase", phase: execution.PhaseValidation, passed: true},
+		{name: "executed", phase: execution.PhaseExecution},
+		{name: "collection", phase: execution.PhaseCollection},
+		{name: "execution-present", phase: execution.PhasePreparation, executed: true},
+		{name: "partial-archive", phase: execution.PhasePreparation, partial: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+			client, offer := activeEvidenceClient(t, now)
+			uploader := &recordingCompleteLogUploader{object: testLogObject()}
+			client.logUploader = uploader
+			var sent *runnerv1.RunnerMessage
+			session := &clientSession{client: client, rootContext: context.Background(), send: func(message *runnerv1.RunnerMessage) error {
+				sent = proto.Clone(message).(*runnerv1.RunnerMessage)
+				return nil
+			}}
+			result := execution.FailedResult(offer.GetJob().GetLease().GetJobId(), test.phase, execution.ClassificationInfrastructureFailure, "execution_failed", errors.New("execution failed"))
+			if test.passed {
+				result.Status = "passed"
+				result.Classification = execution.ClassificationPassed
+				result.Failure = nil
+			}
+			if test.executed {
+				result.Execution = &execution.ExecutionResult{}
+			}
+			if test.partial {
+				result.CompleteLog = &execution.CompleteLog{}
+			}
+			if err := session.handleWorkerEvent(workerEvent{result: &result}); err != nil {
+				t.Fatal(err)
+			}
+			if uploader.calls != 1 || sent.GetCompleted() != nil || sent.GetFailed().GetFailure().GetCode() != "complete_log_upload_failed" {
+				t.Fatal("required missing log did not fail closed")
+			}
+		})
+	}
+}

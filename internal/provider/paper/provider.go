@@ -796,10 +796,10 @@ func validatePin(name string, pin ArtifactPin) error {
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 		return fmt.Errorf("catalog %s URI must be an HTTPS URL without credentials or a fragment", name)
 	}
-	if pin.Filename == "" || filepath.Base(pin.Filename) != pin.Filename {
+	if !catalogSegment.MatchString(pin.Filename) || filepath.Base(pin.Filename) != pin.Filename {
 		return fmt.Errorf("catalog %s filename is invalid", name)
 	}
-	if pin.SizeBytes <= 0 {
+	if pin.SizeBytes <= 0 || pin.SizeBytes > 1<<30 {
 		return fmt.Errorf("catalog %s size must be positive", name)
 	}
 	return nil

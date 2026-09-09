@@ -124,3 +124,58 @@ func digest(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
 }
+
+func TestRunPreparesOperatorPinnedFourthVersion(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "paper.jar")
+	catalogPath := filepath.Join(root, "catalog.json")
+	content := []byte("operator verified Paper")
+	if err := os.WriteFile(input, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := paper.AlphaCatalog()
+	c.EnvironmentID = "paper-1.21.11-42"
+	c.Paper.GameVersion = "1.21.11"
+	c.Paper.Build = 42
+	c.Paper.Artifact = paper.ArtifactPin{URI: "https://example.org/paper.jar", Filename: "paper.jar", SHA256: digest(content), SizeBytes: int64(len(content))}
+	c.Probe.URI = "https://example.org/probe.jar"
+	raw, _ := json.Marshal(c)
+	if err := os.WriteFile(catalogPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	prepare := func(_ context.Context, _, staged, stage string, _ io.Writer) error {
+		calls++
+		actual, err := os.ReadFile(staged)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(actual, content) {
+			return fmt.Errorf("wrong staged bytes")
+		}
+		for _, name := range []string{"cache/mojang_1.21.11.jar", "libraries/example/library.jar", "versions/1.21.11/paper-1.21.11.jar"} {
+			p := filepath.Join(stage, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(p, []byte("prepared"), 0600); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	args := []string{"-catalog", catalogPath, "-paper", input, "-output", filepath.Join(root, "runtime.tar.gz")}
+	if err := runWithCatalogSelection(context.Background(), args, &bytes.Buffer{}, &bytes.Buffer{}, prepare); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatal("preparer did not run")
+	}
+	args = append(args, "-environment", paper.AlphaEnvironmentID)
+	if err := runWithCatalogSelection(context.Background(), args, &bytes.Buffer{}, &bytes.Buffer{}, prepare); err == nil {
+		t.Fatal("accepted conflicting selection")
+	}
+	if calls != 1 {
+		t.Fatal("conflicting selection executed preparer")
+	}
+}

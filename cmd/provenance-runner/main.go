@@ -18,6 +18,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/gatewayclient"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/gvisor"
+	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 )
 
 const maximumJobBytes = 1 << 20
@@ -42,6 +43,9 @@ func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(arguments) == 2 && arguments[0] == "validate-paper-catalogs" {
+		return runValidatePaperCatalogs(arguments[1], stdout, stderr)
+	}
 	if len(arguments) == 2 && arguments[0] == "connect" {
 		return runConnect(ctx, arguments[1], false, stderr)
 	}
@@ -157,6 +161,7 @@ func writeUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "       provenance-runner execute <job.json|-> --complete-log <new-path>")
 	fmt.Fprintln(writer, "       provenance-runner connect <connect.json> [--disable-object-upload-identity]")
 	fmt.Fprintln(writer, "       provenance-runner enroll <enrollment.json>")
+	fmt.Fprintln(writer, "       provenance-runner validate-paper-catalogs <catalogs.json>")
 }
 
 func readJob(path string, stdin io.Reader) ([]byte, error) {
@@ -196,4 +201,27 @@ func writeResult(writer io.Writer, result execution.Result) int {
 		return 0
 	}
 	return 1
+}
+
+func runValidatePaperCatalogs(path string, stdout, stderr io.Writer) int {
+	file, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintln(stderr, "open Paper catalog file failed")
+		return 1
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(file, paper.MaximumCatalogJSONBytes+1))
+	closeErr := file.Close()
+	if errors.Join(readErr, closeErr) != nil {
+		fmt.Fprintln(stderr, "read Paper catalog file failed")
+		return 1
+	}
+	catalogs, err := paper.DecodeOperatorCatalogs(raw)
+	if err != nil {
+		fmt.Fprintln(stderr, "Paper catalog validation failed")
+		return 1
+	}
+	if _, err := fmt.Fprintf(stdout, "Validated %d Paper catalogs\n", len(catalogs)); err != nil {
+		return 1
+	}
+	return 0
 }

@@ -1117,7 +1117,13 @@ func (s *clientSession) queueResult(result execution.Result) error {
 	}
 	var completeLog *runnerv1.LogObject
 	usage := resultResourceUsage(result)
-	if target := s.client.completeLogTarget(lease, attempt); target != nil {
+	// Validation/resolution/preparation can fail before a workload creates an
+	// archive. Preserve that original failure rather than inventing an upload
+	// failure. Missing logs after execution (or on success) still fail closed.
+	beforeExecutionFailure := result.Status == "failed" && !result.Passed() && result.Failure != nil &&
+		result.Execution == nil && result.CompleteLog == nil &&
+		(result.Phase == execution.PhaseValidation || result.Phase == execution.PhaseResolution || result.Phase == execution.PhasePreparation)
+	if target := s.client.completeLogTarget(lease, attempt); target != nil && !beforeExecutionFailure {
 		ctx := s.rootContext
 		if ctx == nil {
 			ctx = context.Background()

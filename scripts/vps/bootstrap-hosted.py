@@ -45,8 +45,8 @@ def validate(data):
     require(re.fullmatch(r'pru_[a-f0-9]{64}', data['updaterCredential']), 'Invalid updater credential')
     profile = data['profile']
     require(isinstance(profile, dict) and set(profile) == {
-        'gatewayAddress', 'apiOrigin', 'artifactHosts', 'probe', 'preparedRuntime',
-        'bundle', 'resources', 'releasePublicKey'}, 'Invalid installation profile')
+        'gatewayAddress', 'apiOrigin', 'artifactHosts',
+        'bundle', 'resources', 'releasePublicKey'} | ({'paperCatalogs'} if 'paperCatalogs' in profile else {'probe', 'preparedRuntime'}), 'Invalid installation profile')
     bundle = profile['bundle']
     require(isinstance(bundle, dict) and set(bundle) == {'uri', 'sha256', 'sizeBytes'}, 'Invalid bundle descriptor')
     require(re.fullmatch(r'[a-f0-9]{64}', bundle['sha256']), 'Invalid bundle digest')
@@ -130,7 +130,8 @@ def main():
     extract(stage/'bundle.tar.gz', bundle)
     private(stage/'credential', data['credential'], newline=False)
     private(stage/'updater-credential', data['updaterCredential'], newline=False)
-    settings = {k: profile[k] for k in ('gatewayAddress', 'artifactHosts', 'probe', 'preparedRuntime', 'resources')}
+    settings = {k: profile[k] for k in ('gatewayAddress', 'artifactHosts', 'resources')}
+    settings.update({k: profile[k] for k in (('paperCatalogs',) if 'paperCatalogs' in profile else ('probe', 'preparedRuntime'))})
     settings.update(runnerId=data['runnerId'], platformCredentialFile=str(stage/'credential'))
     private(stage/'settings.json', json.dumps(settings))
     private(stage/'updater.json', json.dumps({'apiOrigin': profile['apiOrigin'], 'credentialFile': str(stage/'updater-credential'), 'releasePublicKey': profile['releasePublicKey']}))
