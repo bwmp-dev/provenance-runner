@@ -593,6 +593,7 @@ def main():
     if args.action == 'install':
         install(Path(__file__).resolve().parent, args.settings.absolute(), args.prepare_only)
     elif args.action == 'configure-catalogs':
+        verify_bundle(Path(__file__).resolve().parent)
         configure_catalogs(args.catalogs.absolute())
     elif args.action == 'enable-updater':
         enable_updater(Path(__file__).resolve().parent, args.settings.absolute())

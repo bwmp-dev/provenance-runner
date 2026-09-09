@@ -114,8 +114,8 @@ def main():
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as source:
         require(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'Manifest must be a regular file')
-        raw = source.read(65537)
-    require(len(raw) <= 65536, 'Manifest exceeds 64 KiB')
+        raw = source.read(262145)
+    require(len(raw) <= 262144, 'Manifest exceeds 256 KiB')
     data = validate(json.loads(raw, object_pairs_hook=unique))
     for path in ('/opt/provenance-runner', '/var/lib/provenance-runner'):
         require(not os.path.lexists(path), 'An installation exists; refusing overwrite. Use console updates for installed nodes.')
