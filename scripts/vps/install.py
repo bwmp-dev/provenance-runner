@@ -164,7 +164,7 @@ def validate_catalogs(catalogs, hosts):
         require(java['distribution'] == 'eclipse-temurin' and java['os'] == 'linux' and java['architecture'] == 'amd64', 'Java must be Temurin for Linux amd64')
         for key in ('distribution', 'version', 'archiveRoot'):
             require(isinstance(java[key], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,199}', java[key]), 'Invalid Java identity or archive root')
-        require(re.fullmatch(r'(?:21|25)\.[0-9]+\.[0-9]+\+[0-9]+', java['version']), 'Java version must be an exact numeric release')
+        require(re.fullmatch(r'(?:21|25)\.[0-9]+\.[0-9]+(?:\.[0-9]+)?\+[0-9]+', java['version']), 'Java version must be an exact numeric release')
         exact(runtime, 'artifact maximumExpandedBytes')
         for archive in (java, runtime):
             number(archive['maximumExpandedBytes'], 1024**3)

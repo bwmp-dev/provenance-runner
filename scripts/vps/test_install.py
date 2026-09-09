@@ -289,6 +289,11 @@ class Catalogs(unittest.TestCase):
         self.assertEqual(json.loads(json.loads(lines['PROVENANCE_PAPER_CATALOGS_JSON'])), value['paperCatalogs'])
         self.assertFalse(any(key.startswith('PROVENANCE_PAPER_PROBE') or key.startswith('PROVENANCE_PAPER_PREPARED_RUNTIME') for key in lines))
 
+    def test_java_patch_release_is_supported(self):
+        value = catalog_settings()
+        value['paperCatalogs'][0]['java']['version'] = '25.0.4.1+1'
+        i.validate(value)
+
     def test_shared_java_and_probe_are_cached_once(self):
         value = catalog_settings()
         other = copy.deepcopy(value['paperCatalogs'][0])
