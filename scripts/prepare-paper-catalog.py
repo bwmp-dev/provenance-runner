@@ -90,7 +90,11 @@ def extract_java(source, root, maximum):
                 (root / name).symlink_to(item.linkname)
         for name, item in entries.items():
             if item.issym():
-                require((root / name).resolve().is_relative_to(root.resolve()))
+                try:
+                    resolved = (root / name).resolve(strict=True)
+                except (OSError, RuntimeError) as error:
+                    raise Invalid('invalid archive link') from error
+                require(resolved.is_relative_to(root.resolve()))
     return total
 
 
