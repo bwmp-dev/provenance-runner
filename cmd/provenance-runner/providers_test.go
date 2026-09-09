@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -452,4 +453,49 @@ func paperEnvironment(t *testing.T) map[string]string {
 		}
 	}
 	return values
+}
+
+func TestFullOperatorCatalogRejectsLegacyConfiguration(t *testing.T) {
+	for _, name := range []string{"PROVENANCE_PAPER_PROBE_URI", preparedRuntimesEnvironment, "PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256"} {
+		_, err := operatorCatalogs(func(key string) string {
+			if key == "PROVENANCE_PAPER_CATALOGS_JSON" {
+				return "[]"
+			}
+			if key == name {
+				return "configured"
+			}
+			return ""
+		})
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Fatalf("%s conflict = %v", name, err)
+		}
+	}
+}
+
+func TestValidatePaperCatalogsCommandIsOfflineAndRedactsInvalidPins(t *testing.T) {
+	c := paper.AlphaCatalog()
+	c.Probe.URI = "https://artifacts.example/probe?credential=private"
+	c.PreparedRuntime = paper.ArchivePin{Artifact: paper.ArtifactPin{URI: "https://artifacts.example/runtime", SHA256: strings.Repeat("a", 64), Filename: "runtime.tar.gz", SizeBytes: 100}, MaximumExpandedBytes: 1000}
+	raw, _ := json.Marshal([]paper.Catalog{c})
+	path := filepath.Join(t.TempDir(), "catalogs.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"validate-paper-catalogs", path}, nil, &out, &errOut); code != 0 || out.String() != "Validated 1 Paper catalogs\n" {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, &out, &errOut)
+	}
+	c.Probe.SHA256 = "private-invalid-digest"
+	raw, _ = json.Marshal([]paper.Catalog{c})
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"validate-paper-catalogs", path}, nil, &out, &errOut); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if out.Len() != 0 || errOut.String() != "Paper catalog validation failed\n" {
+		t.Fatal("validation exposed input")
+	}
 }

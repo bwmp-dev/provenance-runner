@@ -46,7 +46,9 @@ func runWithSelectedCatalog(ctx context.Context, arguments []string, stdout, std
 	var javaPath string
 	var outputPath string
 	var environmentID string
-	flags.StringVar(&paperPath, "paper", "", "path to the pinned Paper alpha JAR")
+	var catalogPath string
+	flags.StringVar(&catalogPath, "catalog", "", "operator catalog JSON file (preparedRuntime may be omitted)")
+	flags.StringVar(&paperPath, "paper", "", "path to the pinned Paper JAR")
 	flags.StringVar(&javaPath, "java", "java", "path to a Java 21 or newer executable")
 	flags.StringVar(&outputPath, "output", "paper-prepared-runtime.tar.gz", "new archive path")
 	flags.StringVar(&environmentID, "environment", paper.AlphaEnvironmentID, "exact alpha Paper environment ID")
@@ -59,7 +61,33 @@ func runWithSelectedCatalog(ctx context.Context, arguments []string, stdout, std
 	if paperPath == "" {
 		return errors.New("-paper is required")
 	}
-	if selectCatalog {
+	if catalogPath != "" {
+		if !selectCatalog {
+			return errors.New("-catalog cannot override a test pin")
+		}
+		explicitEnvironment := false
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "environment" {
+				explicitEnvironment = true
+			}
+		})
+		if explicitEnvironment {
+			return errors.New("-catalog and -environment cannot be combined")
+		}
+		file, err := os.Open(catalogPath)
+		if err != nil {
+			return errors.New("open operator catalog failed")
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(file, paper.MaximumCatalogJSONBytes+1))
+		closeErr := file.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return errors.New("read operator catalog failed")
+		}
+		selected, err = paper.DecodePreparationCatalog(raw)
+		if err != nil {
+			return err
+		}
+	} else if selectCatalog {
 		var exists bool
 		selected, exists = paper.CatalogForEnvironmentID(environmentID)
 		if !exists {
@@ -132,7 +160,7 @@ func stageVerifiedPaper(ctx context.Context, sourcePath, destinationPath string,
 		return fmt.Errorf("inspect Paper JAR: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() != pin.SizeBytes {
-		return fmt.Errorf("Paper JAR must be the %d-byte alpha artifact", pin.SizeBytes)
+		return fmt.Errorf("Paper JAR must be the %d-byte pinned artifact", pin.SizeBytes)
 	}
 	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {

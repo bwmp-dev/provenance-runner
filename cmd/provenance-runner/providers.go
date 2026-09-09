@@ -265,6 +265,14 @@ type preparedRuntimeConfiguration struct {
 }
 
 func operatorCatalogs(lookup environmentLookup) ([]paper.Catalog, error) {
+	if raw := lookup("PROVENANCE_PAPER_CATALOGS_JSON"); raw != "" {
+		for _, name := range []string{preparedRuntimesEnvironment, "PROVENANCE_PAPER_PROBE_URI", "PROVENANCE_PAPER_PROBE_SHA256", "PROVENANCE_PAPER_PROBE_SIZE_BYTES", "PROVENANCE_PAPER_PREPARED_RUNTIME_URI", "PROVENANCE_PAPER_PREPARED_RUNTIME_SHA256", "PROVENANCE_PAPER_PREPARED_RUNTIME_SIZE_BYTES", "PROVENANCE_PAPER_PREPARED_RUNTIME_MAX_EXPANDED_BYTES"} {
+			if lookup(name) != "" {
+				return nil, errors.New("PROVENANCE_PAPER_CATALOGS_JSON cannot be combined with legacy Paper pin variables")
+			}
+		}
+		return paper.DecodeOperatorCatalogs([]byte(raw))
+	}
 	raw := strings.TrimSpace(lookup(preparedRuntimesEnvironment))
 	if raw == "" {
 		catalog, err := operatorCatalog(lookup)

@@ -260,3 +260,78 @@ class InstallationFlow(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def catalog_settings():
+    value = settings()
+    probe = value.pop('probe')
+    probe['filename'] = 'paper-probe.jar'
+    value.pop('preparedRuntime')
+    def asset(name, sha):
+        return {'uri': 'https://assets.example.com/'+name, 'filename': name, 'sha256': sha*64, 'sizeBytes': 100}
+    value['paperCatalogs'] = [{
+        'environmentId': 'paper-1.21.9-1',
+        'paper': {'gameVersion': '1.21.9', 'build': 1, 'artifact': asset('paper.jar', 'b')},
+        'java': {'distribution': 'eclipse-temurin', 'version': '21.0.8+9', 'os': 'linux', 'architecture': 'amd64',
+                 'archiveRoot': 'jdk-21-jre', 'artifact': asset('java.tar.gz', 'c'), 'maximumExpandedBytes': 1000},
+        'probeVersion': '0.1.0', 'probeSourceCommit': 'f82dcbf8244354059731ba533f73909ed5528bbd', 'probe': probe,
+        'preparedRuntime': {'artifact': asset('paper-runtime.tar.gz', 'd'), 'maximumExpandedBytes': 1000}}]
+    return value
+
+
+class Catalogs(unittest.TestCase):
+    def test_arbitrary_build_is_provisioned_with_all_four_pins(self):
+        value = catalog_settings()
+        self.assertEqual(i.validate(value), value)
+        self.assertEqual(len(i.assets_for_settings(value)), 4)
+        env = i.environment(value, type('Account', (), {'pw_uid': 994})())
+        lines = dict(line.split('=', 1) for line in env.splitlines())
+        self.assertEqual(json.loads(json.loads(lines['PROVENANCE_PAPER_CATALOGS_JSON'])), value['paperCatalogs'])
+        self.assertFalse(any(key.startswith('PROVENANCE_PAPER_PROBE') or key.startswith('PROVENANCE_PAPER_PREPARED_RUNTIME') for key in lines))
+
+    def test_java_patch_release_is_supported(self):
+        value = catalog_settings()
+        value['paperCatalogs'][0]['java']['version'] = '25.0.4.1+1'
+        i.validate(value)
+
+    def test_shared_java_and_probe_are_cached_once(self):
+        value = catalog_settings()
+        other = copy.deepcopy(value['paperCatalogs'][0])
+        other['environmentId'] = 'paper-1.21.10-5'
+        other['paper']['gameVersion'] = '1.21.10'
+        other['paper']['artifact']['sha256'] = 'e'*64
+        other['preparedRuntime']['artifact']['sha256'] = 'f'*64
+        value['paperCatalogs'].append(other)
+        i.validate(value)
+        self.assertEqual(len(i.assets_for_settings(value)), 6)
+
+    def test_catalog_boundary_refusals(self):
+        mutations = [
+            lambda v: v.update(probe=settings()['probe']),
+            lambda v: v.update(paperCatalogs=[]),
+            lambda v: v.update(paperCatalogs=v['paperCatalogs']*33),
+            lambda v: v['paperCatalogs'].append(copy.deepcopy(v['paperCatalogs'][0])),
+            lambda v: v['paperCatalogs'][0]['paper']['artifact'].update(filename='../paper.jar'),
+            lambda v: v['paperCatalogs'][0]['java'].update(archiveRoot='../../root'),
+            lambda v: v['paperCatalogs'][0]['java'].update(architecture='arm64'),
+            lambda v: v['paperCatalogs'][0]['paper'].update(build=True),
+            lambda v: v['paperCatalogs'][0]['probe'].update(sha256='a'*64),
+            lambda v: v['paperCatalogs'][0]['preparedRuntime'].update(maximumExpandedBytes=99),
+            lambda v: v['paperCatalogs'][0]['paper']['artifact'].update(uri='https://unapproved.example/paper.jar'),
+        ]
+        for mutation in mutations:
+            value = catalog_settings()
+            mutation(value)
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, TypeError)):
+                i.validate(value)
+
+    def test_reconfigure_refuses_active_node_before_download_or_changes(self):
+        value = settings()
+        account = type('Account', (), {'pw_uid': 994})()
+        with patch.object(i, 'protected'), patch.object(i, 'read_json', side_effect=[value, catalog_settings()['paperCatalogs']]), \
+             patch.object(i.pwd, 'getpwnam', return_value=account), patch.object(i, 'as_user', return_value='ActiveState=active'), \
+             patch.object(i, 'run') as command, patch.object(i, 'write') as write:
+            with self.assertRaisesRegex(ValueError, 'Drain the node'):
+                i.configure_catalogs(Path('/root/catalogs.json'))
+            command.assert_not_called()
+            write.assert_not_called()

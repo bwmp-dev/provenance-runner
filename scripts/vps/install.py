@@ -74,7 +74,7 @@ def unique(pairs):
 
 
 def read_json(path):
-    require(path.stat().st_size <= 65536, 'JSON input exceeds 64 KiB')
+    require(path.stat().st_size <= 262144, 'JSON input exceeds 256 KiB')
     return json.loads(path.read_text(), object_pairs_hook=unique)
 
 
@@ -114,7 +114,9 @@ def https(value, origin=False):
 
 
 def validate(settings):
-    exact(settings, 'gatewayAddress runnerId artifactHosts probe preparedRuntime resources platformCredentialFile')
+    catalog_mode = 'paperCatalogs' in settings
+    exact(settings, 'gatewayAddress runnerId artifactHosts resources platformCredentialFile ' +
+          ('paperCatalogs' if catalog_mode else 'probe preparedRuntime'))
     address = settings['gatewayAddress'].split(':')
     require(len(address) == 2 and address[1].isdigit() and 0 < int(address[1]) < 65536, 'gatewayAddress must be DNS:port')
     host(address[0])
@@ -124,18 +126,71 @@ def validate(settings):
     require(isinstance(hosts, list) and 0 < len(hosts) <= 32 and len(set(hosts)) == len(hosts), 'Provide unique artifact DNS hosts')
     for name in hosts:
         host(name)
-    for key in ('probe', 'preparedRuntime'):
-        artifact = settings[key]
-        exact(artifact, 'uri sha256 sizeBytes' + (' maximumExpandedBytes' if key == 'preparedRuntime' else ''))
-        require(https(artifact['uri']).hostname in hosts, 'Artifact host is absent from artifactHosts')
-        require(isinstance(artifact['sha256'], str) and re.fullmatch('[0-9a-f]{64}', artifact['sha256']), 'Invalid artifact SHA256')
-        number(artifact['sizeBytes'], 512*1024**2)
-    require(settings['probe']['sha256'] == PROBE and settings['probe']['sizeBytes'] == 478853, 'Probe must match the accepted catalog')
-    number(settings['preparedRuntime']['maximumExpandedBytes'], 1024**3)
+    if catalog_mode:
+        validate_catalogs(settings['paperCatalogs'], hosts)
+    else:
+        for key in ('probe', 'preparedRuntime'):
+            artifact = settings[key]
+            exact(artifact, 'uri sha256 sizeBytes' + (' maximumExpandedBytes' if key == 'preparedRuntime' else ''))
+            validate_asset(artifact, hosts)
+        require(settings['probe']['sha256'] == PROBE and settings['probe']['sizeBytes'] == 478853, 'Probe must match the accepted catalog')
+        number(settings['preparedRuntime']['maximumExpandedBytes'], 1024**3)
     exact(settings['resources'], 'cpuMillis memoryBytes diskBytes processCount')
     for key, limit in {'cpuMillis': 1024000, 'memoryBytes': 1024**4, 'diskBytes': 16*1024**4, 'processCount': 2**20}.items():
         number(settings['resources'][key], limit)
     return settings
+
+
+def validate_asset(artifact, hosts):
+    require(https(artifact['uri']).hostname in hosts, 'Artifact host is absent from artifactHosts')
+    require(isinstance(artifact['sha256'], str) and re.fullmatch('[0-9a-f]{64}', artifact['sha256']), 'Invalid artifact SHA256')
+    number(artifact['sizeBytes'], 512*1024**2)
+
+
+def validate_catalogs(catalogs, hosts):
+    require(isinstance(catalogs, list) and 0 < len(catalogs) <= 32, 'Provide 1 to 32 Paper catalogs')
+    identities, remote, runtime_digests = set(), set(), set()
+    for catalog in catalogs:
+        exact(catalog, 'environmentId paper java probeVersion probeSourceCommit probe preparedRuntime')
+        identity = catalog['environmentId']
+        require(isinstance(identity, str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,199}', identity)
+                and identity not in identities, 'Invalid or duplicate environment ID')
+        identities.add(identity)
+        paper, java, runtime = catalog['paper'], catalog['java'], catalog['preparedRuntime']
+        exact(paper, 'gameVersion build artifact')
+        require(isinstance(paper['gameVersion'], str) and re.fullmatch(r'(?:1\.20\.(?:[6-9]|[1-9][0-9]+)|1\.21(?:\.[0-9]+)?|26\.[1-9][0-9]*(?:\.[0-9]+)?)', paper['gameVersion']), 'Invalid Paper release version')
+        number(paper['build'], 2**32-1)
+        exact(java, 'distribution version os architecture archiveRoot artifact maximumExpandedBytes')
+        require(java['distribution'] == 'eclipse-temurin' and java['os'] == 'linux' and java['architecture'] == 'amd64', 'Java must be Temurin for Linux amd64')
+        for key in ('distribution', 'version', 'archiveRoot'):
+            require(isinstance(java[key], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,199}', java[key]), 'Invalid Java identity or archive root')
+        require(re.fullmatch(r'(?:21|25)\.[0-9]+\.[0-9]+(?:\.[0-9]+)?\+[0-9]+', java['version']), 'Java version must be an exact numeric release')
+        exact(runtime, 'artifact maximumExpandedBytes')
+        for archive in (java, runtime):
+            number(archive['maximumExpandedBytes'], 1024**3)
+            require(archive['maximumExpandedBytes'] >= archive['artifact']['sizeBytes'], 'Expanded archive bound is too small')
+        for artifact in (paper['artifact'], java['artifact'], catalog['probe'], runtime['artifact']):
+            exact(artifact, 'uri sha256 filename sizeBytes')
+            validate_asset(artifact, hosts)
+            require(isinstance(artifact['filename'], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,199}', artifact['filename']), 'Invalid artifact filename')
+        require(catalog['probeVersion'] == '0.1.0' and catalog['probeSourceCommit'] == 'f82dcbf8244354059731ba533f73909ed5528bbd'
+                and catalog['probe']['sha256'] == PROBE and catalog['probe']['sizeBytes'] == 478853, 'Probe must match the accepted catalog')
+        key = (paper['gameVersion'], paper['build'], java['distribution'], java['version'], paper['artifact']['sha256'])
+        require(key not in remote and runtime['artifact']['sha256'] not in runtime_digests, 'Duplicate runtime identity')
+        remote.add(key)
+        runtime_digests.add(runtime['artifact']['sha256'])
+
+
+def assets_for_settings(settings):
+    if 'paperCatalogs' not in settings:
+        return [(name, settings[name]) for name in ('probe', 'preparedRuntime')]
+    assets = {}
+    for catalog in settings['paperCatalogs']:
+        for asset in (catalog['paper']['artifact'], catalog['java']['artifact'], catalog['probe'], catalog['preparedRuntime']['artifact']):
+            previous = assets.get(asset['sha256'])
+            require(previous is None or previous['sizeBytes'] == asset['sizeBytes'], 'Conflicting asset sizes')
+            assets[asset['sha256']] = asset
+    return list(assets.items())
 
 
 def archive_check(path):
@@ -215,10 +270,13 @@ def environment(settings, account):
     }
     for key, name in {'WORKSPACE_ROOT': 'workspaces', 'CACHE_ROOT': 'cache', 'GVISOR_STATE_ROOT': 'gvisor-state', 'GVISOR_BUNDLE_ROOT': 'bundles'}.items():
         env['PROVENANCE_'+key] = str(STATE/name)
-    for key, prefix in [('probe', 'PROVENANCE_PAPER_PROBE'), ('preparedRuntime', 'PROVENANCE_PAPER_PREPARED_RUNTIME')]:
-        for field, suffix in [('uri', 'URI'), ('sha256', 'SHA256'), ('sizeBytes', 'SIZE_BYTES')]:
-            env[prefix+'_'+suffix] = str(settings[key][field])
-    env['PROVENANCE_PAPER_PREPARED_RUNTIME_MAX_EXPANDED_BYTES'] = str(settings['preparedRuntime']['maximumExpandedBytes'])
+    if 'paperCatalogs' in settings:
+        env['PROVENANCE_PAPER_CATALOGS_JSON'] = json.dumps(settings['paperCatalogs'], separators=(',', ':'))
+    else:
+        for key, prefix in [('probe', 'PROVENANCE_PAPER_PROBE'), ('preparedRuntime', 'PROVENANCE_PAPER_PREPARED_RUNTIME')]:
+            for field, suffix in [('uri', 'URI'), ('sha256', 'SHA256'), ('sizeBytes', 'SIZE_BYTES')]:
+                env[prefix+'_'+suffix] = str(settings[key][field])
+        env['PROVENANCE_PAPER_PREPARED_RUNTIME_MAX_EXPANDED_BYTES'] = str(settings['preparedRuntime']['maximumExpandedBytes'])
     # Values were strictly validated; quote for systemd, never source as shell.
     return ''.join(k+'='+json.dumps(v)+'\n' for k, v in sorted(env.items()))
 
@@ -275,8 +333,7 @@ def install(bundle, settings_path, prepare_only):
     print('Checking published Paper assets against their hashes...', flush=True)
     assets = tempfile.TemporaryDirectory(prefix='provenance-assets-', dir='/root')
     temporary = assets.name
-    for name in ('probe', 'preparedRuntime'):
-        artifact = settings[name]
+    for name, artifact in assets_for_settings(settings):
         target = Path(temporary)/name
         run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
             '--proto-redir', '=https', '--max-time', '300', '--max-filesize', str(artifact['sizeBytes']),
@@ -294,8 +351,8 @@ def install(bundle, settings_path, prepare_only):
         os.chown(p, account.pw_uid, account.pw_gid)
     # Keep verified pins in the content cache: installation URLs expire after 24h.
     # The cache rechecks hashes on reads and does not evict entries automatically.
-    for name in ('probe', 'preparedRuntime'):
-        sha = settings[name]['sha256']
+    for name, artifact in assets_for_settings(settings):
+        sha = artifact['sha256']
         parent = STATE/'cache'/'content'/'sha256'/sha[:2]
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         for cache_directory in (STATE/'cache'/'content', STATE/'cache'/'content'/'sha256', parent):
@@ -400,6 +457,76 @@ def activate():
     print('Runner service is running and enabled for boot. Confirm online status in the console; this is not a completed Paper job test.')
 
 
+def configure_catalogs(catalog_path):
+    """Apply verified catalogs to a drained, stopped node without replacing identity."""
+    protected(catalog_path, private=True)
+    protected(ROOT/'settings.json', private=True)
+    protected(ROOT/'installed.json', private=True)
+    require(not (ROOT/'INSTALLING').exists(), 'Incomplete installation requires inspection')
+    settings = read_json(ROOT/'settings.json')
+    catalogs = read_json(catalog_path)
+    settings.pop('probe', None)
+    settings.pop('preparedRuntime', None)
+    settings['paperCatalogs'] = catalogs
+    validate(settings)
+    account = pwd.getpwnam(USER)
+    status = as_user(account, 'systemctl', '--user', 'show', UNIT, '-p', 'ActiveState', capture=True)
+    require(status.strip() == 'ActiveState=inactive', 'Drain the node and stop its user service before changing catalogs')
+    protected(ROOT/'runner')
+    installed = read_json(ROOT/'installed.json')
+    require(digest(ROOT/'runner') == installed['runnerSha256'], 'Installed executable drift')
+    # Old binaries ignore the new env variable. Require explicit support before changes.
+    run(str(ROOT/'runner'), 'validate-paper-catalogs', str(catalog_path))
+    assets = assets_for_settings(settings)
+    require(sum(asset['sizeBytes'] for _, asset in assets) <= settings['resources']['diskBytes'], 'Catalog assets exceed node disk budget')
+    # Download into a private root directory before touching installed configuration.
+    with tempfile.TemporaryDirectory(prefix='provenance-catalogs-', dir='/root') as temporary:
+        for name, asset in assets:
+            target = Path(temporary)/name
+            run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
+                '--proto-redir', '=https', '--max-time', '300', '--max-filesize', str(asset['sizeBytes']),
+                '--output', str(target), asset['uri'])
+            require(target.stat().st_size == asset['sizeBytes'] and digest(target) == asset['sha256'], 'Catalog artifact integrity mismatch')
+        # Root must not follow paths inside the worker-owned cache. Transfer using
+        # the worker's uid and a pipe, so symlinks cannot grant root write authority.
+        for name, asset in assets:
+            target = STATE/'cache'/'content'/'sha256'/name[:2]/name[2:]
+            as_user(account, 'mkdir', '-p', str(target.parent))
+            with (Path(temporary)/name).open('rb') as source:
+                result = subprocess.run(['runuser', '-u', USER, '--', 'python3', '-I', '-c',
+                    'import os,sys,tempfile; p=sys.argv[1]; fd,t=tempfile.mkstemp(dir=os.path.dirname(p)); '
+                    'f=os.fdopen(fd,"wb"); import shutil; shutil.copyfileobj(sys.stdin.buffer,f); '
+                    'f.flush(); os.fsync(f.fileno()); f.close(); os.chmod(t,0o444); os.replace(t,p)', str(target)],
+                    stdin=source, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            require(result.returncode == 0, 'Unable to populate worker cache')
+    # A journal marker prevents activation if interrupted between the two files.
+    write(ROOT/'INSTALLING', 'Catalog configuration interrupted; restore catalog backup before activation.\n')
+    backup = ROOT/('catalog-backup-'+str(uuid.uuid4()))
+    backup.mkdir(mode=0o700)
+    for name in ('settings.json', 'runner.env'):
+        protected(ROOT/name)
+        shutil.copyfile(ROOT/name, backup/name)
+        os.chmod(backup/name, 0o600)
+    try:
+        for name, content, mode in (('settings.json', json.dumps(settings)+'\n', 0o600),
+                                    ('runner.env', environment(settings, account), 0o640)):
+            stage = backup/(name+'.new')
+            write(stage, content, mode)
+            if name == 'runner.env':
+                os.chown(stage, 0, account.pw_gid)
+            os.replace(stage, ROOT/name)
+    except Exception:
+        for name in ('settings.json', 'runner.env'):
+            shutil.copyfile(backup/name, ROOT/name)
+        os.chmod(ROOT/'settings.json', 0o600)
+        os.chmod(ROOT/'runner.env', 0o640)
+        os.chown(ROOT/'runner.env', 0, account.pw_gid)
+        (ROOT/'INSTALLING').unlink()
+        raise
+    (ROOT/'INSTALLING').unlink()
+    print('Catalogs configured and cached. Runner remains stopped; run activate after checking the configuration.')
+
+
 def enable_updater(bundle, settings_path):
     verify_bundle(bundle)
     protected(ROOT/'installed.json', private=True)
@@ -458,11 +585,16 @@ def main():
     p.add_argument('--prepare-only', action='store_true', help='Install without starting the worker; run activate later')
     updater = sub.add_parser('enable-updater', help='One-time hosted binary updater installation')
     updater.add_argument('settings', type=Path)
+    catalogs = sub.add_parser('configure-catalogs', help='Apply pinned catalogs to a drained, stopped existing node')
+    catalogs.add_argument('catalogs', type=Path)
     sub.add_parser('activate', help='Retry activation of a completed installation; preserves identity/journal')
     args = parser.parse_args()
     require(os.geteuid() == 0, 'Run as root')
     if args.action == 'install':
         install(Path(__file__).resolve().parent, args.settings.absolute(), args.prepare_only)
+    elif args.action == 'configure-catalogs':
+        verify_bundle(Path(__file__).resolve().parent)
+        configure_catalogs(args.catalogs.absolute())
     elif args.action == 'enable-updater':
         enable_updater(Path(__file__).resolve().parent, args.settings.absolute())
     else:

@@ -45,8 +45,8 @@ def validate(data):
     require(re.fullmatch(r'pru_[a-f0-9]{64}', data['updaterCredential']), 'Invalid updater credential')
     profile = data['profile']
     require(isinstance(profile, dict) and set(profile) == {
-        'gatewayAddress', 'apiOrigin', 'artifactHosts', 'probe', 'preparedRuntime',
-        'bundle', 'resources', 'releasePublicKey'}, 'Invalid installation profile')
+        'gatewayAddress', 'apiOrigin', 'artifactHosts',
+        'bundle', 'resources', 'releasePublicKey'} | ({'paperCatalogs'} if 'paperCatalogs' in profile else {'probe', 'preparedRuntime'}), 'Invalid installation profile')
     bundle = profile['bundle']
     require(isinstance(bundle, dict) and set(bundle) == {'uri', 'sha256', 'sizeBytes'}, 'Invalid bundle descriptor')
     require(re.fullmatch(r'[a-f0-9]{64}', bundle['sha256']), 'Invalid bundle digest')
@@ -114,8 +114,8 @@ def main():
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as source:
         require(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'Manifest must be a regular file')
-        raw = source.read(65537)
-    require(len(raw) <= 65536, 'Manifest exceeds 64 KiB')
+        raw = source.read(262145)
+    require(len(raw) <= 262144, 'Manifest exceeds 256 KiB')
     data = validate(json.loads(raw, object_pairs_hook=unique))
     for path in ('/opt/provenance-runner', '/var/lib/provenance-runner'):
         require(not os.path.lexists(path), 'An installation exists; refusing overwrite. Use console updates for installed nodes.')
@@ -130,7 +130,8 @@ def main():
     extract(stage/'bundle.tar.gz', bundle)
     private(stage/'credential', data['credential'], newline=False)
     private(stage/'updater-credential', data['updaterCredential'], newline=False)
-    settings = {k: profile[k] for k in ('gatewayAddress', 'artifactHosts', 'probe', 'preparedRuntime', 'resources')}
+    settings = {k: profile[k] for k in ('gatewayAddress', 'artifactHosts', 'resources')}
+    settings.update({k: profile[k] for k in (('paperCatalogs',) if 'paperCatalogs' in profile else ('probe', 'preparedRuntime'))})
     settings.update(runnerId=data['runnerId'], platformCredentialFile=str(stage/'credential'))
     private(stage/'settings.json', json.dumps(settings))
     private(stage/'updater.json', json.dumps({'apiOrigin': profile['apiOrigin'], 'credentialFile': str(stage/'updater-credential'), 'releasePublicKey': profile['releasePublicKey']}))

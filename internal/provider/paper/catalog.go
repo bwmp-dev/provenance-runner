@@ -14,41 +14,41 @@ const (
 )
 
 type ArtifactPin struct {
-	URI       string
-	SHA256    string
-	Filename  string
-	SizeBytes int64
+	URI       string `json:"uri"`
+	SHA256    string `json:"sha256"`
+	Filename  string `json:"filename"`
+	SizeBytes int64  `json:"sizeBytes"`
 }
 
 type PaperPin struct {
-	GameVersion string
-	Build       uint32
-	Artifact    ArtifactPin
+	GameVersion string      `json:"gameVersion"`
+	Build       uint32      `json:"build"`
+	Artifact    ArtifactPin `json:"artifact"`
 }
 
 type JavaPin struct {
-	Distribution         string
-	Version              string
-	OS                   string
-	Architecture         string
-	ArchiveRoot          string
-	Artifact             ArtifactPin
-	MaximumExpandedBytes int64
+	Distribution         string      `json:"distribution"`
+	Version              string      `json:"version"`
+	OS                   string      `json:"os"`
+	Architecture         string      `json:"architecture"`
+	ArchiveRoot          string      `json:"archiveRoot"`
+	Artifact             ArtifactPin `json:"artifact"`
+	MaximumExpandedBytes int64       `json:"maximumExpandedBytes"`
 }
 
 type ArchivePin struct {
-	Artifact             ArtifactPin
-	MaximumExpandedBytes int64
+	Artifact             ArtifactPin `json:"artifact"`
+	MaximumExpandedBytes int64       `json:"maximumExpandedBytes"`
 }
 
 type Catalog struct {
-	EnvironmentID     string
-	Paper             PaperPin
-	Java              JavaPin
-	ProbeVersion      string
-	ProbeSourceCommit string
-	Probe             ArtifactPin
-	PreparedRuntime   ArchivePin
+	EnvironmentID     string      `json:"environmentId"`
+	Paper             PaperPin    `json:"paper"`
+	Java              JavaPin     `json:"java"`
+	ProbeVersion      string      `json:"probeVersion"`
+	ProbeSourceCommit string      `json:"probeSourceCommit"`
+	Probe             ArtifactPin `json:"probe"`
+	PreparedRuntime   ArchivePin  `json:"preparedRuntime"`
 }
 
 func AlphaCatalog() Catalog {
