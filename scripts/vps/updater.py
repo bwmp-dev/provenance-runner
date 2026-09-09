@@ -192,10 +192,15 @@ def service(action):
 
 def no_scopes():
     uid = run('id', '-u', USER).decode().strip()
+    check(re.fullmatch(r'[1-9][0-9]*', uid), 'Invalid worker account identity')
     scopes = run('runuser', '-u', USER, '--', 'env', f'XDG_RUNTIME_DIR=/run/user/{uid}',
                  f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus', 'systemctl', '--user',
                  'list-units', '--type=scope', '--state=active,activating,deactivating', '--no-legend', '--plain').strip()
-    check(not scopes, 'Active sandbox scopes prevent replacement')
+    # Every systemd user manager owns init.scope for the manager itself.
+    # It is not a sandbox; all other listed scopes still block replacement.
+    rows = [line.split() for line in scopes.splitlines() if line.strip()]
+    check(not rows or (len(rows) == 1 and rows[0][:4] == [b'init.scope', b'loaded', b'active', b'running']),
+          'Active sandbox scopes prevent replacement')
 
 
 class Updater:
@@ -246,6 +251,7 @@ class Updater:
     def rollback(self, op):
         op['phase'] = 'rollback'
         self.save(op)
+        no_scopes()  # Refuse known active scopes before stopping the retained worker.
         service('stop')
         if not local_quiet():
             service('start')
@@ -282,6 +288,7 @@ class Updater:
             verify_release(release, self.config['releasePublicKey'])
             if not local_quiet():
                 return
+            no_scopes()  # Rechecked after stop; preflight refusal leaves the worker running.
             # Immutable backups are addressed by their verified complete bytes.
             protected(ROOT/'runner')
             old_hash = sha(ROOT/'runner')
