@@ -23,6 +23,38 @@ def settings():
             'resources': {'cpuMillis': 1000, 'memoryBytes': 1024**3, 'diskBytes': 1024**3, 'processCount': 512}}
 
 
+class HostOS(unittest.TestCase):
+    def test_supported_lts_releases(self):
+        for version in ('24.04', '26.04'):
+            with self.subTest(version=version), patch.object(i.platform, 'freedesktop_os_release',
+                    return_value={'ID': 'ubuntu', 'VERSION_ID': version}):
+                i.supported_host_os()
+
+    def test_other_releases_and_derivatives_are_refused(self):
+        for release in ({}, {'ID': 'ubuntu'}, {'VERSION_ID': '26.04'},
+                *({'ID': 'ubuntu', 'VERSION_ID': v} for v in ('22.04', '24.10', '26.10', '26.04.1', '28.04')),
+                {'ID': 'debian', 'VERSION_ID': '26.04'},
+                {'ID': 'linuxmint', 'ID_LIKE': 'ubuntu', 'VERSION_ID': '24.04'}):
+            with self.subTest(release=release), patch.object(i.platform, 'freedesktop_os_release', return_value=release):
+                with self.assertRaisesRegex(ValueError, 'Ubuntu 24.04 or 26.04'):
+                    i.supported_host_os()
+
+    def test_real_parser_reads_quoted_and_unquoted_release_files(self):
+        for version in ('24.04', '26.04'):
+            for quote in ('', '"', "'"):
+                with self.subTest(version=version, quote=quote), tempfile.TemporaryDirectory() as d:
+                    path = Path(d)/'os-release'
+                    path.write_text(f'NAME="Ubuntu"\nID={quote}ubuntu{quote}\nVERSION_ID={quote}{version}{quote}\n')
+                    with patch.object(i.platform, '_os_release_candidates', (str(path),)), \
+                            patch.object(i.platform, '_os_release_cache', None):
+                        i.supported_host_os()
+
+    def test_unreadable_os_metadata_fails_closed(self):
+        with patch.object(i.platform, 'freedesktop_os_release', side_effect=OSError('unavailable')):
+            with self.assertRaises(OSError):
+                i.supported_host_os()
+
+
 class Settings(unittest.TestCase):
     def test_platform_settings(self):
         value = settings()

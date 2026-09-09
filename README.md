@@ -141,5 +141,5 @@ Probe lifecycle output is bounded and fails closed on missing, malformed, duplic
 ## Platform-hosted runner installation
 
 Use the [platform-hosted VPS installer](docs/vps-install.md) to build a portable bundle and
-provision Ubuntu 24.04 with a non-root gVisor runner, boot services, and a platform runner credential. Customer self-hosted runners use
+provision Ubuntu 24.04 or 26.04 LTS with a non-root gVisor runner, boot services, and a platform runner credential. Customer self-hosted runners use
 a separate future installation workflow.

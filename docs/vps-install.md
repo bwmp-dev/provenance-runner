@@ -5,9 +5,14 @@ pool. Customer self-hosted runners will have a separate installation workflow.
 Organization enrollment fields are rejected.
 
 Use `scripts/vps/build-bundle.sh` on a trusted build machine, then run the bundled
-`install.sh` as root on a **fresh Ubuntu 24.04 LTS amd64 VPS with systemd, cgroup
+`install.sh` as root on a **fresh Ubuntu 24.04 or 26.04 LTS amd64 VPS with systemd, cgroup
 v2 and AppArmor**. The VPS needs outbound HTTPS and enough CPU, memory and disk
 for the capacity you advertise. No inbound runner port is required.
+
+Host release detection uses the standard `os-release` ID and VERSION_ID fields.
+Other distributions and interim Ubuntu releases are refused. Both supported hosts
+use the same checksum-pinned Ubuntu 24.04 guest rootfs; the sandbox image and its
+identity are independent of the host OS.
 
 This is a first-install path for the existing gVisor runtime. It does not replace
 the measured-generation upgrade tools or claim measured-runtime attestation.

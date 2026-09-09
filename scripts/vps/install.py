@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Platform-hosted Ubuntu 24.04 amd64 runner installation; never upgrades existing state."""
+"""Platform-hosted Ubuntu 24.04/26.04 LTS amd64 runner installation; never upgrades existing state."""
 import argparse
 import base64
 import hashlib
@@ -231,10 +231,16 @@ def connection_credential(value):
     return value
 
 
+def supported_host_os():
+    # Use the standard os-release parser: valid values may be quoted or unquoted.
+    release = platform.freedesktop_os_release()
+    require(release.get('ID') == 'ubuntu' and release.get('VERSION_ID') in ('24.04', '26.04'),
+            'Supported hosts: Ubuntu 24.04 or 26.04 LTS')
+
+
 def host_preflight(settings):
     require(platform.machine() == 'x86_64' and Path('/run/systemd/system').is_dir(), 'Requires amd64 VPS booted with systemd')
-    os_release = Path('/etc/os-release').read_text()
-    require('ID=ubuntu\n' in os_release and 'VERSION_ID="24.04"' in os_release, 'Supported host: Ubuntu 24.04 LTS')
+    supported_host_os()
     require(Path('/sys/fs/cgroup/cgroup.controllers').is_file(), 'cgroup v2 is required')
     for path in (ROOT, STATE, SYSTEM_UNIT, USER_UNIT, PROFILE):
         for parent in path.parents:
