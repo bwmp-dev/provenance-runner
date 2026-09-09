@@ -160,6 +160,14 @@ class Recovery(unittest.TestCase):
 
 
 class ReleaseCredentialScope(unittest.TestCase):
+    def test_client_keeps_redirects_disabled(self):
+        with patch.object(u, 'read', return_value=('pru_'+'a'*64).encode()), patch.object(u.urllib.request, 'build_opener') as factory:
+            u.Client({'credentialFile': '/operator/credential'})
+        handler = factory.call_args.args[0]
+        self.assertIsInstance(handler, u.NoRedirect)
+        with self.assertRaises(ValueError):
+            handler.redirect_request(None)
+
     def test_credentials_only_on_exact_assigned_api_path(self):
         payload = b'\x7fELF\x02\x01' + b'\x00'*12 + b'\x3e\x00'
         sha = hashlib.sha256(payload).hexdigest()
@@ -177,6 +185,31 @@ class ReleaseCredentialScope(unittest.TestCase):
                 client.opener = Opener()
                 client.download({'url':url,'sha256':sha,'sizeBytes':len(payload)},Path(tmp)/'runner')
                 self.assertEqual(client.opener.request.get_header('Authorization'), 'Bearer '+client.token if url==expected else None)
+                self.assertEqual(client.opener.request.get_header('User-agent'), 'Provenance-Hosted-Updater/1.0 (https://provenance.bwmp.dev)')
+                self.assertEqual(client.opener.request.full_url, url)
+                self.assertEqual(client.opener.request.get_method(), 'GET')
+
+
+    def test_poll_identifies_updater_and_preserves_request_authority(self):
+        import io
+        client = object.__new__(u.Client)
+        client.config = {'apiOrigin': 'https://api.example', 'runnerId': '10000000-0000-0000-0000-000000000001'}
+        client.token = 'pru_'+'a'*64
+        response = {'operationId': '', 'phase': 'wait', 'release': None, 'previousVersion': '', 'healthy': False, 'outcome': ''}
+        class Opener:
+            def open(self, request, timeout):
+                self.request, self.timeout = request, timeout
+                return io.BytesIO(json.dumps(response).encode())
+        client.opener = Opener()
+        self.assertEqual(client.poll(), response)
+        request = client.opener.request
+        self.assertEqual(request.full_url, client.config['apiOrigin']+'/v1/runner-updater/'+client.config['runnerId']+'/poll')
+        self.assertEqual(request.get_method(), 'POST')
+        self.assertEqual(request.get_header('User-agent'), 'Provenance-Hosted-Updater/1.0 (https://provenance.bwmp.dev)')
+        self.assertEqual(request.get_header('Authorization'), 'Bearer '+client.token)
+        self.assertEqual(request.get_header('Content-type'), 'application/json')
+        self.assertEqual(json.loads(request.data), {'operationId': '', 'report': 'idle'})
+        self.assertEqual(client.opener.timeout, 30)
 
 
 class MalformedCommands(unittest.TestCase):

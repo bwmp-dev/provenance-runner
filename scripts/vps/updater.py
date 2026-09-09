@@ -20,6 +20,7 @@ WORK = ROOT/'update-state'
 UNIT = 'provenance-runner.service'
 USER = 'provenance-worker'
 MAX_BINARY = 512*1024**2
+USER_AGENT = 'Provenance-Hosted-Updater/1.0 (https://provenance.bwmp.dev)'
 
 
 def check(ok, message):
@@ -125,7 +126,7 @@ class Client:
     def poll(self, operation='', report='idle'):
         body = json.dumps({'operationId': operation, 'report': report}).encode()
         url = self.config['apiOrigin']+'/v1/runner-updater/'+self.config['runnerId']+'/poll'
-        request = urllib.request.Request(url, data=body, headers={'Authorization': 'Bearer '+self.token, 'Content-Type': 'application/json'}, method='POST')
+        request = urllib.request.Request(url, data=body, headers={'Authorization': 'Bearer '+self.token, 'Content-Type': 'application/json', 'User-Agent': USER_AGENT}, method='POST')
         with self.opener.open(request, timeout=30) as response:
             data = response.read(65537)
         check(len(data) <= 65536, 'Oversized update command')
@@ -140,7 +141,7 @@ class Client:
         return result
 
     def download(self, release, destination):
-        headers = {}
+        headers = {'User-Agent': USER_AGENT}
         origin = self.config['apiOrigin']
         if release['url'] == origin+'/v1/runner-releases/'+release['sha256']:
             headers['Authorization'] = 'Bearer '+self.token

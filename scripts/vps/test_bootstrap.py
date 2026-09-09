@@ -86,6 +86,27 @@ class ManifestSafety(unittest.TestCase):
             data=self.valid();data['profile']['bundle']['uri']=url
             with self.subTest(url=url),self.assertRaises(ValueError):b.validate(data)
 
+    def test_bundle_request_identifies_bootstrap_without_credentials(self):
+        import hashlib
+        from unittest.mock import patch
+        class Response(io.BytesIO): status = 200
+        class Opener:
+            def open(self, request, timeout):
+                self.request, self.timeout = request, timeout
+                return Response(b'ok')
+        opener = Opener()
+        asset = {'uri': 'https://assets.example/bundle?signature=synthetic', 'sizeBytes': 2, 'sha256': hashlib.sha256(b'ok').hexdigest()}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(b.urllib.request, 'build_opener', return_value=opener) as factory:
+            b.download(asset, Path(tmp)/'bundle')
+        self.assertEqual(opener.request.full_url, asset['uri'])
+        self.assertEqual(opener.request.get_method(), 'GET')
+        self.assertEqual(opener.request.get_header('User-agent'), 'Provenance-Hosted-Bootstrap/1.0 (https://provenance.bwmp.dev)')
+        self.assertIsNone(opener.request.get_header('Authorization'))
+        self.assertEqual(opener.timeout, 60)
+        self.assertIsInstance(factory.call_args.args[0], b.urllib.request.ProxyHandler)
+        self.assertEqual(factory.call_args.args[0].proxies, {})
+        self.assertIsInstance(factory.call_args.args[1], b.NoRedirect)
+
     def test_download_enforces_size_and_hash(self):
         import hashlib
         from unittest.mock import patch
