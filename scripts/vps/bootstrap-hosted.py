@@ -15,6 +15,8 @@ import urllib.request
 from urllib.parse import urlsplit
 import uuid
 
+USER_AGENT = 'Provenance-Hosted-Bootstrap/1.0 (https://provenance.bwmp.dev)'
+
 FILES = {'runner', 'runsc', 'rootfs.tar', 'install.sh', 'install.py',
          'prepare-gvisor-rootfs.sh', 'settings.example.json', 'SOURCE_COMMIT',
          'updater.py', 'sign-release.py', 'SHA256SUMS'}
@@ -66,7 +68,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def download(asset, target):
     digest = hashlib.sha256()
     total = 0
-    with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(asset['uri'], timeout=60) as response, target.open('xb') as out:
+    request = urllib.request.Request(asset['uri'], headers={'User-Agent': USER_AGENT})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=60) as response, target.open('xb') as out:
         require(response.status == 200, 'Bundle download failed')
         while block := response.read(min(1024**2, asset['sizeBytes'] - total + 1)):
             total += len(block)
