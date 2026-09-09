@@ -39,6 +39,16 @@ class HostOS(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Ubuntu 24.04 or 26.04'):
                     i.supported_host_os()
 
+    def test_real_parser_reads_quoted_and_unquoted_release_files(self):
+        for version in ('24.04', '26.04'):
+            for quote in ('', '"', "'"):
+                with self.subTest(version=version, quote=quote), tempfile.TemporaryDirectory() as d:
+                    path = Path(d)/'os-release'
+                    path.write_text(f'NAME="Ubuntu"\nID={quote}ubuntu{quote}\nVERSION_ID={quote}{version}{quote}\n')
+                    with patch.object(i.platform, '_os_release_candidates', (str(path),)), \
+                            patch.object(i.platform, '_os_release_cache', None):
+                        i.supported_host_os()
+
     def test_unreadable_os_metadata_fails_closed(self):
         with patch.object(i.platform, 'freedesktop_os_release', side_effect=OSError('unavailable')):
             with self.assertRaises(OSError):
