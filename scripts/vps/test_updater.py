@@ -13,6 +13,48 @@ u = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(u)
 
 
+INIT_SCOPE = b'init.scope loaded active running System and Service Manager\n'
+
+def worker_scope_command(*args):
+    if args == ('id', '-u', u.USER):
+        return b'994\n'
+    if args == ('runuser', '-u', u.USER, '--', 'env', 'XDG_RUNTIME_DIR=/run/user/994',
+                'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/994/bus', 'systemctl', '--user',
+                'list-units', '--type=scope', '--state=active,activating,deactivating', '--no-legend', '--plain'):
+        return INIT_SCOPE
+    raise AssertionError('Unexpected scope inspection command')
+
+
+class ScopeInspection(unittest.TestCase):
+    def test_empty_or_exact_user_manager_scope_allows_replacement(self):
+        for output in (b'', INIT_SCOPE, b'  '+INIT_SCOPE+b'\n'):
+            with self.subTest(output=output), patch.object(u, 'run', side_effect=[b'994\n', output]) as run:
+                u.no_scopes()
+                self.assertEqual(len(run.call_args_list), 2)
+                for call in run.call_args_list:
+                    worker_scope_command(*call.args)
+
+    def test_any_other_scope_or_ambiguous_manager_row_refuses(self):
+        for output in (
+            INIT_SCOPE+b'provenance-test.scope loaded active running sandbox\n',
+            b'other.scope loaded activating start unknown\n',
+            b'init.scope-extra loaded active running manager\n',
+            b'evil.scope loaded active running init.scope\n',
+            b'init.scope', b'init.scope not-found active running manager\n',
+            b'init.scope loaded deactivating stop manager\n', INIT_SCOPE+INIT_SCOPE,
+        ):
+            with self.subTest(output=output), patch.object(u, 'run', side_effect=[b'994\n', output]):
+                with self.assertRaises(ValueError): u.no_scopes()
+
+    def test_failed_command_and_invalid_worker_uid_fail_closed(self):
+        for uid in (b'0\n', b'994\n995', b'../994', b'worker'):
+            with self.subTest(uid=uid), patch.object(u, 'run', return_value=uid) as run:
+                with self.assertRaises(ValueError): u.no_scopes()
+                self.assertEqual(run.call_count, 1)
+        with patch.object(u, 'run', side_effect=[b'994\n', OSError('inspection unavailable')]):
+            with self.assertRaises(OSError): u.no_scopes()
+
+
 class Signatures(unittest.TestCase):
     def test_ed25519_binds_every_release_field_and_operator_key(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -96,7 +138,7 @@ class Recovery(unittest.TestCase):
             rollback.assert_called_once()
 
     def test_pending_terminal_replay_restarts_retained_worker_without_switch(self):
-        with patch.object(u, 'service') as service, patch.object(u, 'local_quiet', return_value=False), patch.object(self.updater, 'switch') as switch:
+        with patch.object(u, 'service') as service, patch.object(u, 'run', side_effect=worker_scope_command), patch.object(u, 'local_quiet', return_value=False), patch.object(self.updater, 'switch') as switch:
             self.updater.rollback(self.op)
             self.assertEqual([c.args for c in service.call_args_list], [('stop',), ('start',)])
             switch.assert_not_called()
@@ -125,13 +167,46 @@ class Recovery(unittest.TestCase):
                 self.client.poll = poll
                 self.client.download = lambda release, path: path.write_bytes(b"new-binary")
                 self.updater.config = {'releasePublicKey': 'fixture'}
-                with patch.object(u, 'verify_release'), patch.object(u, 'local_quiet', return_value=True), patch.object(u, 'no_scopes'), patch.object(u, 'service'), patch.object(self.updater, 'healthy', side_effect=[healthy, True] if not healthy else [True]):
+                with patch.object(u, 'verify_release'), patch.object(u, 'local_quiet', return_value=True), patch.object(u, 'run', side_effect=worker_scope_command), patch.object(u, 'service'), patch.object(self.updater, 'healthy', side_effect=[healthy, True] if not healthy else [True]):
                     self.updater.step()
                 self.assertEqual(old.read_bytes(), expected)
                 journal = json.loads(self.updater.journal.read_text())
                 self.assertEqual(journal['phase'], 'complete')
                 self.assertEqual(journal['report'], report)
                 self.assertEqual((self.work/(old_hash+'.elf')).read_bytes(), b"old-binary")
+
+    def test_interrupted_install_recovers_with_real_manager_scope(self):
+        old = b'old-binary'
+        old_hash = hashlib.sha256(old).hexdigest()
+        (self.work/(old_hash+'.elf')).write_bytes(old)
+        (self.root/'runner').write_bytes(b'interrupted-new-binary')
+        (self.root/'installed.json').write_text(json.dumps({'runnerSha256': 'interrupted'}))
+        op = {'id': self.op['id'], 'phase': 'staged', 'oldSha256': old_hash}
+        self.updater.save(op)
+        def poll(operation='', report='idle'):
+            if report == 'rolled_back': return {'phase': 'complete', 'outcome': 'rolled_back'}
+            return {'phase': 'install'}
+        self.client.poll = poll
+        with patch.object(u, 'run', side_effect=worker_scope_command), patch.object(u, 'local_quiet', return_value=True), patch.object(u, 'service') as service, patch.object(self.updater, 'healthy', return_value=True):
+            self.updater.step()
+        self.assertEqual((self.root/'runner').read_bytes(), old)
+        self.assertEqual([call.args for call in service.call_args_list], [('stop',), ('start',)])
+        self.assertEqual(json.loads(self.updater.journal.read_text())['phase'], 'complete')
+        self.assertEqual(json.loads(self.updater.journal.read_text())['report'], 'rolled_back')
+
+    def test_scope_preflight_refuses_install_and_recovery_before_service_stop(self):
+        busy = INIT_SCOPE+b'provenance-job.scope loaded active running sandbox\n'
+        self.client.response = {'phase': 'install', 'operationId': self.op['id'], 'release': {}}
+        self.updater.config = {'releasePublicKey': 'fixture'}
+        with patch.object(u, 'verify_release'), patch.object(u, 'local_quiet', return_value=True), patch.object(u, 'run', side_effect=[b'994\n', busy]), patch.object(u, 'service') as service:
+            self.updater.step()
+            service.assert_not_called()
+        self.assertFalse(self.updater.journal.exists())
+        self.assertEqual(self.client.requests[-1], (self.op['id'], 'failed'))
+        with patch.object(u, 'run', side_effect=[b'994\n', busy]), patch.object(u, 'service') as service, patch.object(self.updater, 'switch') as switch:
+            with self.assertRaises(ValueError): self.updater.rollback(self.op)
+            service.assert_not_called()
+            switch.assert_not_called()
 
     def test_invalid_signed_release_reports_failure_without_stopping_worker(self):
         self.client.response = {'phase': 'install', 'operationId': self.op['id'], 'release': {}}
