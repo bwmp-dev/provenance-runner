@@ -75,7 +75,15 @@ preservation of a separately allocated unrelated loop. It verifies owned loop
 and mount absence before successful container removal. Failed guests are stopped
 and retained. This is not a hostile-plugin fixture or a real image build proof.
 
-Still required: actual boot/reboot sequencing, reviewed drained selection and
+The fixture then enables a synthetic root wrapper, restarts only its private
+container, observes a fresh PID 1 and empty `/run`, and requires successful
+mount-helper-before-user-runner startup. It verifies the active mapping again,
+stops the wrapper and mount, and proves owned loop absence. This exercises real
+systemd cold-start ordering, not a host-kernel reboot or the signed updater. The
+fixture explicitly configures the user manager's unit search path to match the
+hosted fragment path; the helper does not accept Ubuntu's alternate XDG alias.
+
+Still required: production host boot/reboot acceptance, reviewed drained selection and
 rollback, fixed-path signed updater integration, measured Paper-to-terminal
 identity and restart/replay/cleanup acceptance. Passing this helper's tests does
 not complete those gates or authorize unattended production activation.

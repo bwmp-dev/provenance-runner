@@ -36,8 +36,17 @@ for attempt in {1..60}; do
   sleep 0.5
 done
 docker exec "$container" systemctl is-system-running --quiet
-for file in runtime-generation.py measured-rootfs-boot.py test-measured-rootfs-boot-fixture.py; do
+for file in runtime-generation.py measured-rootfs-boot.py test-measured-rootfs-boot-fixture.py test-measured-rootfs-boot-wrapper.py; do
   docker cp "$scripts/$file" "$container:/opt/$file"
 done
 docker exec "$container" python3 -c 'from pathlib import Path; p=Path("/run/provenance-boot-disposable"); f=p.open("x"); f.write("measured-boot-disposable-only\n"); f.close()'
 timeout 240s docker exec "$container" python3 -B /opt/test-measured-rootfs-boot-fixture.py
+timeout 120s docker exec "$container" python3 -B /opt/test-measured-rootfs-boot-wrapper.py prepare
+# Fresh PID 1 and /run, persistent private guest files, no host reboot.
+docker restart --timeout 20 "$container" >/dev/null
+for attempt in {1..120}; do
+  if docker exec "$container" systemctl is-system-running --quiet 2>/dev/null; then break; fi
+  sleep 0.5
+done
+docker exec "$container" systemctl is-system-running --quiet
+timeout 120s docker exec "$container" python3 -B /opt/test-measured-rootfs-boot-wrapper.py verify-cleanup
