@@ -106,6 +106,11 @@ No systemd mount unit is installed: a reboot invalidates the loop/mount identity
 and verification fails closed until separately reviewed reprovisioning. Do not
 enable the service for unattended startup using this temporary alpha generation.
 
+The separate [measured rootfs boot helper](measured-rootfs-boot.md) introduces a
+mount-only layout compatible with the hosted user-manager wrapper and fixed-path
+signed updater. It is not an automatic upgrade or selector for these inactive
+generations; production selection and reboot acceptance remain separate gates.
+
 ## Acceptance and remaining gate
 
 On restricted-userns CI hosts, the synthetic retained-root guest executes inside
