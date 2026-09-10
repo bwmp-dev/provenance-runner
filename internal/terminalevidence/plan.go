@@ -87,6 +87,16 @@ func validatedConfiguration(raw []byte) (map[string]any, error) {
 // NewContext requires already normalized schema-valid configuration. It never
 // supplies defaults, rewrites hashes or borrows mutable runner capabilities.
 func NewContext(job *runnerv1.JobSpecification) (*Context, error) {
+	return newContext(job, false)
+}
+
+// NewContextV2 binds literal operators to a distinct version. Callers must not
+// use this until v2 is admitted; existing contexts and queued bytes remain v1.
+func NewContextV2(job *runnerv1.JobSpecification) (*Context, error) {
+	return newContext(job, true)
+}
+
+func newContext(job *runnerv1.JobSpecification, v2 bool) (*Context, error) {
 	if job == nil || job.GetEnvironment().GetProvider() != runnerv1.ServerProvider_SERVER_PROVIDER_PAPER || job.GetEffectivePolicy() == nil {
 		return nil, ErrInvalid
 	}
@@ -132,6 +142,7 @@ func NewContext(job *runnerv1.JobSpecification) (*Context, error) {
 		return nil, ErrInvalid
 	}
 	c := &Context{binding: b, requested: map[string]any{"artifactSha256": artifact, "configurationSha256": configuration, "environmentSha256": environment, "policySha256": policy}, planned: map[string]planned{}}
+	c.v2 = v2
 	add := func(id, kind, name string, supported bool, selector map[string]string) error {
 		if !identifier.MatchString(id) {
 			return ErrInvalid
@@ -184,7 +195,11 @@ func NewContext(job *runnerv1.JobSpecification) (*Context, error) {
 	for _, test := range config.Tests.Console {
 		for n, a := range test.Assertions {
 			selector := fmt.Sprintf("%s:%d", test.ID, n+1)
-			if err := add("console-regex:"+selector, "console-regex", "", a.Operator != nil && *a.Operator == "regex", map[string]string{"testId": test.ID, "assertionId": selector}); err != nil {
+			kind, supported := "console-regex", a.Operator != nil && *a.Operator == "regex"
+			if v2 && a.Operator != nil && *a.Operator == "contains" {
+				kind, supported = "console-contains", true
+			}
+			if err := add(kind+":"+selector, kind, "", supported, map[string]string{"testId": test.ID, "assertionId": selector}); err != nil {
 				return nil, err
 			}
 		}

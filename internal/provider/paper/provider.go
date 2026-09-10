@@ -464,7 +464,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err != nil {
 		return nil, fmt.Errorf("create Paper workspace: %w", err)
 	}
-	prepared := &preparedEnvironment{workspace: jobWorkspace, plan: e.config.TestPlan}
+	prepared := &preparedEnvironment{workspace: jobWorkspace, plan: e.config.TestPlan, terminalEvidenceV2: e.request.TerminalEvidenceV2}
 	workload, err := e.materialize(ctx, jobWorkspace, acquired)
 	if err != nil {
 		return prepared, err
@@ -676,12 +676,13 @@ view-distance=2
 `
 
 type preparedEnvironment struct {
-	mu                sync.Mutex
-	workspace         *workspace.Workspace
-	delegate          execution.PreparedEnvironment
-	cleaned           bool
-	workspaceSeedFail bool
-	plan              testPlan
+	terminalEvidenceV2 bool
+	mu                 sync.Mutex
+	workspace          *workspace.Workspace
+	delegate           execution.PreparedEnvironment
+	cleaned            bool
+	workspaceSeedFail  bool
+	plan               testPlan
 }
 
 func (p *preparedEnvironment) AttachObserver(observer execution.ExecutionObserver) {
@@ -719,7 +720,7 @@ func (p *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 	if workspaceSeedFail {
 		return output, nil
 	}
-	events, lifecycleErr := validateProbeLifecycle(output, p.plan, &output.TerminalObservations)
+	events, lifecycleErr := validateProbeLifecycleVersion(output, p.plan, p.terminalEvidenceV2, &output.TerminalObservations)
 	output.StructuredEvents = events
 	output.EvidenceUsage.StructuredEventCount = int64(len(events))
 	output.EvidenceUsage.StructuredEventBytes = 0

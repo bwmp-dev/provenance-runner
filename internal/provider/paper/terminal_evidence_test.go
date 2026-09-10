@@ -61,3 +61,33 @@ func TestConsoleProjectionRequiresExplicitRegex(t *testing.T) {
 		}
 	}
 }
+
+func TestV2ConsoleProjectionUsesExplicitValidatedOperator(t *testing.T) {
+	for _, operator := range []string{"regex", "contains", ""} {
+		for _, passed := range []bool{true, false} {
+			plan := testPlan{TargetPlugin: "SuccessFixture", Console: []consoleCommandTest{{ID: "version-command", Assertions: []commandAssertion{{Operator: operator}}}}}
+			var observations []terminalevidence.Observation
+			_, err := validateProbeLifecycleVersion(commandProbeOutput(passed), plan, true, &observations)
+			if (err == nil) != passed {
+				t.Fatal("lifecycle failure classification changed", err)
+			}
+			count := 0
+			for _, o := range observations {
+				if o.Type != "console-regex" && o.Type != "console-contains" {
+					continue
+				}
+				count++
+				kind := "console-regex"
+				if operator == "contains" {
+					kind = "console-contains"
+				}
+				if o.Type != kind || o.TestID != "version-command" || o.AssertionID != "version-command:1" || !o.Registered || !o.ExecutionCompleted || !o.Evaluated || o.Passed != passed || o.OutputTruncated {
+					t.Fatal("validated operator/facts changed")
+				}
+			}
+			if (count == 1) != (operator != "") {
+				t.Fatal("implicit/default operator produced evidence")
+			}
+		}
+	}
+}

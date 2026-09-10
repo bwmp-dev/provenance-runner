@@ -351,6 +351,12 @@ func (e *probeLifecycleFailure) Unwrap() error {
 }
 
 func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan, projection ...*[]terminalevidence.Observation) ([]execution.StructuredEvent, error) {
+	return validateProbeLifecycleVersion(output, plan, false, projection...)
+}
+
+// V2 projection remains opt-in until the execution context and gateway admit it.
+// Both versions use the same validated event state machine, not raw log matching.
+func validateProbeLifecycleVersion(output execution.CollectedOutput, plan testPlan, v2 bool, projection ...*[]terminalevidence.Observation) ([]execution.StructuredEvent, error) {
 	var observations []terminalevidence.Observation
 	defer func() {
 		for _, target := range projection {
@@ -519,10 +525,14 @@ func validateProbeLifecycle(output execution.CollectedOutput, plan testPlan, pro
 			if envelope.Type == "COMMAND_ASSERTION" {
 				assertionID, _ := requiredString(envelope.Data, "assertionId")
 				for n, assertion := range plan.Console[commandIndex].Assertions {
-					if assertion.Operator == "regex" && assertionID == fmt.Sprintf("%s:%d", testID, n+1) {
+					if (assertion.Operator == "regex" || (v2 && assertion.Operator == "contains")) && assertionID == fmt.Sprintf("%s:%d", testID, n+1) {
+						kind := "console-regex"
+						if assertion.Operator == "contains" {
+							kind = "console-contains"
+						}
 						evaluated, _ := requiredBoolean(envelope.Data, "evaluated")
 						passed, _ := requiredBoolean(envelope.Data, "passed")
-						observations = append(observations, terminalevidence.Observation{Type: "console-regex", TestID: testID, AssertionID: assertionID, Registered: state.registered, ExecutionCompleted: state.executionCompleted, Evaluated: evaluated, Passed: passed, OutputTruncated: state.outputTruncated})
+						observations = append(observations, terminalevidence.Observation{Type: kind, TestID: testID, AssertionID: assertionID, Registered: state.registered, ExecutionCompleted: state.executionCompleted, Evaluated: evaluated, Passed: passed, OutputTruncated: state.outputTruncated})
 					}
 				}
 			}

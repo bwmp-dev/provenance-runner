@@ -71,9 +71,11 @@ type Config struct {
 	// Operator rollback control only, never serialized. Queued proof is retained
 	// and refused rather than stripped when this disables advertisement.
 	DisableTerminalEvidence bool `json:"-"`
-	credential              []byte
-	journalFile             string
-	credentialStore         durableCredentialStore
+	// Explicit consumer-first rollout opt-in. Never accepted from job JSON.
+	EnableTerminalEvidenceV2 bool `json:"-"`
+	credential               []byte
+	journalFile              string
+	credentialStore          durableCredentialStore
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {

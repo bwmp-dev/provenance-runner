@@ -30,6 +30,7 @@ type journalJob struct {
 	OfferMessageID       string            `json:"offerMessageId"`
 	OfferDigest          []byte            `json:"offerDigest"`
 	JobCorrelationV1     bool              `json:"jobCorrelationV1,omitempty"`
+	TerminalEvidenceV2   bool              `json:"terminalEvidenceV2,omitempty"`
 	Phase                runnerv1.JobPhase `json:"phase"`
 	ExpiresAt            time.Time         `json:"expiresAt"`
 	CancellationID       string            `json:"cancellationId,omitempty"`

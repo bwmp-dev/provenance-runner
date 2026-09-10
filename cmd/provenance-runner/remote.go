@@ -21,15 +21,29 @@ type connectedWorker struct {
 }
 
 func (w *connectedWorker) Execute(ctx context.Context, specification *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error) execution.Result {
+	return w.execute(ctx, specification, beforeExecute, false)
+}
+
+// ExecuteV2 is only for an admitted v2 job. The supervisor must opt in explicitly;
+// ordinary Execute retains v1 semantics for existing callers and replay.
+func (w *connectedWorker) ExecuteV2(ctx context.Context, specification *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error) execution.Result {
+	return w.execute(ctx, specification, beforeExecute, true)
+}
+
+func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error, v2 bool) execution.Result {
 	job, err := w.adapter.AdaptJob(specification)
 	if err != nil {
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "remote_job_adaptation_failed", err)
 	}
-	proofContext, err := terminalevidence.NewContext(specification)
+	buildContext := terminalevidence.NewContext
+	if v2 {
+		buildContext = terminalevidence.NewContextV2
+	}
+	proofContext, err := buildContext(specification)
 	if err != nil {
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "terminal_evidence_context_invalid", terminalevidence.ErrInvalid)
 	}
-	executor, err := execution.NewExecutor(w.registry, execution.ExecutorOptions{BeforeExecute: beforeExecute})
+	executor, err := execution.NewExecutor(w.registry, execution.ExecutorOptions{BeforeExecute: beforeExecute, TerminalEvidenceV2: v2})
 	if err != nil {
 		return execution.FailedResult(job.ID, execution.PhaseValidation, execution.ClassificationInfrastructureFailure, "runner_initialization_failed", err)
 	}
