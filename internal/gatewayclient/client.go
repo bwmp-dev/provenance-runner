@@ -51,6 +51,11 @@ type RemoteWorker interface {
 	Execute(context.Context, *runnerv1.JobSpecification, func(context.Context, execution.ExecutionStart) error) execution.Result
 }
 
+type RemoteWorkerV2 interface {
+	RemoteWorker
+	ExecuteV2(context.Context, *runnerv1.JobSpecification, func(context.Context, execution.ExecutionStart) error) execution.Result
+}
+
 type permanentError struct {
 	err error
 }
@@ -347,6 +352,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		restartUploadRecovery: restartUploadRecovery,
 		objectUploadIdentity:  objectUploadIdentity,
 		terminalEvidenceV1:    advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V1),
+		terminalEvidenceV2:    advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V2),
 		seen:                  make(map[string][sha256.Size]byte),
 		rootContext:           ctx,
 		cancelSession:         cancel,
@@ -529,6 +535,9 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	}
 	if !c.config.DisableTerminalEvidence {
 		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V1)
+		if _, ok := c.worker.(RemoteWorkerV2); c.config.EnableTerminalEvidenceV2 && ok {
+			features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V2)
+		}
 	}
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,

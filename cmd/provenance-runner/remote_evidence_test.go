@@ -16,6 +16,7 @@ import (
 )
 
 type evidenceRemoteProvider struct {
+	v2       bool
 	observed []terminalevidence.Observation
 	executed int
 }
@@ -25,8 +26,51 @@ func (p *evidenceRemoteProvider) Identity() string { return "test-only" }
 func (p *evidenceRemoteProvider) AdaptJob(j *runnerv1.JobSpecification) (localjob.Job, error) {
 	return localjob.Job{SchemaVersion: localjob.SchemaVersion, ID: j.Lease.JobId, Provider: "paper", Environment: json.RawMessage(`{}`), MaxOutputBytes: 1024}, nil
 }
-func (p *evidenceRemoteProvider) Resolve(context.Context, execution.Request) (execution.Environment, error) {
+func (p *evidenceRemoteProvider) Resolve(_ context.Context, request execution.Request) (execution.Environment, error) {
+	p.v2 = request.TerminalEvidenceV2
 	return p, nil
+}
+
+func TestConnectedWorkerV2CarriesInternalVersion(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/terminalevidence/testdata/platform-created-job.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := new(runnerv1.JobSpecification)
+	if err := protojson.Unmarshal(raw, job); err != nil {
+		t.Fatal(err)
+	}
+	job.Lease = &runnerv1.LeaseIdentity{LeaseId: "lease-1", JobId: "job-1", ExecutionId: "execution-1"}
+	job.Attempt = &runnerv1.AttemptIdentity{AttemptId: "attempt-1", ReleaseCandidateId: "candidate-1", MatrixEntryId: "matrix-1", AttemptNumber: 1}
+	p := &evidenceRemoteProvider{}
+	registry, err := execution.NewRegistry(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &connectedWorker{registry: registry, adapter: p}
+	result := w.ExecuteV2(context.Background(), job, nil)
+	if !result.Passed() || !p.v2 {
+		t.Fatal("v2 not propagated to provider")
+	}
+	proof, err := terminalevidence.Build(result.TerminalContext, "runner-1", result.TerminalObservations)
+	if err != nil || terminalevidence.ValidateFrozenV2(proof, job, "runner-1") != nil {
+		t.Fatal("v2 context not preserved", err)
+	}
+	if terminalevidence.ValidateFrozen(proof, job, "runner-1") == nil {
+		t.Fatal("v2 represented as v1")
+	}
+	result = w.Execute(context.Background(), job, nil)
+	if !result.Passed() || p.v2 {
+		t.Fatal("v2 leaked into following v1 job")
+	}
+	proof, err = terminalevidence.Build(result.TerminalContext, "runner-1", nil)
+	if err != nil || terminalevidence.ValidateFrozen(proof, job, "runner-1") != nil {
+		t.Fatal("legacy context changed", err)
+	}
+	encoded, err := json.Marshal(execution.Request{TerminalEvidenceV2: true})
+	if err != nil || bytes.Contains(encoded, []byte("TerminalEvidenceV2")) {
+		t.Fatal("internal selector serialized")
+	}
 }
 func (p *evidenceRemoteProvider) Prepare(context.Context) (execution.PreparedEnvironment, error) {
 	return p, nil

@@ -28,6 +28,7 @@ type clientSession struct {
 	restartUploadRecovery         bool
 	objectUploadIdentity          bool
 	terminalEvidenceV1            bool
+	terminalEvidenceV2            bool
 	seen                          map[string][sha256.Size]byte
 	seenOrder                     []string
 	pendingHeartbeat              *runnerv1.RunnerMessage
@@ -185,12 +186,13 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 			return errors.New("runner became busy while accepting the lease")
 		}
 		state.Active = &journalJob{
-			Specification:    specification,
-			OfferMessageID:   envelope.GetMessageId(),
-			OfferDigest:      bytes.Clone(offerDigest[:]),
-			JobCorrelationV1: s.jobCorrelationV1,
-			Phase:            runnerv1.JobPhase_JOB_PHASE_ACCEPTED,
-			ExpiresAt:        offer.GetJob().GetLease().GetExpiresAt().AsTime(),
+			Specification:      specification,
+			OfferMessageID:     envelope.GetMessageId(),
+			OfferDigest:        bytes.Clone(offerDigest[:]),
+			JobCorrelationV1:   s.jobCorrelationV1,
+			TerminalEvidenceV2: s.terminalEvidenceV2,
+			Phase:              runnerv1.JobPhase_JOB_PHASE_ACCEPTED,
+			ExpiresAt:          offer.GetJob().GetLease().GetExpiresAt().AsTime(),
 		}
 		return nil
 	})
@@ -1348,6 +1350,17 @@ func (c *Client) startWorker(ctx context.Context) error {
 		c.workerMu.Unlock()
 		return err
 	}
+	execute := c.worker.Execute
+	if state.Active.TerminalEvidenceV2 {
+		worker, ok := c.worker.(interface {
+			ExecuteV2(context.Context, *runnerv1.JobSpecification, func(context.Context, execution.ExecutionStart) error) execution.Result
+		})
+		if !ok {
+			c.workerMu.Unlock()
+			return errors.New("active v2 evidence job requires a v2 worker")
+		}
+		execute = worker.ExecuteV2
+	}
 	workerContext, cancel := context.WithCancel(ctx)
 	observer := newLiveExecutionObserver(c, specification)
 	workerContext = execution.WithObserver(workerContext, observer)
@@ -1357,7 +1370,7 @@ func (c *Client) startWorker(ctx context.Context) error {
 	c.workerMu.Unlock()
 	go func() {
 		defer c.workerWG.Done()
-		result := c.worker.Execute(workerContext, specification, func(startContext context.Context, _ execution.ExecutionStart) error {
+		result := execute(workerContext, specification, func(startContext context.Context, _ execution.ExecutionStart) error {
 			response := make(chan error, 1)
 			select {
 			case c.workerEvents <- workerEvent{start: response}:

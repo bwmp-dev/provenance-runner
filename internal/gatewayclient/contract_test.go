@@ -53,7 +53,8 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	const authority = "v0.0.0-20260907002217-f17e6b0db950"
+	// Exact CI-accepted toolkit source; no new tagged release is claimed here.
+	const authority = "v0.0.0-20260910180251-e7b5404fe9a7"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)
@@ -71,5 +72,5 @@ func TestExpectedProtocolModuleAuthority(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("released protocol module is absent from go.mod")
+	t.Fatal("pinned protocol module is absent from go.mod")
 }

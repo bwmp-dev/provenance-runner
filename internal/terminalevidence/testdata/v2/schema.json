@@ -1,0 +1,578 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenance.dev/schemas/execution-evidence/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "binding",
+    "requested",
+    "runtime",
+    "assertions",
+    "completeness"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "provenance.execution-evidence/v2"
+    },
+    "binding": {
+      "$ref": "#/$defs/binding"
+    },
+    "requested": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactSha256",
+        "configurationSha256",
+        "environmentSha256",
+        "policySha256",
+        "dependencies"
+      ],
+      "properties": {
+        "artifactSha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "configurationSha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "environmentSha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "policySha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "sha256"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "sha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/runtime"
+        }
+      ]
+    },
+    "assertions": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "outcome", "evidence", "evidenceSha256"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "type": {
+                "const": "startup-ready"
+              },
+              "outcome": {
+                "$ref": "#/$defs/outcome"
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["binding", "id", "type", "outcome", "observation"],
+                "properties": {
+                  "binding": {
+                    "$ref": "#/$defs/binding"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "type": {
+                    "const": "startup-ready"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/outcome"
+                  },
+                  "observation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "serverLoaded",
+                      "stabilizationCompleted",
+                      "serverReady",
+                      "requirementsSatisfied"
+                    ],
+                    "properties": {
+                      "serverLoaded": {
+                        "type": "boolean"
+                      },
+                      "stabilizationCompleted": {
+                        "type": "boolean"
+                      },
+                      "serverReady": {
+                        "type": "boolean"
+                      },
+                      "requirementsSatisfied": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "evidenceSha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "outcome", "evidence", "evidenceSha256"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "type": {
+                "const": "plugin-enabled"
+              },
+              "outcome": {
+                "$ref": "#/$defs/outcome"
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["binding", "id", "type", "outcome", "observation"],
+                "properties": {
+                  "binding": {
+                    "$ref": "#/$defs/binding"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "type": {
+                    "const": "plugin-enabled"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/outcome"
+                  },
+                  "observation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["targetId", "loaded", "enabled"],
+                    "properties": {
+                      "targetId": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "loaded": {
+                        "type": "boolean"
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "evidenceSha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "outcome", "evidence", "evidenceSha256"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "type": {
+                "const": "dependency-present"
+              },
+              "outcome": {
+                "$ref": "#/$defs/outcome"
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["binding", "id", "type", "outcome", "observation"],
+                "properties": {
+                  "binding": {
+                    "$ref": "#/$defs/binding"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "type": {
+                    "const": "dependency-present"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/outcome"
+                  },
+                  "observation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "dependencyId",
+                      "dependencySha256",
+                      "loaded",
+                      "enabled"
+                    ],
+                    "properties": {
+                      "dependencyId": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "dependencySha256": {
+                        "$ref": "#/$defs/hash"
+                      },
+                      "loaded": {
+                        "type": "boolean"
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "evidenceSha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "outcome", "evidence", "evidenceSha256"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "type": {
+                "const": "console-regex"
+              },
+              "outcome": {
+                "$ref": "#/$defs/outcome"
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["binding", "id", "type", "outcome", "observation"],
+                "properties": {
+                  "binding": {
+                    "$ref": "#/$defs/binding"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "type": {
+                    "const": "console-regex"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/outcome"
+                  },
+                  "observation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "testId",
+                      "assertionId",
+                      "registered",
+                      "executionCompleted",
+                      "evaluated",
+                      "passed",
+                      "outputTruncated"
+                    ],
+                    "properties": {
+                      "testId": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "assertionId": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "registered": {
+                        "type": "boolean"
+                      },
+                      "executionCompleted": {
+                        "type": "boolean"
+                      },
+                      "evaluated": {
+                        "type": "boolean"
+                      },
+                      "passed": {
+                        "type": "boolean"
+                      },
+                      "outputTruncated": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "evidenceSha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "outcome", "evidence", "evidenceSha256"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "type": {
+                "const": "clean-shutdown"
+              },
+              "outcome": {
+                "$ref": "#/$defs/outcome"
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["binding", "id", "type", "outcome", "observation"],
+                "properties": {
+                  "binding": {
+                    "$ref": "#/$defs/binding"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "type": {
+                    "const": "clean-shutdown"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/outcome"
+                  },
+                  "observation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "shutdownRequested",
+                      "serverStopped",
+                      "reportedShutdownRequested"
+                    ],
+                    "properties": {
+                      "shutdownRequested": {
+                        "type": "boolean"
+                      },
+                      "serverStopped": {
+                        "type": "boolean"
+                      },
+                      "reportedShutdownRequested": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "evidenceSha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "outcome", "evidence", "evidenceSha256"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "type": {
+                "const": "console-contains"
+              },
+              "outcome": {
+                "$ref": "#/$defs/outcome"
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["binding", "id", "type", "outcome", "observation"],
+                "properties": {
+                  "binding": {
+                    "$ref": "#/$defs/binding"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "type": {
+                    "const": "console-contains"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/outcome"
+                  },
+                  "observation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "testId",
+                      "assertionId",
+                      "registered",
+                      "executionCompleted",
+                      "evaluated",
+                      "passed",
+                      "outputTruncated"
+                    ],
+                    "properties": {
+                      "testId": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "assertionId": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "registered": {
+                        "type": "boolean"
+                      },
+                      "executionCompleted": {
+                        "type": "boolean"
+                      },
+                      "evaluated": {
+                        "type": "boolean"
+                      },
+                      "passed": {
+                        "type": "boolean"
+                      },
+                      "outputTruncated": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "evidenceSha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "completeness": {
+      "enum": ["complete", "partial"]
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runnerId",
+        "jobId",
+        "executionId",
+        "leaseId",
+        "attemptId",
+        "candidateId",
+        "matrixEntryId",
+        "attemptNumber"
+      ],
+      "properties": {
+        "runnerId": {
+          "$ref": "#/$defs/id"
+        },
+        "jobId": {
+          "$ref": "#/$defs/id"
+        },
+        "executionId": {
+          "$ref": "#/$defs/id"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/id"
+        },
+        "attemptId": {
+          "$ref": "#/$defs/id"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/id"
+        },
+        "matrixEntryId": {
+          "$ref": "#/$defs/id"
+        },
+        "attemptNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "outcome": {
+      "enum": ["passed", "failed", "skipped"]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runnerVersion",
+        "runnerExecutableSha256",
+        "sandboxKind",
+        "sandboxVersion",
+        "sandboxExecutableSha256",
+        "networkMode",
+        "rootfs"
+      ],
+      "properties": {
+        "runnerVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*(?![\\s\\S])"
+        },
+        "runnerExecutableSha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "sandboxKind": {
+          "const": "gvisor"
+        },
+        "sandboxVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*(?![\\s\\S])"
+        },
+        "sandboxExecutableSha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "networkMode": {
+          "enum": ["none", "restricted", "allowlist"]
+        },
+        "rootfs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "sha256"],
+          "properties": {
+            "format": {
+              "const": "squashfs-image-sha256/v1"
+            },
+            "sha256": {
+              "$ref": "#/$defs/hash"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -56,6 +56,7 @@ type Context struct {
 	binding   Binding
 	requested map[string]any
 	planned   map[string]planned
+	v2        bool
 }
 
 func (c *Context) Matches(lease *runnerv1.LeaseIdentity, attempt *runnerv1.AttemptIdentity) bool {
@@ -136,7 +137,11 @@ func Build(c *Context, runnerID string, observations []Observation, measured ...
 			completeness = "complete"
 		}
 	}
-	document := map[string]any{"schemaVersion": "provenance.execution-evidence/v1", "binding": bound, "requested": c.requested, "runtime": runtime, "assertions": assertions, "completeness": completeness}
+	version := "provenance.execution-evidence/v1"
+	if c.v2 {
+		version = "provenance.execution-evidence/v2"
+	}
+	document := map[string]any{"schemaVersion": version, "binding": bound, "requested": c.requested, "runtime": runtime, "assertions": assertions, "completeness": completeness}
 	encoded, err := json.Marshal(document)
 	if err != nil {
 		return nil, ErrInvalid
@@ -150,8 +155,8 @@ func Build(c *Context, runnerID string, observations []Observation, measured ...
 
 func (c *Context) find(o Observation) (planned, bool) {
 	id := o.Type
-	if o.Type == "console-regex" {
-		id = "console-regex:" + o.AssertionID
+	if o.Type == "console-regex" || o.Type == "console-contains" {
+		id = o.Type + ":" + o.AssertionID
 	}
 	if o.Type == "dependency-present" {
 		for _, p := range c.planned {
@@ -165,7 +170,7 @@ func (c *Context) find(o Observation) (planned, bool) {
 	if !ok {
 		return planned{}, false
 	}
-	if p.kind != o.Type || (o.Type == "plugin-enabled" && !strings.EqualFold(o.Name, p.name)) || (o.Type == "console-regex" && (o.TestID != p.selector["testId"] || o.AssertionID != p.selector["assertionId"])) {
+	if p.kind != o.Type || (o.Type == "plugin-enabled" && !strings.EqualFold(o.Name, p.name)) || ((o.Type == "console-regex" || o.Type == "console-contains") && (o.TestID != p.selector["testId"] || o.AssertionID != p.selector["assertionId"])) {
 		return planned{}, false
 	}
 	return p, true
@@ -187,7 +192,7 @@ func observationValue(o Observation) (map[string]any, string, error) {
 		}
 		v = map[string]any{"loaded": o.Loaded, "enabled": o.Enabled}
 		passed = o.Loaded && o.Enabled
-	case "console-regex":
+	case "console-regex", "console-contains":
 		if !o.Registered || !o.ExecutionCompleted || (!o.Evaluated && (o.Passed || !o.OutputTruncated)) || (o.Passed && o.OutputTruncated) {
 			return nil, "", ErrInvalid
 		}

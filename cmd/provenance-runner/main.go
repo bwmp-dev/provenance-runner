@@ -46,11 +46,13 @@ func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout
 	if len(arguments) == 2 && arguments[0] == "validate-paper-catalogs" {
 		return runValidatePaperCatalogs(arguments[1], stdout, stderr)
 	}
-	if len(arguments) == 2 && arguments[0] == "connect" {
-		return runConnect(ctx, arguments[1], false, stderr)
-	}
-	if len(arguments) == 3 && arguments[0] == "connect" && arguments[2] == "--disable-object-upload-identity" {
-		return runConnect(ctx, arguments[1], true, stderr)
+	if len(arguments) >= 2 && arguments[0] == "connect" {
+		disableUploads, enableV2, err := parseConnectOptions(arguments[2:])
+		if err != nil {
+			writeUsage(stderr)
+			return 2
+		}
+		return runConnect(ctx, arguments[1], disableUploads, enableV2, stderr)
 	}
 	if len(arguments) == 2 && arguments[0] == "enroll" {
 		return runEnroll(ctx, arguments[1], stderr)
@@ -113,7 +115,22 @@ func runExecuteWithCompleteLogContext(ctx context.Context, jobPath, completeLogP
 	return writeResultAndCompleteLog(stdout, stderr, executor.Execute(ctx, job), completeLogPath)
 }
 
-func runConnect(ctx context.Context, configPath string, disableObjectUploadIdentity bool, stderr io.Writer) int {
+func parseConnectOptions(options []string) (bool, bool, error) {
+	disableUploads, enableV2 := false, false
+	for _, option := range options {
+		switch {
+		case option == "--disable-object-upload-identity" && !disableUploads:
+			disableUploads = true
+		case option == "--enable-terminal-evidence-v2" && !enableV2:
+			enableV2 = true
+		default:
+			return false, false, errors.New("invalid or duplicate connect option")
+		}
+	}
+	return disableUploads, enableV2, nil
+}
+
+func runConnect(ctx context.Context, configPath string, disableObjectUploadIdentity, enableTerminalEvidenceV2 bool, stderr io.Writer) int {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		fmt.Fprintln(stderr, "connect runner: this alpha advertises and requires linux/amd64")
 		return 1
@@ -124,6 +141,7 @@ func runConnect(ctx context.Context, configPath string, disableObjectUploadIdent
 		return 1
 	}
 	config.DisableObjectUploadIdentity = disableObjectUploadIdentity
+	config.EnableTerminalEvidenceV2 = enableTerminalEvidenceV2
 	registry, err := registryForProvider(ctx, "paper", os.Getenv)
 	if err != nil {
 		fmt.Fprintf(stderr, "connect runner: initialize Paper provider: %v\n", err)
@@ -159,7 +177,7 @@ func runConnect(ctx context.Context, configPath string, disableObjectUploadIdent
 func writeUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "usage: provenance-runner execute <job.json|->")
 	fmt.Fprintln(writer, "       provenance-runner execute <job.json|-> --complete-log <new-path>")
-	fmt.Fprintln(writer, "       provenance-runner connect <connect.json> [--disable-object-upload-identity]")
+	fmt.Fprintln(writer, "       provenance-runner connect <connect.json> [--disable-object-upload-identity] [--enable-terminal-evidence-v2]")
 	fmt.Fprintln(writer, "       provenance-runner enroll <enrollment.json>")
 	fmt.Fprintln(writer, "       provenance-runner validate-paper-catalogs <catalogs.json>")
 }

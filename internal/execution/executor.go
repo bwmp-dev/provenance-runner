@@ -16,16 +16,18 @@ const (
 )
 
 type Executor struct {
-	registry          *Registry
-	collectionTimeout time.Duration
-	cleanupTimeout    time.Duration
-	beforeExecute     func(context.Context, ExecutionStart) error
+	terminalEvidenceV2 bool
+	registry           *Registry
+	collectionTimeout  time.Duration
+	cleanupTimeout     time.Duration
+	beforeExecute      func(context.Context, ExecutionStart) error
 }
 
 type ExecutorOptions struct {
-	CollectionTimeout time.Duration
-	CleanupTimeout    time.Duration
-	BeforeExecute     func(context.Context, ExecutionStart) error
+	TerminalEvidenceV2 bool
+	CollectionTimeout  time.Duration
+	CleanupTimeout     time.Duration
+	BeforeExecute      func(context.Context, ExecutionStart) error
 }
 
 type ExecutionStart struct {
@@ -51,10 +53,11 @@ func NewExecutor(registry *Registry, options ExecutorOptions) (*Executor, error)
 		options.CleanupTimeout = defaultCleanupTimeout
 	}
 	return &Executor{
-		registry:          registry,
-		collectionTimeout: options.CollectionTimeout,
-		cleanupTimeout:    options.CleanupTimeout,
-		beforeExecute:     options.BeforeExecute,
+		terminalEvidenceV2: options.TerminalEvidenceV2,
+		registry:           registry,
+		collectionTimeout:  options.CollectionTimeout,
+		cleanupTimeout:     options.CleanupTimeout,
+		beforeExecute:      options.BeforeExecute,
 	}, nil
 }
 
@@ -85,9 +88,10 @@ func (e *Executor) Execute(parent context.Context, job localjob.Job) Result {
 
 	result.Phase = PhaseResolution
 	environment, err := provider.Resolve(preparationContext, Request{
-		JobID:       job.ID,
-		Environment: job.Environment,
-		Limits:      Limits{MaxOutputBytes: job.OutputLimit()},
+		TerminalEvidenceV2: e.terminalEvidenceV2,
+		JobID:              job.ID,
+		Environment:        job.Environment,
+		Limits:             Limits{MaxOutputBytes: job.OutputLimit()},
 	})
 	if err != nil {
 		setFailure(&result, PhaseResolution, classifyError(parent, preparationContext, "provider_resolution_failed", err))

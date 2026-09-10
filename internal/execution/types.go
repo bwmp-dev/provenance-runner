@@ -37,9 +37,11 @@ const (
 )
 
 type Request struct {
-	JobID       string
-	Environment json.RawMessage
-	Limits      Limits
+	// Set by trusted execution composition, never by job/environment JSON.
+	TerminalEvidenceV2 bool `json:"-"`
+	JobID              string
+	Environment        json.RawMessage
+	Limits             Limits
 }
 
 type Limits struct {

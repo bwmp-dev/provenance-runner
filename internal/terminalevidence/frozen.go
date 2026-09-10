@@ -10,10 +10,41 @@ import (
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 )
 
+// FrozenVersion performs bounded unambiguous dispatch only. ValidateFrozen or
+// ValidateFrozenV2 must still verify every saved byte against the executed job.
+func FrozenVersion(proof *runnerv1.ExecutionEvidence) (string, error) {
+	if proof == nil || len(proof.GetCanonicalJson()) > MaximumBytes {
+		return "", ErrInvalid
+	}
+	v, err := parseJSON(proof.GetCanonicalJson())
+	if err != nil {
+		return "", ErrInvalid
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return "", ErrInvalid
+	}
+	version, ok := m["schemaVersion"].(string)
+	if !ok || (version != "provenance.execution-evidence/v1" && version != "provenance.execution-evidence/v2") {
+		return "", ErrInvalid
+	}
+	return version, nil
+}
+
 // ValidateFrozen accepts only this producer's exact frozen representation,
 // bound to the immutable executed specification. Empty runnerID is restricted
 // to journal loading before authentication; delivery supplies the real runner.
 func ValidateFrozen(proof *runnerv1.ExecutionEvidence, job *runnerv1.JobSpecification, runnerID string) error {
+	return validateFrozen(proof, job, runnerID, false)
+}
+
+// ValidateFrozenV2 validates only v2 persisted bytes. Current-stream admission
+// is a separate delivery requirement; this function never changes saved bytes.
+func ValidateFrozenV2(proof *runnerv1.ExecutionEvidence, job *runnerv1.JobSpecification, runnerID string) error {
+	return validateFrozen(proof, job, runnerID, true)
+}
+
+func validateFrozen(proof *runnerv1.ExecutionEvidence, job *runnerv1.JobSpecification, runnerID string, v2 bool) error {
 	if proof == nil {
 		return nil
 	}
@@ -43,7 +74,7 @@ func ValidateFrozen(proof *runnerv1.ExecutionEvidence, job *runnerv1.JobSpecific
 	if runnerID != "" && binding.RunnerID != runnerID {
 		return ErrInvalid
 	}
-	c, err := NewContext(job)
+	c, err := newContext(job, v2)
 	if err != nil || !c.Matches(job.GetLease(), job.GetAttempt()) {
 		return ErrInvalid
 	}
