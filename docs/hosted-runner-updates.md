@@ -127,3 +127,18 @@ the configured API origin, never to an arbitrary signed release URL or redirect.
 
 Keep the Ed25519 private key offline on the trusted release machine. The updater
 and backend independently verify manifests against the node's pinned public key.
+
+## Catalog environment preservation
+
+Signed catalog reconciliation retains blank lines, comments and every unrelated
+environment assignment byte-for-byte, including measured runtime settings. Only
+the owned catalog/probe/prepared-runtime assignments are replaced. Repeating the
+same catalog is byte-idempotent. This formatting compatibility does not bypass
+signature verification, drain, asset hashes or rollback checks.
+
+The installed environment uses complete LF-terminated uppercase-key assignments
+with JSON-quoted strings or narrow plain values. Duplicate keys, continuations,
+multiline/unclosed quotes, CRLF, NUL bytes and oversized files refuse instead of
+being silently normalized into different effective settings. This is the hosted
+installer's constrained format, not a general shell or systemd configuration
+parser. Do not source these files as shell scripts.

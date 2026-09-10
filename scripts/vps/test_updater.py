@@ -359,6 +359,29 @@ class CatalogTransactions(unittest.TestCase):
                 reconciler.restore({'backup':'catalog-backup-operation'})
             for name,data in originals.items(): self.assertEqual((root/name).read_bytes(),data)
 
+    def test_catalog_update_preserves_blank_comments_and_measured_runtime_bytes(self):
+        reconciler = u.CatalogReconciler({}, None)
+        runtime = (b'# private runner configuration\n\n'
+                   b'PROVENANCE_ROOTFS=/opt/measured/rootfs\n'
+                   b'PROVENANCE_RUNSC_PATH=/opt/provenance-runner/runsc\n'
+                   b'PROVENANCE_MEASURED_RUNTIME_MODE=embedded-executable\n'
+                   b'PROVENANCE_MEASURED_ROOTFS_IMAGE=/opt/measured/image.squashfs\n'
+                   b'; retained operator note\n\nOTHER="unchanged"\n')
+        current = runtime + b'PROVENANCE_PAPER_CATALOGS_JSON="[]"\n'
+        catalogs = [{'environmentId': 'paper-26.2'}]
+        result = reconciler.catalog_environment(current, catalogs)
+        self.assertTrue(result.startswith(runtime))
+        self.assertEqual(result.count(b'PROVENANCE_PAPER_CATALOGS_JSON='), 1)
+        self.assertEqual(reconciler.catalog_environment(result, catalogs), result)
+
+    def test_catalog_environment_refuses_hidden_assignments_and_duplicates(self):
+        reconciler = u.CatalogReconciler({}, None)
+        for data in (b'A="unfinished\nB=x\n', b'A=x\\\nB=y\n', b'A=x\nA=y\n',
+                     b'A="x" trailing\n', b'A=\x00\n', b'A=x', b'A=x\r\n',
+                     b' export A=x\n', b' A=x\n', b'A=' + b'x' * (u.MAX_CATALOG * 2) + b'\n'):
+            with self.subTest(data=data[:60]), self.assertRaises(ValueError):
+                reconciler.catalog_environment(data, [])
+
     def test_failed_health_rollback_restores_files_before_terminal_resume(self):
         with tempfile.TemporaryDirectory() as temp:
             root, work = Path(temp)/'root', Path(temp)/'work'

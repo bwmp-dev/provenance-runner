@@ -431,18 +431,32 @@ class CatalogReconciler:
         self.save(operation)
 
     def catalog_environment(self, current, catalogs):
-        values = {}
-        for raw in current.decode().splitlines():
-            check('=' in raw, 'Invalid installed environment file')
-            name, value = raw.split('=', 1)
-            check(re.fullmatch(r'[A-Z][A-Z0-9_]*', name) and name not in values, 'Invalid installed environment field')
-            values[name] = value
-        for name in list(values):
-            if name == 'PROVENANCE_PAPER_CATALOGS_JSON' or name.startswith('PROVENANCE_PAPER_PROBE_') or name.startswith('PROVENANCE_PAPER_PREPARED_RUNTIME_') or name == 'PROVENANCE_PAPER_PREPARED_RUNTIMES_JSON':
-                del values[name]
+        check(len(current) <= MAX_CATALOG*2 and b'\0' not in current and b'\r' not in current
+              and (not current or current.endswith(b'\n')), 'Invalid installed environment encoding or bound')
+        names, retained = set(), []
+        for line in current.splitlines(keepends=True):
+            if not line.strip() or line.startswith((b'#', b';')):
+                retained.append(line)
+                continue
+            match = re.fullmatch(rb'([A-Z][A-Z0-9_]*)=([^\n]*)\n', line)
+            check(match is not None, 'Invalid installed environment field')
+            name, value = match[1].decode('ascii'), match[2].decode('utf-8')
+            check(name not in names, 'Duplicate installed environment field')
+            names.add(name)
+            # Same narrow single-line grammar as measured boot selection. Never
+            # make hidden assignments effective by removing a continuation or
+            # an unterminated quoted catalog line during reconciliation.
+            if value.startswith('"'):
+                check(isinstance(json.loads(value), str), 'Invalid installed environment string')
+            else:
+                check(re.fullmatch(r'[A-Za-z0-9_:/.,@+=%-]*', value), 'Invalid installed environment value')
+            owned = (name == 'PROVENANCE_PAPER_CATALOGS_JSON' or name.startswith('PROVENANCE_PAPER_PROBE_')
+                     or name.startswith('PROVENANCE_PAPER_PREPARED_RUNTIME_')
+                     or name == 'PROVENANCE_PAPER_PREPARED_RUNTIMES_JSON')
+            if not owned:
+                retained.append(line)
         compact = json.dumps(catalogs, separators=(',', ':'), ensure_ascii=False)
-        values['PROVENANCE_PAPER_CATALOGS_JSON'] = json.dumps(compact, ensure_ascii=False)
-        encoded = ''.join(name+'='+values[name]+'\n' for name in sorted(values)).encode()
+        encoded = b''.join(retained) + ('PROVENANCE_PAPER_CATALOGS_JSON=' + json.dumps(compact, ensure_ascii=False) + '\n').encode()
         check(len(encoded) <= MAX_CATALOG*2, 'Catalog environment exceeds limit')
         return encoded
 
