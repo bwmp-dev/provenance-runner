@@ -128,6 +128,49 @@ func preparedRuntimeFixture(t *testing.T) string {
 	return preparedRuntimeFixtureForVersion(t, "1.21.8")
 }
 
+func TestLegacyPreparedRuntimeArchive(t *testing.T) {
+	for _, version := range []string{"1.8.8", "1.12.2", "1.16.5", "1.17.1"} {
+		t.Run(version, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "cache"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, prefix := range []string{"mojang_", "patched_"} {
+				if err := os.WriteFile(filepath.Join(root, "cache", prefix+version+".jar"), []byte(prefix), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var first, second bytes.Buffer
+			metadata, err := WritePreparedRuntimeArchiveForVersion(context.Background(), root, &first, version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.MaximumExpandedBytes != int64(len("mojang_patched_")) {
+				t.Fatal(metadata)
+			}
+			if _, err := WritePreparedRuntimeArchiveForVersion(context.Background(), root, &second, version); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(first.Bytes(), second.Bytes()) {
+				t.Fatal("legacy archive is not deterministic")
+			}
+			if _, err := WritePreparedRuntimeArchiveForVersion(context.Background(), root, &bytes.Buffer{}, "1.21.8"); err == nil {
+				t.Fatal("legacy output accepted for a modern version")
+			}
+			patched := filepath.Join(root, "cache", "patched_"+version+".jar")
+			if err := os.Remove(patched); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(root, "cache", "mojang_"+version+".jar"), patched); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := WritePreparedRuntimeArchiveForVersion(context.Background(), root, &bytes.Buffer{}, version); err == nil {
+				t.Fatal("legacy symlink accepted")
+			}
+		})
+	}
+}
+
 func preparedRuntimeFixtureForVersion(t *testing.T, gameVersion string) string {
 	t.Helper()
 	root := t.TempDir()

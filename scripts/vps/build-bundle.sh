@@ -30,10 +30,10 @@ trap 'docker rm "$container" >/dev/null 2>&1 || true' EXIT
 docker export --output "$out/rootfs.tar" "$container"
 docker rm "$container" >/dev/null
 trap - EXIT
-cp scripts/vps/install.sh scripts/vps/install.py scripts/vps/updater.py scripts/vps/sign-release.py "$out/"
+cp scripts/vps/install.sh scripts/vps/install.py scripts/vps/updater.py scripts/vps/sign-release.py scripts/vps/sign-catalog.py "$out/"
 cp scripts/prepare-gvisor-rootfs.sh "$out/"
 cp scripts/vps/settings.example.json "$out/settings.example.json"
 printf '%s\n' "$commit" > "$out/SOURCE_COMMIT"
 chmod 755 "$out/runner" "$out/runsc" "$out/install.sh" "$out/prepare-gvisor-rootfs.sh"
-(cd "$out" && sha256sum runner runsc rootfs.tar install.sh install.py prepare-gvisor-rootfs.sh settings.example.json SOURCE_COMMIT updater.py sign-release.py > SHA256SUMS)
+(cd "$out" && sha256sum runner runsc rootfs.tar install.sh install.py prepare-gvisor-rootfs.sh settings.example.json SOURCE_COMMIT updater.py sign-release.py sign-catalog.py > SHA256SUMS)
 printf 'Bundle ready: %s\nCopy it securely to /root on the VPS; see docs/vps-install.md.\n' "$out"

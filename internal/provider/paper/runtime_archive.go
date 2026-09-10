@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,11 +90,30 @@ func collectPreparedRuntime(ctx context.Context, root, gameVersion string) ([]pr
 	}
 	mojangServerPath := "cache/mojang_" + gameVersion + ".jar"
 	patchedPaperPath := "versions/" + gameVersion + "/paper-" + gameVersion + ".jar"
+	roots := preparedRuntimeRoots
+	legacy := false
+	parts := strings.Split(gameVersion, ".")
+	if len(parts) >= 2 && parts[0] == "1" {
+		minor, err := strconv.Atoi(parts[1])
+		legacyPath := "cache/patched_" + gameVersion + ".jar"
+		if err == nil && minor >= 7 && minor <= 17 {
+			if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(legacyPath))); err == nil {
+				// Pre-bundler Paperclip produces a self-contained patched JAR.
+				// Keep the exact-version vanilla cache too, allowing Paperclip to
+				// revalidate its inputs without network access at execution time.
+				legacy = true
+				patchedPaperPath = legacyPath
+				roots = []string{"cache"}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, 0, fmt.Errorf("inspect legacy Paperclip output: %w", err)
+			}
+		}
+	}
 	entries := make([]preparedRuntimeEntry, 0)
 	found := make(map[string]bool)
 	libraryFiles := 0
 	var expanded int64
-	for _, name := range preparedRuntimeRoots {
+	for _, name := range roots {
 		rootPath := filepath.Join(root, name)
 		info, err := os.Lstat(rootPath)
 		if err != nil {
@@ -155,7 +175,7 @@ func collectPreparedRuntime(ctx context.Context, root, gameVersion string) ([]pr
 	if !found[patchedPaperPath] {
 		return nil, 0, fmt.Errorf("build prepared Paper runtime: %s is missing", patchedPaperPath)
 	}
-	if libraryFiles == 0 {
+	if !legacy && libraryFiles == 0 {
 		return nil, 0, errors.New("build prepared Paper runtime: libraries contains no regular files")
 	}
 	if expanded == 0 {

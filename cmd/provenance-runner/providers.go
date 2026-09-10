@@ -79,7 +79,17 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 	if err := validatePaperPlatform(runtime.GOOS, runtime.GOARCH); err != nil {
 		return nil, nil, err
 	}
-	catalogs, err := operatorCatalogs(lookup)
+	var catalogs []paper.Catalog
+	var runtimeSource *paper.RuntimeSource
+	var err error
+	if origin := lookup("PROVENANCE_PAPER_RUNTIME_ORIGIN"); origin != "" {
+		runtimeSource, err = paper.NewRuntimeSource(origin, lookup("PROVENANCE_PAPER_RUNTIME_PUBLIC_KEY_HEX"))
+	} else {
+		if lookup("PROVENANCE_PAPER_RUNTIME_PUBLIC_KEY_HEX") != "" {
+			return nil, nil, errors.New("PROVENANCE_PAPER_RUNTIME_ORIGIN is required with a runtime public key")
+		}
+		catalogs, err = operatorCatalogs(lookup)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -194,6 +204,7 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 		return fail(err)
 	}
 	provider, err := paper.New(paper.Config{
+		RuntimeSource:           runtimeSource,
 		ArtifactCache:           sharedCache,
 		PaperCache:              sharedCache,
 		JavaCache:               sharedCache,
