@@ -32,6 +32,7 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_runtime_generation.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_rootfs_boot.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_runtime_selection.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_prepare_paper_catalog.py -v
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...

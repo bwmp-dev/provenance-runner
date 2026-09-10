@@ -49,12 +49,69 @@ def unit_bytes(p):
             '\nType=squashfs\nOptions=loop,ro,nosuid,nodev\nTimeoutSec=60\n').encode()
 
 
-def load_plan(path, digest):
+def runtime_values(p):
+    return {'PROVENANCE_RUNSC_PATH': p['runsc']['path'],
+            'PROVENANCE_ROOTFS': p['rootfs'],
+            'PROVENANCE_ROOTFS_IDENTITY': 'sha256:' + p['image']['sha256'],
+            'PROVENANCE_MEASURED_RUNTIME_MODE': 'embedded-executable',
+            'PROVENANCE_GVISOR_CGROUP_DRIVER': 'systemd-user',
+            'PROVENANCE_MEASURED_ROOTFS_IMAGE': p['image']['path'],
+            'PROVENANCE_MEASURED_LOOP_DEVICE': p['loop']}
+
+
+def environment(data, owned):
+    # Narrow installed-file grammar, not a shell or general systemd parser.
+    # Each assignment is one complete line. This prevents continuation/quoted
+    # multiline syntax from hiding or swallowing an apparently pinned setting.
+    require(len(data) <= 512 * 1024 and b'\0' not in data and b'\r' not in data and
+            (not data or data.endswith(b'\n')), 'environment encoding/bound')
+    values, other = {}, []
+    for line in data.splitlines(keepends=True):
+        if line.strip() == b'' or line.startswith((b'#', b';')):
+            other.append(line)
+            continue
+        match = re.fullmatch(rb'([A-Z][A-Z0-9_]*)=([^\n]*)\n', line)
+        require(match is not None, 'environment assignment')
+        key, raw = match[1].decode('ascii'), match[2].decode('utf-8')
+        require(key not in values, 'duplicate environment assignment')
+        if raw.startswith('"'):
+            value = json.loads(raw)
+            require(isinstance(value, str), 'environment string')
+        else:
+            require(re.fullmatch(r'[A-Za-z0-9_:/.,@+=%-]*', raw), 'environment value syntax')
+            value = raw
+        values[key] = value
+        if key not in owned:
+            other.append(line)
+    return values, other
+
+
+def render_environment(p, before):
+    expected = runtime_values(p)
+    _, other = environment(before, expected)
+    return b''.join(other) + ''.join(k + '=' + v + '\n' for k, v in sorted(expected.items())).encode()
+
+
+def selected_environment(p):
+    path = g.protected(p['runtimeEnvironment'])
+    s = path.stat()
+    require(s.st_gid == p['gid'] and stat.S_IMODE(s.st_mode) == 0o640 and
+            s.st_nlink == 1 and s.st_size <= 512 * 1024, 'environment custody/bound')
+    expected = runtime_values(p)
+    actual, _ = environment(path.read_bytes(), expected)
+    require(all(actual.get(k) == v for k, v in expected.items()), 'runtime selection mismatch')
+
+
+def load_plan(path, digest, require_selection=True):
     p = g.read_json(path, digest)
-    require(set(p) == {'version', 'generation', 'uid', 'gid', 'image',
-                       'imageManifest', 'rootfs', 'loop', 'mountUnit', 'userUnit'},
+    require(isinstance(p, dict), 'plan object required')
+    fields = {'version', 'generation', 'uid', 'gid', 'image',
+              'imageManifest', 'rootfs', 'loop', 'mountUnit', 'userUnit'}
+    if p.get('version') == 2:
+        fields |= {'runtimeEnvironment', 'runsc'}
+    require(set(p) == fields,
             'plan fields')
-    require(type(p['version']) is int and p['version'] == 1 and
+    require(type(p['version']) is int and p['version'] in (1, 2) and
             all(type(p[k]) is int and 0 < p[k] < 4294967295 for k in ('uid', 'gid')),
             'runtime identity')
     account = pwd.getpwuid(p['uid'])
@@ -90,6 +147,14 @@ def load_plan(path, digest):
             Path(p['mountUnit']['path']).read_bytes() == unit_bytes(p), 'mount unit binding')
     require(p['userUnit']['path'] == '/etc/systemd/user/provenance-runner.service',
             'runner user unit binding')
+    if p['version'] == 2:
+        require(p['runtimeEnvironment'] == '/opt/provenance-runner/runner.env' and
+                set(p['runsc']) == {'path', 'sha256'} and
+                p['runsc']['path'] == '/opt/provenance-runner/runsc' and
+                re.fullmatch('[a-f0-9]{64}', p['runsc']['sha256']), 'hosted runtime binding')
+        g.fingerprint(p['runsc']['path'], p['runsc']['sha256'], executable=True)
+        if require_selection:
+            selected_environment(p)
     return p
 
 

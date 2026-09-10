@@ -30,6 +30,11 @@ Version-1 plan fields are exactly:
 - `mountUnit: {path, sha256}`: `/etc/systemd/system/<escaped-rootfs>.mount`.
 - `userUnit: {path, sha256}`: `/etc/systemd/user/provenance-runner.service`.
 
+Version 2 additionally binds the selected runtime environment and direct runsc
+ELF for the [drained hosted selector](measured-runtime-selection.md). Production
+selection uses version 2 so an interrupted environment/hook switch refuses boot;
+version 1 remains a mount-only fixture/operator contract.
+
 The mount unit must have exactly the bytes returned by `unit_bytes(plan)`:
 SquashFS, `loop,ro,nosuid,nodev`, a 60-second mount timeout and no enablement stanza.
 Names are obtained with `systemd-escape --path --suffix=mount`. Paths with systemd
