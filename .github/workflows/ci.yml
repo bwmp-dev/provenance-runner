@@ -31,6 +31,7 @@ jobs:
       - name: Runtime generation operator unit tests
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_runtime_generation.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_rootfs_boot.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_prepare_paper_catalog.py -v
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
@@ -59,6 +60,9 @@ jobs:
           [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
           bash scripts/test-runtime-baseline-fixture.sh "$image" \
             2>&1 | tee "${evidence}/systemd-fixture.log"
+          bash -n scripts/test-measured-rootfs-boot-fixture.sh
+          bash scripts/test-measured-rootfs-boot-fixture.sh "$image" \
+            2>&1 | tee "${evidence}/measured-boot-fixture.log"
       - name: Retain inactive baseline systemd evidence
         if: always() && env.PROVENANCE_BASELINE_EVIDENCE != ''
         uses: actions/upload-artifact@v4
