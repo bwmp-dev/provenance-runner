@@ -66,7 +66,7 @@ jobs:
             2>&1 | tee "${evidence}/measured-boot-fixture.log"
       - name: Retain inactive baseline systemd evidence
         if: always() && env.PROVENANCE_BASELINE_EVIDENCE != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: runtime-baseline-${{ github.sha }}
           path: ${{ env.PROVENANCE_BASELINE_EVIDENCE }}
@@ -190,14 +190,14 @@ jobs:
             "${generation_scratch}" "${generation_evidence}"
       - name: Retain disposable measured runtime evidence
         if: always() && env.PROVENANCE_MEASURED_EVIDENCE != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: measured-runtime-${{ github.sha }}
           path: ${{ env.PROVENANCE_MEASURED_EVIDENCE }}
           if-no-files-found: error
       - name: Retain disposable Ubuntu generation evidence
         if: always() && env.PROVENANCE_GENERATION_EVIDENCE != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: runtime-generation-${{ github.sha }}
           path: ${{ env.PROVENANCE_GENERATION_EVIDENCE }}
@@ -377,7 +377,7 @@ jobs:
           (cd "${SYSTEMD_SMOKE_EVIDENCE}" && sha256sum execution.json host-preflight.json host.json metadata.json smoke.log > manifest.sha256)
       - name: Upload exact-head systemd-user smoke evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: systemd-user-smoke-${{ github.sha }}
           path: ${{ env.SYSTEMD_SMOKE_EVIDENCE }}
