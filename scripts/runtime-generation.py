@@ -329,7 +329,7 @@ def replace_file(path, expected, data):
     # Own the exclusive descriptor before any operation that can fail. General
     # write_new journals intentionally retain partial state; replacement temps
     # have a different lifecycle and must not poison an exact retry.
-    fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, stat.S_IMODE(st.st_mode))
+    fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     created = None
     installed = False
     try:
@@ -340,6 +340,10 @@ def replace_file(path, expected, data):
             output.write(data)
             output.flush()
             os.fchown(output.fileno(), st.st_uid, st.st_gid)
+            # Creation permissions are filtered by the operator's umask.
+            # Publish the exact original mode only after content and ownership
+            # are complete (chown may also clear special mode bits).
+            os.fchmod(output.fileno(), stat.S_IMODE(st.st_mode))
             os.fsync(output.fileno())
         sync_directory(path.parent)
         current = temp.lstat()

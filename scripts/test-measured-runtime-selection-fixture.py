@@ -102,8 +102,11 @@ def main():
     args = ('--plan', str(planpath), '--plan-sha256', pin(planpath)['sha256'],
             '--drain', str(drainpath), '--drain-sha256', pin(drainpath)['sha256'])
     def invoke(action, expected=0):
-        result = subprocess.run((*command, action, *args), capture_output=True, timeout=90)
+        result = subprocess.run((*command, action, *args), capture_output=True, timeout=90,
+                                umask=0o077)
         assert result.returncode == expected, 'selection fixture invocation failed'
+        assert (root / 'runner.env').stat().st_mode & 0o7777 == 0o640
+        assert (root / 'verify-rootfs').stat().st_mode & 0o7777 == 0o755
     original_runner = pin(root / 'runner')
     try:
         (root / 'update-state/operation.json').write_bytes(b'{"phase":"rollback"}')
@@ -141,10 +144,17 @@ def main():
         assert (root / 'verify-rootfs').read_bytes() == oldhook
         assert pin(root / 'runner') == original_runner
         assert pin(userunit) == boot['userUnit']
+        # Exercise both replacements from the original state, not only the
+        # interrupted-hook state above, with the production operator umask.
+        invoke('select')
+        invoke('rollback')
+        assert (root / 'runner.env').read_bytes() == oldenv
+        assert (root / 'verify-rootfs').read_bytes() == oldhook
         print(json.dumps({'realSelectionAndRollback': True, 'updaterLockExclusion': True,
                           'mixedStateBootRefused': True, 'activeRunnerRollbackRefused': True,
                           'pendingUpdaterAndTerminalRefused': True, 'catalogUpdatePreserved': True,
                           'originalBytesRestored': True, 'fixedRunnerAndUserUnitUnchanged': True,
+                          'restrictiveUmaskModesPreserved': True,
                           'productionDrainProven': False, 'realSignedUpdaterTested': False}))
     finally:
         b.userctl(boot, 'stop', userunit.name)
