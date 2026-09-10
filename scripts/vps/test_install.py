@@ -280,6 +280,19 @@ def catalog_settings():
 
 
 class Catalogs(unittest.TestCase):
+    def test_legacy_probe_is_exact_and_original_probe_stays_modern(self):
+        value = catalog_settings()
+        catalog = value['paperCatalogs'][0]
+        catalog['paper']['gameVersion'] = '1.8.8'
+        catalog['java']['version'] = '8.0.504+1'
+        with self.assertRaises(ValueError):
+            i.validate(value)
+        catalog['probeVersion'], catalog['probeSourceCommit'], catalog['probe']['sha256'], catalog['probe']['sizeBytes'] = i.LEGACY_PROBE
+        self.assertEqual(i.validate(value), value)
+        catalog['probe']['sha256'] = i.PROBE
+        with self.assertRaises(ValueError):
+            i.validate(value)
+
     def test_arbitrary_build_is_provisioned_with_all_four_pins(self):
         value = catalog_settings()
         self.assertEqual(i.validate(value), value)

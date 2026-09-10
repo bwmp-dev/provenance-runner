@@ -105,7 +105,7 @@ func TestPrepareBuildsPinnedEphemeralPaperWorkspace(t *testing.T) {
 		"-Dprovenance.probe.stabilizationMillis=25",
 		"-Dprovenance.probe.requestShutdown=true",
 		"/workspace/paper.jar",
-		"--nogui",
+		"nogui",
 	} {
 		if !strings.Contains(joinedArguments, expected) {
 			t.Errorf("workload arguments do not contain %q: %#v", expected, workload.Arguments)

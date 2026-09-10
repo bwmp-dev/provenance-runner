@@ -20,6 +20,7 @@ WORK = ROOT/'update-state'
 UNIT = 'provenance-runner.service'
 USER = 'provenance-worker'
 MAX_BINARY = 512*1024**2
+MAX_CATALOG = 256*1024
 USER_AGENT = 'Provenance-Hosted-Updater/1.0 (https://provenance.bwmp.dev)'
 
 
@@ -111,6 +112,44 @@ def verify_release(release, public_key):
             '-rawin', '-in', str(p/'message'), '-sigfile', str(p/'signature'))
 
 
+def catalog_signing_bytes(revision):
+    check(set(revision) == {'schemaVersion', 'artifactHosts', 'catalogs', 'sha256', 'signature'}, 'Unsupported catalog fields')
+    check(revision['schemaVersion'] == 'provenance.hosted-paper-catalog/v1', 'Invalid catalog schema')
+    check(isinstance(revision['artifactHosts'], list) and 0 < len(revision['artifactHosts']) <= 32
+          and revision['artifactHosts'] == sorted(set(revision['artifactHosts'])), 'Invalid catalog artifact hosts')
+    check(isinstance(revision['catalogs'], list) and 0 < len(revision['catalogs']) <= 32, 'Invalid catalog entries')
+    check([entry.get('environmentId') for entry in revision['catalogs']] == sorted(entry.get('environmentId') for entry in revision['catalogs']), 'Catalog entries are not canonical')
+    payload = {key: revision[key] for key in ('schemaVersion', 'artifactHosts', 'catalogs')}
+    canonical = json.dumps(payload, separators=(',', ':'), ensure_ascii=False, sort_keys=True).encode()
+    check(len(canonical) <= MAX_CATALOG and re.fullmatch(r'[a-f0-9]{64}', revision['sha256'])
+          and hashlib.sha256(canonical).hexdigest() == revision['sha256'], 'Catalog canonical digest mismatch')
+    for catalog in revision['catalogs']:
+        check(set(catalog) == {'environmentId', 'paper', 'java', 'probeVersion', 'probeSourceCommit', 'probe', 'preparedRuntime'}, 'Invalid catalog entry')
+        assets = (catalog['paper']['artifact'], catalog['java']['artifact'], catalog['probe'], catalog['preparedRuntime']['artifact'])
+        for asset in assets:
+            check(set(asset) == {'uri', 'sha256', 'filename', 'sizeBytes'}, 'Invalid catalog artifact')
+            check(re.fullmatch(r'[a-f0-9]{64}', asset['sha256']) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,199}', asset['filename'])
+                  and type(asset['sizeBytes']) is int and 0 < asset['sizeBytes'] <= MAX_BINARY, 'Invalid catalog artifact identity')
+            parsed = urlsplit(asset['uri'])
+            check(parsed.scheme == 'https' and parsed.hostname in revision['artifactHosts'] and not parsed.username and not parsed.password
+                  and not parsed.query and not parsed.fragment and parsed.path == '/v1/runner-catalog-assets/'+asset['sha256']+'/'+asset['filename'], 'Invalid catalog asset URL')
+    return ('provenance.hosted-paper-catalog/v1\nsha256:'+revision['sha256']+'\n').encode()
+
+
+def verify_catalog(revision, public_key):
+    message = catalog_signing_bytes(revision)
+    signature = base64.b64decode(revision['signature'], validate=True)
+    key = base64.b64decode(public_key, validate=True)
+    check(len(signature) == 64 and len(key) == 32, 'Invalid catalog signing material')
+    with tempfile.TemporaryDirectory(dir=WORK) as temp:
+        p = Path(temp)
+        (p/'key.der').write_bytes(bytes.fromhex('302a300506032b6570032100')+key)
+        (p/'signature').write_bytes(signature)
+        (p/'message').write_bytes(message)
+        run('openssl', 'pkeyutl', '-verify', '-pubin', '-keyform', 'DER', '-inkey', str(p/'key.der'),
+            '-rawin', '-in', str(p/'message'), '-sigfile', str(p/'signature'))
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         raise ValueError('Update endpoints must not redirect')
@@ -165,6 +204,38 @@ class Client:
         check(h[:5] == b'\x7fELF\x02' and h[5] == 1 and h[18:20] == b'\x3e\x00', 'Release is not Linux amd64 ELF')
         destination.chmod(0o755)
 
+    def catalog_poll(self, operation='', report='idle'):
+        body = json.dumps({'operationId': operation, 'report': report}).encode()
+        url = self.config['apiOrigin']+'/v1/runner-catalogs/'+self.config['runnerId']+'/poll'
+        request = urllib.request.Request(url, data=body, headers={'Authorization': 'Bearer '+self.token, 'Content-Type': 'application/json', 'User-Agent': USER_AGENT}, method='POST')
+        with self.opener.open(request, timeout=30) as response:
+            data = response.read(MAX_CATALOG+1)
+        check(len(data) <= MAX_CATALOG, 'Oversized catalog command')
+        result = decode(data)
+        check(set(result) == {'operationId', 'phase', 'revision', 'previousCatalogSha256', 'healthy', 'outcome'}, 'Invalid catalog command')
+        check(result['phase'] in ('wait', 'install', 'verify', 'complete'), 'Invalid catalog phase')
+        check(result['phase'] == 'wait' or bool(result['operationId']), 'Missing catalog operation identity')
+        if result['operationId']:
+            check(str(uuid.UUID(result['operationId'])) == result['operationId'], 'Invalid catalog operation identity')
+        if operation:
+            check(result['operationId'] == operation, 'Catalog operation identity changed')
+        return result
+
+    def download_catalog_asset(self, asset, destination):
+        expected_prefix = self.config['apiOrigin']+'/v1/runner-catalog-assets/'
+        check(asset['uri'] == expected_prefix+asset['sha256']+'/'+asset['filename'], 'Catalog asset is outside assigned API authority')
+        request = urllib.request.Request(asset['uri'], headers={'Authorization': 'Bearer '+self.token, 'User-Agent': USER_AGENT})
+        count, digest = 0, hashlib.sha256()
+        with self.opener.open(request, timeout=300) as response, destination.open('xb') as output:
+            while True:
+                chunk = response.read(min(1024**2, asset['sizeBytes']-count+1))
+                if not chunk: break
+                count += len(chunk)
+                check(count <= asset['sizeBytes'], 'Catalog asset exceeds signed size')
+                digest.update(chunk); output.write(chunk)
+            output.flush(); os.fsync(output.fileno())
+        check(count == asset['sizeBytes'] and digest.hexdigest() == asset['sha256'], 'Catalog asset bytes do not match pin')
+        destination.chmod(0o400)
 
 def local_quiet():
     # Traverse from the root-owned state directory without following any
@@ -330,6 +401,191 @@ class Updater:
                 raise
 
 
+class CatalogReconciler:
+    """Crash-safe catalog desired-state transaction for a drained hosted node."""
+    def __init__(self, config, client):
+        self.config, self.client = config, client
+        self.journal = WORK/'catalog-operation.json'
+
+    def save(self, operation):
+        atomic(self.journal, json.dumps(operation).encode())
+
+    def healthy(self, operation, report):
+        consecutive = 0
+        for _ in range(30):
+            try:
+                response = self.client.catalog_poll(operation['id'], report)
+                consecutive = consecutive + 1 if response['healthy'] else 0
+                if consecutive >= 3: return True
+            except (OSError, ValueError):
+                consecutive = 0
+            time.sleep(2)
+        return False
+
+    def finish(self, operation, report):
+        operation['phase'], operation['report'] = 'committing', report
+        self.save(operation)
+        result = self.client.catalog_poll(operation['id'], report)
+        check(result['phase'] == 'complete' and result['outcome'] == report, 'Terminal catalog report is not committed')
+        operation['phase'] = 'complete'
+        self.save(operation)
+
+    def catalog_environment(self, current, catalogs):
+        values = {}
+        for raw in current.decode().splitlines():
+            check('=' in raw, 'Invalid installed environment file')
+            name, value = raw.split('=', 1)
+            check(re.fullmatch(r'[A-Z][A-Z0-9_]*', name) and name not in values, 'Invalid installed environment field')
+            values[name] = value
+        for name in list(values):
+            if name == 'PROVENANCE_PAPER_CATALOGS_JSON' or name.startswith('PROVENANCE_PAPER_PROBE_') or name.startswith('PROVENANCE_PAPER_PREPARED_RUNTIME_') or name == 'PROVENANCE_PAPER_PREPARED_RUNTIMES_JSON':
+                del values[name]
+        compact = json.dumps(catalogs, separators=(',', ':'), ensure_ascii=False)
+        values['PROVENANCE_PAPER_CATALOGS_JSON'] = json.dumps(compact, ensure_ascii=False)
+        encoded = ''.join(name+'='+values[name]+'\n' for name in sorted(values)).encode()
+        check(len(encoded) <= MAX_CATALOG*2, 'Catalog environment exceeds limit')
+        return encoded
+
+    def assets(self, revision):
+        assets = {}
+        for catalog in revision['catalogs']:
+            for asset in (catalog['paper']['artifact'], catalog['java']['artifact'], catalog['probe'], catalog['preparedRuntime']['artifact']):
+                prior = assets.get(asset['sha256'])
+                check(prior is None or prior == asset, 'Catalog digest has conflicting identities')
+                assets[asset['sha256']] = asset
+        return assets
+
+    def populate_cache(self, staged):
+        uid = run('id', '-u', USER).decode().strip()
+        check(re.fullmatch(r'[1-9][0-9]*', uid), 'Invalid worker account identity')
+        for digest, source in staged.items():
+            target = STATE/'cache'/'content'/'sha256'/digest[:2]/digest[2:]
+            run('runuser', '-u', USER, '--', 'mkdir', '-p', str(target.parent))
+            with source.open('rb') as content:
+                result = subprocess.run(['runuser', '-u', USER, '--', 'python3', '-I', '-c',
+                    'import os,sys,tempfile,shutil; p=sys.argv[1]; fd,t=tempfile.mkstemp(dir=os.path.dirname(p)); '
+                    'f=os.fdopen(fd,"wb"); shutil.copyfileobj(sys.stdin.buffer,f); f.flush(); os.fsync(f.fileno()); '
+                    'f.close(); os.chmod(t,0o444); os.replace(t,p)', str(target)], stdin=content,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
+            check(result.returncode == 0, 'Unable to populate worker catalog cache')
+
+    def switch(self, operation, catalogs):
+        protected(ROOT/'settings.json')
+        protected(ROOT/'runner.env')
+        settings = decode(read(ROOT/'settings.json', MAX_CATALOG*2))
+        settings.pop('probe', None)
+        settings.pop('preparedRuntime', None)
+        settings['paperCatalogs'] = catalogs
+        environment = self.catalog_environment(read(ROOT/'runner.env', MAX_CATALOG*2), catalogs)
+        atomic(ROOT/'runner.env', environment, 0o640)
+        gid = int(run('id', '-g', USER).decode().strip())
+        check(gid > 0, 'Invalid worker group identity')
+        os.chown(ROOT/'runner.env', 0, gid)
+        # runner.env is the runtime authority and is always replaced as one
+        # complete file. settings.json follows as operator-readable inventory.
+        atomic(ROOT/'settings.json', (json.dumps(settings)+'\n').encode())
+        metadata = decode(read(ROOT/'installed.json'))
+        metadata['catalogSha256'] = operation['revision']['sha256']
+        atomic(ROOT/'installed.json', json.dumps(metadata).encode())
+
+    def restore(self, operation):
+        backup = WORK/operation['backup']
+        protected(backup/'settings.json')
+        protected(backup/'runner.env')
+        protected(backup/'installed.json')
+        atomic(ROOT/'settings.json', read(backup/'settings.json', MAX_CATALOG*2))
+        atomic(ROOT/'runner.env', read(backup/'runner.env', MAX_CATALOG*2), 0o640)
+        gid = int(run('id', '-g', USER).decode().strip())
+        check(gid > 0, 'Invalid worker group identity')
+        os.chown(ROOT/'runner.env', 0, gid)
+        atomic(ROOT/'installed.json', read(backup/'installed.json'))
+
+    def rollback(self, operation):
+        operation['phase'] = 'rollback'
+        self.save(operation)
+        no_scopes()
+        service('stop')
+        if not local_quiet():
+            service('start')
+            return
+        no_scopes()
+        self.restore(operation)
+        service('start')
+        self.finish(operation, 'rolled_back' if self.healthy(operation, 'rollback-health') else 'failed')
+
+    def step(self):
+        if self.journal.exists():
+            operation = decode(read(self.journal, MAX_CATALOG*2))
+            if operation['phase'] == 'committing':
+                self.finish(operation, operation['report'])
+                return
+            if operation['phase'] != 'complete':
+                result = self.client.catalog_poll(operation['id'])
+                if result['phase'] == 'complete':
+                    check(result['outcome'] in ('succeeded', 'rolled_back', 'failed'), 'Unexpected terminal catalog outcome')
+                    operation['phase'] = 'complete'; self.save(operation)
+                    return
+                self.rollback(operation)
+                return
+        command = self.client.catalog_poll()
+        if command['phase'] != 'install': return
+        try:
+            revision = command['revision']
+            verify_catalog(revision, self.config['releasePublicKey'])
+            if not local_quiet(): return
+            no_scopes()
+            with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+                catalog_file = Path(temporary)/'catalogs.json'
+                catalog_file.write_text(json.dumps(revision['catalogs'], separators=(',', ':'), ensure_ascii=False))
+                run(str(ROOT/'runner'), 'validate-paper-catalogs', str(catalog_file))
+            staged = {}
+            assets = self.assets(revision)
+            installed_settings = decode(read(ROOT/'settings.json', MAX_CATALOG*2))
+            disk_budget = installed_settings.get('resources', {}).get('diskBytes')
+            check(type(disk_budget) is int and 0 < sum(asset['sizeBytes'] for asset in assets.values()) <= disk_budget,
+                  'Catalog assets exceed node disk budget')
+            asset_root = WORK/'catalog-assets'
+            if not asset_root.exists(): asset_root.mkdir(mode=0o700)
+            check(asset_root.resolve() == asset_root and asset_root.stat().st_uid == 0 and stat.S_IMODE(asset_root.stat().st_mode) == 0o700, 'Unsafe catalog asset directory')
+            for digest, asset in assets.items():
+                target = asset_root/digest
+                if not target.exists():
+                    with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+                        downloaded = Path(temporary)/'asset'
+                        self.client.download_catalog_asset(asset, downloaded)
+                        atomic(target, downloaded.read_bytes(), 0o400)
+                check(sha(target) == digest and target.stat().st_size == asset['sizeBytes'], 'Staged catalog asset drift')
+                staged[digest] = target
+            self.populate_cache(staged)
+            protected(ROOT/'runner')
+            check(decode(read(ROOT/'installed.json'))['runnerSha256'] == sha(ROOT/'runner'), 'Installed runner identity drift')
+            backup_name = 'catalog-backup-'+command['operationId']
+            backup = WORK/backup_name
+            if not backup.exists(): backup.mkdir(mode=0o700)
+            check(backup.resolve() == backup and backup.stat().st_uid == 0 and stat.S_IMODE(backup.stat().st_mode) == 0o700, 'Unsafe catalog backup directory')
+            for name in ('settings.json', 'runner.env', 'installed.json'):
+                source = ROOT/name
+                protected(source)
+                if not (backup/name).exists(): atomic(backup/name, read(source, MAX_CATALOG*2))
+            operation = {'id': command['operationId'], 'revision': revision, 'backup': backup_name, 'phase': 'staged'}
+            self.save(operation)
+        except (ValueError, TypeError, KeyError, OSError):
+            self.client.catalog_poll(command['operationId'], 'failed')
+            return
+        try:
+            service('stop')
+            check(local_quiet(), 'Pending terminal replay prevents catalog activation')
+            no_scopes()
+            self.switch(operation, revision['catalogs'])
+            operation['phase'] = 'verifying'; self.save(operation)
+            service('start')
+            self.finish(operation, 'succeeded') if self.healthy(operation, 'verifying') else self.rollback(operation)
+        except Exception:
+            current = decode(read(self.journal, MAX_CATALOG*2))
+            if current['phase'] not in ('committing', 'complete'): self.rollback(current)
+            else: raise
+
+
 def main():
     check(os.geteuid() == 0, 'Updater requires its root service')
     os.umask(0o077)
@@ -347,9 +603,13 @@ def main():
     lock = os.open(WORK/'lock', os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, 0o600)
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     updater = Updater(config, Client(config))
+    catalogs = CatalogReconciler(config, updater.client)
     while True:
         try:
             updater.step()
+            # Binary replacement has priority; catalogs reconcile only when its
+            # crash journal is terminal and no binary operation is actionable.
+            catalogs.step()
         except Exception as error:
             # Exceptions from network libraries can carry URLs/headers; log only type.
             print('Hosted update deferred: '+type(error).__name__, flush=True)

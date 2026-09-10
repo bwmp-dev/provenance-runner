@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+.orchestrator*
+**/__pycache__
+**/*.pyc
+**/*.pem
+bin
+dist

@@ -75,6 +75,28 @@ class Signatures(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     u.verify_release(release, base64.b64encode(bytes(32)).decode())
 
+    def test_catalog_signature_binds_canonical_payload_and_asset_pins(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(['openssl', 'genpkey', '-algorithm', 'ED25519', '-out', str(root/'key')], check=True, capture_output=True)
+            public = subprocess.check_output(['openssl', 'pkey', '-in', str(root/'key'), '-pubout', '-outform', 'DER'])[-32:]
+            digest = 'a'*64
+            asset = {'uri':'https://api.example/v1/runner-catalog-assets/'+digest+'/paper.jar','sha256':digest,'filename':'paper.jar','sizeBytes':100}
+            catalog = {'environmentId':'paper-1.21.8-60','paper':{'artifact':asset},'java':{'artifact':asset},
+                       'probeVersion':'0.1.0','probeSourceCommit':'f'*40,'probe':asset,'preparedRuntime':{'artifact':asset}}
+            payload = {'schemaVersion':'provenance.hosted-paper-catalog/v1','artifactHosts':['api.example'],'catalogs':[catalog]}
+            canonical = json.dumps(payload,separators=(',',':'),sort_keys=True).encode()
+            revision = dict(payload, sha256=hashlib.sha256(canonical).hexdigest(), signature='')
+            (root/'message').write_bytes(u.catalog_signing_bytes(revision))
+            subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(root/'key'),'-in',str(root/'message'),'-out',str(root/'sig')],check=True,capture_output=True)
+            revision['signature'] = base64.b64encode((root/'sig').read_bytes()).decode()
+            with patch.object(u,'WORK',root):
+                u.verify_catalog(revision,base64.b64encode(public).decode())
+                altered = json.loads(json.dumps(revision)); altered['catalogs'][0]['paper']['artifact']['sizeBytes'] = 101
+                with self.assertRaises(ValueError): u.verify_catalog(altered,base64.b64encode(public).decode())
+                altered = json.loads(json.dumps(revision)); altered['catalogs'][0]['paper']['artifact']['uri'] = 'https://evil.example/file'
+                with self.assertRaises(ValueError): u.verify_catalog(altered,base64.b64encode(public).decode())
+
     def test_signed_input_refuses_injection_unknown_fields_and_oversize(self):
         base = {'version': 'v1', 'url': 'https://assets.example/runner', 'sha256': 'a'*64, 'sizeBytes': 100, 'signature': ''}
         for values in [{'version': 'v1\nurl:other'}, {'url': 'http://assets.example/runner'}, {'url': 'https://user:password@assets.example/runner'}, {'sizeBytes': True}, {'sizeBytes': u.MAX_BINARY+1}, {'shellCommand': 'anything'}]:
@@ -285,6 +307,80 @@ class ReleaseCredentialScope(unittest.TestCase):
         self.assertEqual(request.get_header('Content-type'), 'application/json')
         self.assertEqual(json.loads(request.data), {'operationId': '', 'report': 'idle'})
         self.assertEqual(client.opener.timeout, 30)
+
+    def test_catalog_poll_and_assets_keep_credentials_on_exact_api_authority(self):
+        import io
+        client = object.__new__(u.Client)
+        client.config = {'apiOrigin':'https://api.example','runnerId':'10000000-0000-0000-0000-000000000001'}
+        client.token = 'pru_'+'a'*64
+        response = {'operationId':'','phase':'wait','revision':None,'previousCatalogSha256':'','healthy':False,'outcome':''}
+        class Opener:
+            def open(self, request, timeout):
+                self.request, self.timeout = request, timeout
+                return io.BytesIO(json.dumps(response).encode())
+        client.opener = Opener()
+        self.assertEqual(client.catalog_poll(), response)
+        self.assertEqual(client.opener.request.full_url, client.config['apiOrigin']+'/v1/runner-catalogs/'+client.config['runnerId']+'/poll')
+        payload = b'catalog asset'; digest = hashlib.sha256(payload).hexdigest()
+        asset = {'uri':client.config['apiOrigin']+'/v1/runner-catalog-assets/'+digest+'/paper.jar','sha256':digest,'filename':'paper.jar','sizeBytes':len(payload)}
+        class AssetOpener:
+            def open(self, request, timeout): self.request=request; return io.BytesIO(payload)
+        client.opener = AssetOpener()
+        with tempfile.TemporaryDirectory() as temp:
+            client.download_catalog_asset(asset, Path(temp)/'asset')
+        self.assertEqual(client.opener.request.get_header('Authorization'), 'Bearer '+client.token)
+        with self.assertRaises(ValueError):
+            client.download_catalog_asset(dict(asset, uri='https://evil.example/v1/runner-catalog-assets/'+digest+'/paper.jar'), Path('/unused'))
+
+
+class CatalogTransactions(unittest.TestCase):
+    def test_environment_replaces_legacy_catalog_inputs_without_touching_runtime_policy(self):
+        reconciler = u.CatalogReconciler({}, None)
+        current = (b'PROVENANCE_CACHE_ROOT="/cache"\nPROVENANCE_PAPER_PROBE_URI="https://old"\n'
+                   b'PROVENANCE_PAPER_PREPARED_RUNTIMES_JSON="[]"\n')
+        catalogs = [{'environmentId':'paper-example'}]
+        result = reconciler.catalog_environment(current, catalogs).decode()
+        self.assertIn('PROVENANCE_CACHE_ROOT="/cache"\n', result)
+        self.assertNotIn('PROVENANCE_PAPER_PROBE_URI', result)
+        self.assertNotIn('PROVENANCE_PAPER_PREPARED_RUNTIMES_JSON', result)
+        lines = dict(line.split('=',1) for line in result.splitlines())
+        self.assertEqual(json.loads(json.loads(lines['PROVENANCE_PAPER_CATALOGS_JSON'])), catalogs)
+
+    def test_restore_uses_root_private_backup_and_preserves_catalog_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, work = Path(temp)/'root', Path(temp)/'work'
+            root.mkdir(); work.mkdir()
+            backup = work/'catalog-backup-operation'; backup.mkdir()
+            originals = {'settings.json':b'{"old":true}\n','runner.env':b'OLD="yes"\n','installed.json':b'{"runnerSha256":"old"}'}
+            for name,data in originals.items(): (backup/name).write_bytes(data)
+            for name in originals: (root/name).write_bytes(b'new')
+            reconciler = u.CatalogReconciler({},None)
+            with patch.object(u,'ROOT',root), patch.object(u,'WORK',work), patch.object(u,'protected'), patch.object(u,'run',return_value=b'123\n'), patch.object(u.os,'chown'):
+                reconciler.restore({'backup':'catalog-backup-operation'})
+            for name,data in originals.items(): self.assertEqual((root/name).read_bytes(),data)
+
+    def test_failed_health_rollback_restores_files_before_terminal_resume(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, work = Path(temp)/'root', Path(temp)/'work'
+            root.mkdir(); work.mkdir()
+            backup = work/'catalog-backup-operation'; backup.mkdir()
+            originals = {'settings.json':b'{"old":true}\n','runner.env':b'OLD="yes"\n','installed.json':b'{"runnerSha256":"old"}'}
+            for name,data in originals.items(): (backup/name).write_bytes(data)
+            for name in originals: (root/name).write_bytes(b'new')
+            class CatalogClient:
+                def __init__(self): self.calls=[]
+                def catalog_poll(self, operation='', report='idle'):
+                    self.calls.append((operation,report)); return {'phase':'complete','outcome':report}
+            client = CatalogClient(); reconciler = u.CatalogReconciler({},client)
+            operation = {'id':'10000000-0000-0000-0000-000000000001','backup':'catalog-backup-operation','phase':'verifying','revision':{'sha256':'a'*64}}
+            with patch.object(u,'ROOT',root), patch.object(u,'WORK',work), patch.object(u,'protected'), patch.object(u,'run',return_value=b'123\n'), patch.object(u.os,'chown'), patch.object(u,'no_scopes'), patch.object(u,'local_quiet',return_value=True), patch.object(u,'service') as service, patch.object(reconciler,'healthy',return_value=True):
+                reconciler.journal = work/'catalog-operation.json'
+                reconciler.rollback(operation)
+            for name,data in originals.items(): self.assertEqual((root/name).read_bytes(),data)
+            self.assertEqual([call.args for call in service.call_args_list],[('stop',),('start',)])
+            self.assertEqual(client.calls,[(operation['id'],'rolled_back')])
+            journal = json.loads(reconciler.journal.read_text())
+            self.assertEqual((journal['phase'],journal['report']),('complete','rolled_back'))
 
 
 class MalformedCommands(unittest.TestCase):

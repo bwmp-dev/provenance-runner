@@ -28,8 +28,10 @@ UNIT = 'provenance-runner.service'
 TREE = '55b3d6002a16c74e9f37638a451a4b4c32b4078b06377d85a8633b89c2506500'
 RUNSC = '456ea862b62b48bb7ff27ae38c262b52315bf3d68ea0733164e4817cadc518a1'
 PROBE = '040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868'
+LEGACY_PROBE = ('0.2.0', '18400bb4a47d28c1d95c3f4067603af3f3409d5e',
+                '141a535d495a3afd5f413cab04618e75421390f0e14acba0707d1573c5a8c96b', 480768)
 FILES = {'runner', 'runsc', 'rootfs.tar', 'install.sh', 'install.py',
-         'prepare-gvisor-rootfs.sh', 'settings.example.json', 'SOURCE_COMMIT', 'updater.py', 'sign-release.py'}
+         'prepare-gvisor-rootfs.sh', 'settings.example.json', 'SOURCE_COMMIT', 'updater.py', 'sign-release.py', 'sign-catalog.py'}
 SYSTEM_UNIT = Path('/etc/systemd/system') / UNIT
 USER_UNIT = Path('/etc/systemd/user') / UNIT
 PROFILE = Path('/etc/apparmor.d/opt.provenance-runner.runsc')
@@ -158,13 +160,13 @@ def validate_catalogs(catalogs, hosts):
         identities.add(identity)
         paper, java, runtime = catalog['paper'], catalog['java'], catalog['preparedRuntime']
         exact(paper, 'gameVersion build artifact')
-        require(isinstance(paper['gameVersion'], str) and re.fullmatch(r'(?:1\.20\.(?:[6-9]|[1-9][0-9]+)|1\.21(?:\.[0-9]+)?|26\.[1-9][0-9]*(?:\.[0-9]+)?)', paper['gameVersion']), 'Invalid Paper release version')
+        require(isinstance(paper['gameVersion'], str) and re.fullmatch(r'(?:1\.(?:7\.10|[89](?:\.[0-9]+)?|1[0-9](?:\.[0-9]+)?|2[01](?:\.[0-9]+)?)|26\.[1-9][0-9]*(?:\.[0-9]+)?)', paper['gameVersion']), 'Invalid Paper release version')
         number(paper['build'], 2**32-1)
         exact(java, 'distribution version os architecture archiveRoot artifact maximumExpandedBytes')
         require(java['distribution'] == 'eclipse-temurin' and java['os'] == 'linux' and java['architecture'] == 'amd64', 'Java must be Temurin for Linux amd64')
         for key in ('distribution', 'version', 'archiveRoot'):
             require(isinstance(java[key], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,199}', java[key]), 'Invalid Java identity or archive root')
-        require(re.fullmatch(r'(?:21|25)\.[0-9]+\.[0-9]+(?:\.[0-9]+)?\+[0-9]+', java['version']), 'Java version must be an exact numeric release')
+        require(re.fullmatch(r'(?:8|11|16|17|21|25)\.[0-9]+\.[0-9]+(?:\.[0-9]+)?\+[0-9]+', java['version']), 'Java version must be an exact numeric release')
         exact(runtime, 'artifact maximumExpandedBytes')
         for archive in (java, runtime):
             number(archive['maximumExpandedBytes'], 1024**3)
@@ -173,8 +175,11 @@ def validate_catalogs(catalogs, hosts):
             exact(artifact, 'uri sha256 filename sizeBytes')
             validate_asset(artifact, hosts)
             require(isinstance(artifact['filename'], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,199}', artifact['filename']), 'Invalid artifact filename')
-        require(catalog['probeVersion'] == '0.1.0' and catalog['probeSourceCommit'] == 'f82dcbf8244354059731ba533f73909ed5528bbd'
-                and catalog['probe']['sha256'] == PROBE and catalog['probe']['sizeBytes'] == 478853, 'Probe must match the accepted catalog')
+        probe_identity = (catalog['probeVersion'], catalog['probeSourceCommit'], catalog['probe']['sha256'], catalog['probe']['sizeBytes'])
+        original = ('0.1.0', 'f82dcbf8244354059731ba533f73909ed5528bbd', PROBE, 478853)
+        require(probe_identity in (original, LEGACY_PROBE), 'Probe must match an accepted immutable catalog')
+        if probe_identity == original:
+            require(re.fullmatch(r'(?:1\.20\.(?:[6-9]|[1-9][0-9]+)|1\.21(?:\.[0-9]+)?|26\.[1-9][0-9]*(?:\.[0-9]+)?)', paper['gameVersion']), 'Original probe cannot run legacy Paper')
         key = (paper['gameVersion'], paper['build'], java['distribution'], java['version'], paper['artifact']['sha256'])
         require(key not in remote and runtime['artifact']['sha256'] not in runtime_digests, 'Duplicate runtime identity')
         remote.add(key)

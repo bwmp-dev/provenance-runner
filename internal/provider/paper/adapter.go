@@ -67,6 +67,9 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if specification == nil {
 		return localjob.Job{}, errors.New("adapt Paper job: specification is nil")
 	}
+	if p.config.RuntimeSource != nil {
+		return p.adaptAutomaticJob(specification)
+	}
 	if specification.GetLease() == nil || specification.GetLease().GetJobId() == "" {
 		return localjob.Job{}, errors.New("adapt Paper job: lease.job_id is required")
 	}

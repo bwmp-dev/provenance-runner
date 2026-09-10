@@ -49,7 +49,7 @@ func runWithSelectedCatalog(ctx context.Context, arguments []string, stdout, std
 	var catalogPath string
 	flags.StringVar(&catalogPath, "catalog", "", "operator catalog JSON file (preparedRuntime may be omitted)")
 	flags.StringVar(&paperPath, "paper", "", "path to the pinned Paper JAR")
-	flags.StringVar(&javaPath, "java", "java", "path to a Java 21 or newer executable")
+	flags.StringVar(&javaPath, "java", "java", "path to the selected catalog's Java executable")
 	flags.StringVar(&outputPath, "output", "paper-prepared-runtime.tar.gz", "new archive path")
 	flags.StringVar(&environmentID, "environment", paper.AlphaEnvironmentID, "exact alpha Paper environment ID")
 	if err := flags.Parse(arguments); err != nil {

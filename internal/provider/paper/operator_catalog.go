@@ -62,7 +62,7 @@ func ValidateOperatorCatalog(c Catalog, requireRuntime bool) error {
 	if !javaVersionPattern.MatchString(c.Java.Version) {
 		return errors.New("catalog Java version must be an exact numeric release")
 	}
-	if c.ProbeVersion != AlphaProbeVersion || c.ProbeSourceCommit != AlphaProbeSourceCommit || c.Probe.SHA256 != AlphaProbeSHA256 || c.Probe.SizeBytes != AlphaProbeSizeBytes {
+	if !acceptedProbe(c) {
 		return errors.New("catalog must use the accepted immutable Paper probe")
 	}
 	if !requireRuntime && c.PreparedRuntime == (ArchivePin{}) {

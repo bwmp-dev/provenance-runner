@@ -38,6 +38,7 @@ const (
 var safePluginName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_. -]{0,63}$`)
 
 type Config struct {
+	RuntimeSource           *RuntimeSource
 	ArtifactCache           *artifact.Cache
 	PaperCache              *artifact.Cache
 	JavaCache               *artifact.Cache
@@ -111,7 +112,7 @@ func New(config Config) (*Provider, error) {
 		return nil, errors.New("create Paper provider: Catalog and Catalogs cannot both be configured")
 	}
 	configuredCatalogs := config.Catalogs
-	if len(configuredCatalogs) == 0 {
+	if len(configuredCatalogs) == 0 && config.RuntimeSource == nil {
 		if config.Catalog.EnvironmentID == "" {
 			config.Catalog = AlphaCatalog()
 		}
@@ -149,7 +150,11 @@ func New(config Config) (*Provider, error) {
 	}
 	pinPolicy := config.pinPolicy
 	if pinPolicy == nil {
-		pinPolicy, err = newPinnedSourcePolicies(configuredCatalogs)
+		if len(configuredCatalogs) > 0 {
+			pinPolicy, err = newPinnedSourcePolicies(configuredCatalogs)
+		} else {
+			pinPolicy = inputPolicy
+		}
 		if err != nil {
 			return nil, fmt.Errorf("create Paper provider: pinned source policy: %w", err)
 		}
@@ -198,17 +203,18 @@ type commandAssertion struct {
 }
 
 type configuration struct {
-	ArtifactKind  string                `json:"artifactKind"`
-	EnvironmentID string                `json:"environmentId"`
-	Target        artifactReference     `json:"target"`
-	Dependencies  []dependencyReference `json:"dependencies,omitempty"`
-	TestPlan      testPlan              `json:"testPlan"`
-	MemoryBytes   int64                 `json:"memoryBytes"`
-	CPUMillis     int64                 `json:"cpuMillis"`
-	PIDs          int64                 `json:"pids"`
-	DiskBytes     int64                 `json:"diskBytes"`
-	MaxLineBytes  int64                 `json:"maxLineBytes,omitempty"`
-	RedactSecrets []string              `json:"redactSecrets,omitempty"`
+	RuntimeManifest *SignedRuntime        `json:"runtimeManifest,omitempty"`
+	ArtifactKind    string                `json:"artifactKind"`
+	EnvironmentID   string                `json:"environmentId"`
+	Target          artifactReference     `json:"target"`
+	Dependencies    []dependencyReference `json:"dependencies,omitempty"`
+	TestPlan        testPlan              `json:"testPlan"`
+	MemoryBytes     int64                 `json:"memoryBytes"`
+	CPUMillis       int64                 `json:"cpuMillis"`
+	PIDs            int64                 `json:"pids"`
+	DiskBytes       int64                 `json:"diskBytes"`
+	MaxLineBytes    int64                 `json:"maxLineBytes,omitempty"`
+	RedactSecrets   []string              `json:"redactSecrets,omitempty"`
 }
 
 type resolvedReference struct {
@@ -246,6 +252,28 @@ func (p *Provider) Resolve(ctx context.Context, request execution.Request) (exec
 		return nil, invalidEnvironment(fmt.Errorf("decode trailing environment data: %w", err))
 	}
 	catalog, exists := p.catalogs[config.EnvironmentID]
+	if config.RuntimeManifest != nil {
+		if p.config.RuntimeSource == nil {
+			return nil, invalidEnvironment(errors.New("automatic runtime trust is not configured"))
+		}
+		var err error
+		catalog, err = p.config.RuntimeSource.verify(*config.RuntimeManifest)
+		if err != nil {
+			return nil, invalidEnvironment(err)
+		}
+		for _, pin := range []ArtifactPin{catalog.Paper.Artifact, catalog.Java.Artifact, catalog.Probe, catalog.PreparedRuntime.Artifact} {
+			if pin.SizeBytes > p.config.MaximumArtifactBytes {
+				return nil, invalidEnvironment(errors.New("runtime artifact exceeds runner limit"))
+			}
+		}
+		copyProvider := *p
+		copyProvider.pinPolicy, err = newPinnedSourcePolicies([]Catalog{catalog.Catalog})
+		if err != nil {
+			return nil, invalidEnvironment(err)
+		}
+		p = &copyProvider
+		exists = true
+	}
 	if !exists {
 		return nil, invalidEnvironment(errors.New("environmentId does not match a configured Paper catalog entry"))
 	}
@@ -599,7 +627,7 @@ func (e *environment) materialize(ctx context.Context, jobWorkspace *workspace.W
 	if e.provider.config.AllowHostileFixtures {
 		javaArguments = append(javaArguments, "-Dprovenance.fixture.hostile.enabled=true")
 	}
-	javaArguments = append(javaArguments, "-jar", "/workspace/paper.jar", "--nogui")
+	javaArguments = append(javaArguments, "-jar", "/workspace/paper.jar", "nogui")
 	arguments := []string{
 		"-cu",
 		`cp -R /inputs/server/. /workspace/ || exit 125; chmod -R u+rwX /workspace || exit 125; "$@"; status=$?; if [ "$status" -eq 125 ]; then exit 126; fi; exit "$status"`,
