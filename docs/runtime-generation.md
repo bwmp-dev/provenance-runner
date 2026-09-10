@@ -140,7 +140,13 @@ pre-allocation incomplete files, and observed loop/mount absence. Cleanup succes
 is emitted only after explicit cleanup and fresh observations, not a literal flag.
 Early unjournalled/partial copies are retained rather than adopted automatically.
 
-Replacement-file tests cover partial write, flush, fsync and ownership failures,
+Replacement files start private and explicitly regain the original mode after
+ownership is set, before atomic publication; the operator umask cannot remove
+required group-read or executable permissions. Unit tests cover masks022/077/0777
+and exact ownership/mode preservation. The disposable systemd selector fixture
+runs both selection and rollback with umask077 and checks0755 hooks/0640 config.
+
+Replacement-file tests cover partial write, flush, fsync, chmod and ownership failures,
 exact retry, pre-existing/substituted temporary files, and a directory-sync failure
 after atomic replacement. Only the exact exclusively created temporary inode may
 be removed on pre-replacement failure; successful replacement is never silently

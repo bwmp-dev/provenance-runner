@@ -24,6 +24,25 @@ b=module('runtime-generation-profile-binding')
 
 
 class GenerationTests(unittest.TestCase):
+    def test_replace_preserves_exact_permissions_under_restrictive_umasks(self):
+        for mode in (0o400, 0o600, 0o640, 0o755):
+            for mask in (0o022, 0o077, 0o777):
+                with self.subTest(mode=oct(mode), umask=oct(mask)), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory)/'current'
+                    path.write_bytes(b'old')
+                    path.chmod(mode)
+                    before = path.stat()
+                    prior = os.umask(mask)
+                    try:
+                        with patch.object(g, 'protected', side_effect=lambda value,*args:Path(value)):
+                            g.replace_file(path, g.hashlib.sha256(b'old').hexdigest(), b'new')
+                    finally:
+                        os.umask(prior)
+                    after = path.stat()
+                    self.assertEqual(after.st_mode & 0o7777, mode)
+                    self.assertEqual((after.st_uid, after.st_gid), (before.st_uid, before.st_gid))
+                    self.assertEqual(path.read_bytes(), b'new')
+
     def test_replace_write_flush_and_sync_failures_preserve_original_and_retry(self):
         real_fdopen=g.os.fdopen
         class FailingOutput:
@@ -37,12 +56,12 @@ class GenerationTests(unittest.TestCase):
                 if self.failure=='flush':raise OSError('flush failure')
                 return self.file.flush()
             def fileno(self):return self.file.fileno()
-        for failure in ('write','flush','fsync'):
+        for failure in ('write','flush','fsync','fchmod'):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
                 path=Path(directory)/'current.env';path.write_bytes(b'old')
                 digest=g.hashlib.sha256(b'old').hexdigest()
                 temp=path.parent/'.current.env.runtime-generation'
-                injection=(patch.object(g.os,'fsync',side_effect=OSError('sync failure')) if failure=='fsync' else
+                injection=(patch.object(g.os,failure,side_effect=OSError('metadata/sync failure')) if failure in ('fsync','fchmod') else
                            patch.object(g.os,'fdopen',side_effect=lambda fd,mode:FailingOutput(fd,mode,failure)))
                 with patch.object(g,'protected',side_effect=lambda value,*args:Path(value)):
                     with injection,self.assertRaises(OSError):g.replace_file(path,digest,b'new')
