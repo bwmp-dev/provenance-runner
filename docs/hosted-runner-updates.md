@@ -56,13 +56,13 @@ the updater itself remains an operator task in this version.
 ## Publish and roll out a binary
 
 Build from the intended source, setting `internal/buildinfo.Version` to the
-version recorded in the release manifest. The bundle builder uses `git-` followed
+version recorded in the release manifest. The bundle builder uses `0.0.0-dev+git.` followed
 by the first 12 characters of its source commit. Publish the binary at a direct,
 immutable HTTPS URL; update downloads deliberately reject redirects.
 
 ```sh
 python3 scripts/vps/sign-release.py \
-  --binary /path/to/runner --version git-0123456789ab \
+  --binary /path/to/runner --version 0.0.0-dev+git.0123456789ab \
   --url https://YOUR_ARTIFACT_HOST/runner/0123456789ab \
   --private-key /protected/release-key.pem \
   --output /path/to/release.json

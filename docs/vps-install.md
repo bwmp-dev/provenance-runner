@@ -62,6 +62,11 @@ scripts/vps/build-bundle.sh /absolute/path/runner-bundle
 scp -r /absolute/path/runner-bundle your-vps:/root/
 ```
 
+Untagged bundles report `0.0.0-dev+git.<12-character-commit>`, a SemVer
+development version with the source prefix in build metadata. Use that compiled
+version verbatim when signing its update manifest. Legacy `git-...` versions do
+not satisfy the attestation schema's runner-version requirement.
+
 Use a committed checkout. The builder compiles the runner for Linux amd64,
 downloads the checksum-pinned gVisor release, and exports the digest-pinned Ubuntu
 image without starting it. It records source commit and SHA256 checksums. It
