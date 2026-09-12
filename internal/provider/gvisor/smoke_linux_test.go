@@ -20,6 +20,7 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
 func TestMain(m *testing.M) {
@@ -234,6 +235,52 @@ func TestRunscSmoke(t *testing.T) {
 			waitForScopeRemoval(t, scope)
 		})
 	}
+
+	t.Run("sealed secret files and redaction", func(t *testing.T) {
+		secret := []byte("synthetic-sealed-smoke")
+		files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: secret}})
+		if err != nil {
+			t.Fatal("create synthetic memory files failed")
+		}
+		defer files.Close()
+		mounts, err := files.Mounts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
+			Command: "/bin/sh", Arguments: []string{"-c", `test "$(id -u)" = 65532 && test "$(wc -c < /run/provenance/test-secrets/token)" = 22 && ! (printf x > /run/provenance/test-secrets/token) 2>/dev/null && ! touch /run/escape 2>/dev/null && cat /run/provenance/test-secrets/token && echo && echo secret-file-smoke-ok`},
+			InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+		})
+		if err != nil {
+			t.Fatal("resolve secret sandbox failed:", err)
+		}
+		owned, err := env.Prepare(context.Background())
+		if err != nil {
+			t.Fatal("prepare secret sandbox failed:", err)
+		}
+		prepared := owned.(*preparedEnvironment)
+		defer cleanupSmokeEnvironment(t, prepared)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		outcome, err := prepared.Execute(ctx)
+		if err != nil || outcome.Failure != nil {
+			t.Fatal("synthetic secret sandbox failed:", err)
+		}
+		output, err := prepared.Collect(ctx)
+		if err != nil || !strings.Contains(output.Stdout, "secret-file-smoke-ok") || strings.Contains(output.Stdout, string(secret)) || strings.Contains(output.Stderr, string(secret)) {
+			t.Fatal("secret read/redaction assertion failed")
+		}
+		cleanupSmokeEnvironment(t, prepared)
+		if _, err := files.Mounts(); err == nil {
+			t.Fatal("successful cleanup retained memory handles")
+		}
+		for _, mount := range mounts {
+			if _, err := os.Stat(mount.Source); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("secret descriptor survived cleanup")
+			}
+		}
+		assertNoSandboxResidue(t, provider, prepared.containerID)
+	})
 
 	t.Run("contained execution and cleanup", func(t *testing.T) {
 		config := configuration{

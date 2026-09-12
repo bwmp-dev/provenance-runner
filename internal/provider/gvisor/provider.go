@@ -23,6 +23,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
 const (
@@ -348,6 +349,13 @@ func (p *Provider) ResolveWorkload(ctx context.Context, request execution.Reques
 }
 
 func (p *Provider) resolveWorkload(ctx context.Context, request execution.Request, workload execution.IsolatedWorkload) (execution.Environment, error) {
+	if workload.TestSecretFiles != nil {
+		values, err := workload.TestSecretFiles.RedactionValues()
+		if err != nil {
+			return nil, invalidEnvironment(errors.New("test-secret files unavailable"))
+		}
+		workload.RedactSecrets = append(append([]string(nil), workload.RedactSecrets...), values...)
+	}
 	config := configuration{
 		Command:       workload.Command,
 		Arguments:     append([]string(nil), workload.Arguments...),
@@ -404,6 +412,7 @@ func (p *Provider) resolveWorkload(ctx context.Context, request execution.Reques
 		return nil, err
 	}
 	return &environment{
+		secretFiles:           workload.TestSecretFiles,
 		provider:              p,
 		config:                config,
 		inputs:                inputs,
@@ -571,6 +580,7 @@ func (p *Provider) validateMountSource(inputs, path string) (string, error) {
 }
 
 type environment struct {
+	secretFiles           *testsecrets.Files
 	provider              *Provider
 	config                configuration
 	inputs                string
@@ -598,6 +608,17 @@ func (e *environment) ResourceClass() execution.ResourceClass {
 }
 
 func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironment, error) {
+	secretTransferred := false
+	defer func() {
+		if !secretTransferred && e.secretFiles != nil {
+			_ = e.secretFiles.Close()
+		}
+	}()
+	if e.secretFiles != nil {
+		if err := validateSecretRoot(e.provider.config.RootFS, e.secretFiles); err != nil {
+			return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_secret_mounts_invalid", err)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -633,6 +654,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		return nil, errors.Join(fmt.Errorf("create gVisor bundle: %w", err), collector.Close())
 	}
 	prepared := &preparedEnvironment{
+		secretFiles:           e.secretFiles,
 		measurement:           measured,
 		provider:              e.provider,
 		containerID:           containerID,
@@ -674,6 +696,9 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("build OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
+	if err := addSecretMounts(&spec, e.secretFiles); err != nil {
+		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
+	}
 	if err := writeJSONFile(filepath.Join(bundle, "config.json"), spec); err != nil {
 		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
@@ -681,10 +706,12 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
 	transferred = true
+	secretTransferred = true
 	return prepared, nil
 }
 
 type preparedEnvironment struct {
+	secretFiles                *testsecrets.Files
 	measurement                *runtimeidentity.Lease
 	measuredRuntime            *runtimeidentity.Snapshot
 	mu                         sync.Mutex
@@ -745,6 +772,11 @@ func (e *preparedEnvironment) Execute(ctx context.Context) (outcome execution.Ex
 	if e.provider.validateRootFSLayout != nil {
 		if err := e.provider.validateRootFSLayout(e.provider.config.RootFS, e.rootFSMounts, e.structuredEventFile); err != nil {
 			return execution.ExecutionOutcome{}, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_rootfs_invalid", err)
+		}
+	}
+	if e.secretFiles != nil {
+		if err := validateSecretRoot(e.provider.config.RootFS, e.secretFiles); err != nil {
+			return execution.ExecutionOutcome{}, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_secret_mounts_invalid", err)
 		}
 	}
 	if e.structuredEventChannel != nil {
@@ -1067,6 +1099,11 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 	}
 	if err := e.evidence.Close(); err != nil {
 		return fmt.Errorf("close gVisor evidence collector: %w", err)
+	}
+	if e.secretFiles != nil {
+		if err := e.secretFiles.Close(); err != nil {
+			return err
+		}
 	}
 	if err := removeOwnedBundle(e.provider.config.BundleRoot, e.bundle); err != nil {
 		return err

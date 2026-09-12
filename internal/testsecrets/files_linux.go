@@ -141,6 +141,35 @@ func (f *Files) Mounts() ([]Mount, error) {
 	return mounts, nil
 }
 
+// RedactionValues supplies the exact values to trusted collector composition.
+// Strings must remain ephemeral; this is not a logging or serialization API.
+func (f *Files) RedactionValues() ([]string, error) {
+	if f == nil {
+		return nil, ErrUnavailable
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return nil, ErrUnavailable
+	}
+	values := make([]string, 0, len(f.files))
+	for _, entry := range f.files {
+		info, err := entry.file.Stat()
+		if err != nil || info.Size() < 1 || info.Size() > MaximumBytes {
+			return nil, ErrUnavailable
+		}
+		buffer := make([]byte, int(info.Size()))
+		n, err := entry.file.ReadAt(buffer, 0)
+		if err != nil || n != len(buffer) {
+			clear(buffer)
+			return nil, ErrUnavailable
+		}
+		values = append(values, string(buffer))
+		clear(buffer)
+	}
+	return values, nil
+}
+
 // Close releases the owner's descriptors. The sandbox and every process with
 // a retained descriptor must already be destroyed; closing alone cannot revoke
 // another holder's reference. Startup reconciliation must kill orphaned jobs
