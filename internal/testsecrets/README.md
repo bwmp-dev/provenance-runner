@@ -39,6 +39,15 @@ for removing the private tmpfs and closing handles after the runtime is gone.
 The delivery timestamp is not accepted from job JSON or persisted in bundle
 metadata. Remote delivery and lease-refresh integration are still pending.
 
+Paper's trusted composition accepts an ephemeral `execution.TestSecretSource`
+context callback. It invokes that callback only after all pinned downloads and
+workspace materialization, immediately before sandbox preparation. Unsupported
+sandboxes are refused without invoking the callback. Returned files must be
+available and unexpired; failed acquisition or resolution closes caller-owned
+handles. An explicitly supporting sandbox takes ownership on every Prepare path,
+including partial failure. This hook does not itself authorize delivery and is
+not yet connected to the authenticated remote worker or advertised capabilities.
+
 The caller clears delivery buffers after redactor and file preparation.
 The helper avoids ordinary diagnostic/JSON serialization of values. This does
 not promise protection against the trusted host user, root, debuggers, swap,

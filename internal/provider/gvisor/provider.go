@@ -348,6 +348,8 @@ func (p *Provider) ResolveWorkload(ctx context.Context, request execution.Reques
 	return p.resolveWorkload(ctx, request, workload)
 }
 
+func (p *Provider) SupportsTestSecretFiles() bool { return runtime.GOOS == "linux" }
+
 func (p *Provider) resolveWorkload(ctx context.Context, request execution.Request, workload execution.IsolatedWorkload) (execution.Environment, error) {
 	if err := validateSecretExpiry(workload.TestSecretFiles, workload.TestSecretExpiresAt, time.Now()); err != nil {
 		return nil, err
