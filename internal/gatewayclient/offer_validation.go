@@ -50,6 +50,11 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if offer == nil || offer.GetJob() == nil {
 		return rejectUnsupported("invalid_offer", "lease offer job is required")
 	}
+	// Consuming an additive contract must not silently accept a job whose
+	// required inputs are not yet implemented by this worker.
+	if len(offer.GetJob().GetTestSecrets()) != 0 {
+		return rejectUnsupported("test_secrets_unavailable", "test-secret execution is not enabled")
+	}
 	if len(offer.GetJob().GetNormalizedConfigurationJson()) > MaximumMessageBytes {
 		return rejectUnsupported("offer_too_large", "lease offer exceeds the message size limit")
 	}
@@ -242,6 +247,17 @@ func validateOfferConfiguration(configuration []byte, expected *runnerv1.Digest)
 	actual := sha256.Sum256(configuration)
 	if !validSHA256(expected) || !bytes.Equal(actual[:], expected.GetValue()) {
 		return rejectUnsupported("configuration_hash_mismatch", "normalized configuration does not match its declared hash")
+	}
+	var selection struct {
+		Tests struct {
+			Secrets map[string]json.RawMessage `json:"secrets"`
+		} `json:"tests"`
+	}
+	if json.Unmarshal(configuration, &selection) != nil {
+		return rejectUnsupported("invalid_configuration", "normalized test selection is invalid")
+	}
+	if len(selection.Tests.Secrets) != 0 {
+		return rejectUnsupported("test_secrets_unavailable", "test-secret execution is not enabled")
 	}
 	return nil
 }
