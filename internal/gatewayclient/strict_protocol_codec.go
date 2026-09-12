@@ -13,7 +13,7 @@ import (
 // enforcing IFC-012 invariants that generated object unmarshalling cannot
 // observe. In particular, protobuf merges duplicate singular message fields;
 // the raw Connect response must therefore be checked before proto.Unmarshal.
-type strictProtocolCodec struct{}
+type strictProtocolCodec struct{ allowTestSecrets bool }
 
 func (strictProtocolCodec) Name() string { return "proto" }
 
@@ -30,7 +30,7 @@ func (strictProtocolCodec) Marshal(value any) ([]byte, error) {
 	return proto.Marshal(message)
 }
 
-func (strictProtocolCodec) Unmarshal(data []byte, value any) error {
+func (c strictProtocolCodec) Unmarshal(data []byte, value any) error {
 	message, ok := value.(proto.Message)
 	if !ok {
 		return fmt.Errorf("protobuf codec cannot unmarshal %T", value)
@@ -38,13 +38,20 @@ func (strictProtocolCodec) Unmarshal(data []byte, value any) error {
 	if _, gatewayMessage := value.(*runnerv1.GatewayMessage); gatewayMessage {
 		// Inspect the wire before decoding: protobuf oneof replacement could
 		// otherwise allocate then discard a secret delivery hidden by a later
-		// payload. This runner does not yet negotiate secret delivery.
+		// payload. The enlarged variant is available only to enabled consumers.
 		deliveries, err := messageFieldPayloads(data, 32)
 		if err != nil {
 			return errors.New("gateway message has malformed protobuf framing")
 		}
 		if len(deliveries) != 0 {
-			return errors.New("unsolicited test-secret delivery")
+			if !c.allowTestSecrets {
+				return errors.New("unsolicited test-secret delivery")
+			}
+			if len(deliveries) != 1 || len(data) > maximumSecretDeliveryBytes || !validSecretDeliveryWire(data, deliveries[0]) {
+				return errors.New("test-secret delivery framing refused")
+			}
+		} else if len(data) > MaximumMessageBytes {
+			return errors.New("gateway message exceeds size limit")
 		}
 		occurrences, err := countJobCorrelationWireOccurrences(data)
 		if err != nil {
@@ -54,7 +61,38 @@ func (strictProtocolCodec) Unmarshal(data []byte, value any) error {
 			return errors.New("gateway lease offer contains duplicate job correlation carriers")
 		}
 	}
-	return proto.Unmarshal(data, message)
+	err := proto.Unmarshal(data, message)
+	if err != nil {
+		if gateway, ok := value.(*runnerv1.GatewayMessage); ok {
+			clearTestSecretDelivery(gateway)
+		}
+	}
+	return err
+}
+
+func validSecretDeliveryWire(envelope, delivery []byte) bool {
+	for _, field := range []protowire.Number{10, 11, 12, 13, 14, 15, 16, 30, 31} {
+		values, err := messageFieldPayloads(envelope, field)
+		if err != nil || len(values) != 0 {
+			return false
+		}
+	}
+	values, err := messageFieldPayloads(delivery, 4)
+	if err != nil || len(values) == 0 || len(values) > 64 {
+		return false
+	}
+	total := 0
+	for _, value := range values {
+		buffers, err := messageFieldPayloads(value, 2)
+		if err != nil || len(buffers) != 1 || len(buffers[0]) == 0 {
+			return false
+		}
+		total += len(buffers[0])
+		if total > 65536 {
+			return false
+		}
+	}
+	return true
 }
 
 func countJobCorrelationWireOccurrences(gateway []byte) (int, error) {

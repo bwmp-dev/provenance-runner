@@ -10,15 +10,20 @@ import (
 )
 
 type generatedConnector struct {
-	client runnerv1.RunnerGatewayClient
+	client           runnerv1.RunnerGatewayClient
+	allowTestSecrets bool
 }
 
 func (c *generatedConnector) connect(ctx context.Context) (gatewayStream, error) {
+	limit := MaximumMessageBytes
+	if c.allowTestSecrets {
+		limit = maximumSecretDeliveryBytes
+	}
 	return c.client.Connect(
 		ctx,
-		grpc.MaxCallRecvMsgSize(MaximumMessageBytes),
+		grpc.MaxCallRecvMsgSize(limit),
 		grpc.MaxCallSendMsgSize(MaximumMessageBytes),
-		grpc.ForceCodec(strictProtocolCodec{}),
+		grpc.ForceCodec(strictProtocolCodec{allowTestSecrets: c.allowTestSecrets}),
 	)
 }
 

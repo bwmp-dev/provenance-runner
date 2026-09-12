@@ -20,6 +20,14 @@ type connectedWorker struct {
 	adapter  remoteJobAdapter
 }
 
+func (w *connectedWorker) SupportsTestSecretSource() bool {
+	if w == nil {
+		return false
+	}
+	provider, ok := w.adapter.(interface{ SupportsTestSecretSource() bool })
+	return ok && provider.SupportsTestSecretSource()
+}
+
 func (w *connectedWorker) Execute(ctx context.Context, specification *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error) execution.Result {
 	return w.execute(ctx, specification, beforeExecute, false)
 }

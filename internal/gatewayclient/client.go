@@ -56,6 +56,16 @@ type RemoteWorkerV2 interface {
 	ExecuteV2(context.Context, *runnerv1.JobSpecification, func(context.Context, execution.ExecutionStart) error) execution.Result
 }
 
+type RemoteWorkerTestSecrets interface {
+	RemoteWorker
+	SupportsTestSecretSource() bool
+}
+
+func canUseTestSecrets(config Config, worker RemoteWorker) bool {
+	supported, ok := worker.(RemoteWorkerTestSecrets)
+	return config.enableTestSecrets && ok && supported.SupportsTestSecretSource()
+}
+
 type permanentError struct {
 	err error
 }
@@ -81,15 +91,17 @@ type Client struct {
 
 	draining atomic.Bool
 
-	workerMu          sync.Mutex
-	workerRunning     bool
-	workerCancel      context.CancelFunc
-	workerWG          sync.WaitGroup
-	startResponse     chan error
-	workerEvents      chan workerEvent
-	recovering        bool
-	sessionGeneration atomic.Uint64
-	ephemeralSequence atomic.Uint64
+	workerMu               sync.Mutex
+	workerRunning          bool
+	workerCancel           context.CancelFunc
+	workerSecretCancel     context.CancelFunc
+	workerSecretGeneration uint64
+	workerWG               sync.WaitGroup
+	startResponse          chan error
+	workerEvents           chan workerEvent
+	recovering             bool
+	sessionGeneration      atomic.Uint64
+	ephemeralSequence      atomic.Uint64
 
 	uploadMu     sync.Mutex
 	activeUpload *activeCompleteLogUpload
@@ -103,6 +115,7 @@ type Client struct {
 }
 
 type workerEvent struct {
+	secretRequest *workerSecretRequest
 	start         chan error
 	result        *execution.Result
 	evidence      *workerEvidenceEvent
@@ -123,7 +136,7 @@ func NewWithWorker(config Config, rpc runnerv1.RunnerGatewayClient, worker Remot
 		return nil, err
 	}
 	config.credential = bytes.Clone(config.credential)
-	return newClientWithWorker(config, &generatedConnector{client: rpc}, worker)
+	return newClientWithWorker(config, &generatedConnector{client: rpc, allowTestSecrets: canUseTestSecrets(config, worker)}, worker)
 }
 
 func newClient(config Config, connector streamConnector) *Client {
@@ -362,7 +375,9 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		rootContext:           ctx,
 		cancelSession:         cancel,
 		generation:            generation,
+		testSecretsV1:         advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1),
 	}
+	defer func() { c.stopSecretWorker(generation); session.abandonSecretRequest() }()
 	if err := session.rememberGatewayMessage(first); err != nil {
 		return true, err
 	}
@@ -419,6 +434,12 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 			if received.err != nil {
 				clearTestSecretDelivery(received.message)
 				return true, received.err
+			}
+			if _, delivery := received.message.GetPayload().(*runnerv1.GatewayMessage_TestSecretsDelivery); delivery && session.testSecretsV1 {
+				if err := session.receiveSecretDelivery(received.message); err != nil {
+					return true, err
+				}
+				continue
 			}
 			duplicate, err := session.gatewayMessageDuplicate(received.message)
 			if err != nil {
@@ -544,6 +565,9 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 		if _, ok := c.worker.(RemoteWorkerV2); c.config.EnableTerminalEvidenceV2 && ok {
 			features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V2)
 		}
+	}
+	if canUseTestSecrets(c.config, c.worker) {
+		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1)
 	}
 	return &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,

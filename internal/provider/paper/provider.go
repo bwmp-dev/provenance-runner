@@ -499,6 +499,14 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	return prepared, nil
 }
 
+func (p *Provider) SupportsTestSecretSource() bool {
+	if p == nil {
+		return false
+	}
+	sandbox, ok := p.config.Sandbox.(execution.TestSecretWorkloadProvider)
+	return ok && sandbox.SupportsTestSecretFiles()
+}
+
 func (e *environment) acquire(ctx context.Context) (acquiredArtifacts, error) {
 	paperEntry, err := e.acquirePin(ctx, e.provider.config.PaperCache, e.catalog.Paper.Artifact, e.catalog.paperDigest)
 	if err != nil {
