@@ -6,11 +6,23 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
 const secretMountReserve = int64(1 << 20)
+
+func validateSecretExpiry(files *testsecrets.Files, expiresAt, now time.Time) error {
+	if files == nil && expiresAt.IsZero() {
+		return nil
+	}
+	if files == nil || !expiresAt.After(now) {
+		return execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_test_secrets_expired", errors.New("test-secret delivery unavailable or expired"))
+	}
+	return nil
+}
 
 func validateSecretRoot(root string, files *testsecrets.Files) error {
 	if _, err := files.Mounts(); err != nil {

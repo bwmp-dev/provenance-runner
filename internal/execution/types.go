@@ -65,7 +65,9 @@ type IsolatedWorkloadProvider interface {
 type IsolatedWorkload struct {
 	// Trusted, already sealed memory only. Caller retains ownership until
 	// Prepare; successful preparation transfers teardown ownership to sandbox.
-	TestSecretFiles        *testsecrets.Files `json:"-"`
+	TestSecretFiles *testsecrets.Files `json:"-"`
+	// Required with TestSecretFiles; rechecked immediately before launch.
+	TestSecretExpiresAt    time.Time `json:"-"`
 	Command                string
 	Arguments              []string
 	Environment            map[string]string
