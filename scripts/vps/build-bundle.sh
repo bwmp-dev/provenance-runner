@@ -9,7 +9,8 @@ commit=$(git rev-parse HEAD)
 mkdir -m 700 "$1"
 out=$1
 export CGO_ENABLED=0 GOOS=linux GOARCH=amd64
-go build -trimpath -ldflags "-X github.com/bwmp-dev/provenance-runner/internal/buildinfo.Version=git-${commit:0:12} -X github.com/bwmp-dev/provenance-runner/internal/buildinfo.Commit=$commit" -o "$out/runner" ./cmd/provenance-runner
+# Attestation runner.version is SemVer; an untagged bundle is a development build.
+go build -trimpath -ldflags "-X github.com/bwmp-dev/provenance-runner/internal/buildinfo.Version=0.0.0-dev+git.${commit:0:12} -X github.com/bwmp-dev/provenance-runner/internal/buildinfo.Commit=$commit" -o "$out/runner" ./cmd/provenance-runner
 curl --fail --location --proto '=https' --proto-redir '=https' --max-time 300 --output "$out/gvisor.tar.bz2" https://storage.googleapis.com/gvisor/releases/nightly/2026-08-30/x86_64/gvisor.tar.bz2
 printf '%s  %s\n' e8eb6473e5a27316df551cbb40e5626e51df1b602bde2621f77d851c2c53b0387e282c7ebc0ee80ceb07a26e152e67b4af3e17550009e2c486e2f19666570449 "$out/gvisor.tar.bz2" | sha512sum -c -
 python3 - "$out" <<'PY'
