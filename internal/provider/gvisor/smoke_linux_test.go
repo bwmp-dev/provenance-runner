@@ -334,6 +334,12 @@ func TestRunscSmoke(t *testing.T) {
 		if _, err := files.Mounts(); err == nil {
 			t.Fatal("successful cleanup retained memory handles")
 		}
+		if _, err := os.Lstat(filepath.Join(provider.secretTmpfsRoot(), prepared.containerID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("private tmpfs values survived cleanup")
+		}
+		if err := os.Remove(provider.secretTmpfsRoot()); err != nil {
+			t.Fatal("private tmpfs parent retained unexpected entries")
+		}
 		for _, mount := range mounts {
 			if _, err := os.Stat(mount.Source); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("secret descriptor survived cleanup")

@@ -48,6 +48,10 @@ func (p *Provider) Reconcile(ctx context.Context) error {
 			continue
 		}
 		if !attempted {
+			if err := p.removeSecretTmpfs(metadata.ContainerID); err != nil {
+				reconciliationErrors = append(reconciliationErrors, err)
+				continue
+			}
 			if err := removeOwnedBundle(p.config.BundleRoot, bundle); err != nil {
 				reconciliationErrors = append(reconciliationErrors, err)
 			}
@@ -66,6 +70,10 @@ func (p *Provider) Reconcile(ctx context.Context) error {
 		}
 		if err := p.confirmContainerTeardown(ctx, metadata.ContainerID); err != nil {
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("confirm abandoned container %s deletion: %w", metadata.ContainerID, err))
+			continue
+		}
+		if err := p.removeSecretTmpfs(metadata.ContainerID); err != nil {
+			reconciliationErrors = append(reconciliationErrors, err)
 			continue
 		}
 		if err := removeOwnedBundle(p.config.BundleRoot, bundle); err != nil {

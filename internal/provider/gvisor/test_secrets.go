@@ -30,7 +30,7 @@ func validateSecretRoot(root string, files *testsecrets.Files) error {
 	return nil
 }
 
-func addSecretMounts(spec *ociSpec, files *testsecrets.Files, bundle string) error {
+func (p *Provider) addSecretMounts(spec *ociSpec, files *testsecrets.Files, containerID string) error {
 	if files == nil {
 		return nil
 	}
@@ -60,30 +60,39 @@ func addSecretMounts(spec *ociSpec, files *testsecrets.Files, bundle string) err
 	if !reserved {
 		return errors.New("test-secret tmpfs budget unavailable")
 	}
-	// gVisor's gofer prepares bind destinations before guest tmpfs mounts
-	// exist. A guest tmpfs parent would therefore try to create children on
-	// the immutable image. Supply an owned metadata-only skeleton instead:
-	// every placeholder is empty; values remain exclusively in sealed memfds.
-	root := filepath.Join(bundle, "test-secret-mountpoints")
-	if err := os.Mkdir(root, 0755); err != nil {
-		return errors.New("create test-secret mountpoints failed")
+	// memfd inodes cannot be directly bind-mounted by this runtime. Copy into
+	// a verified private tmpfs, then expose only the job subtree read-only.
+	// No value is ever written to the bundle or immutable image.
+	root, err := p.createSecretTmpfs(containerID)
+	if err != nil {
+		return err
 	}
 	directory := filepath.Join(root, "provenance", "test-secrets")
 	if err := os.MkdirAll(directory, 0755); err != nil {
 		return errors.New("create test-secret mountpoints failed")
 	}
-	for _, mount := range mounts {
-		placeholder, err := os.OpenFile(filepath.Join(directory, filepath.Base(mount.Destination)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0444)
-		if err != nil {
-			return errors.New("create test-secret mountpoints failed")
+	for _, path := range []string{root, filepath.Dir(directory), directory} {
+		if err := os.Chmod(path, 0755); err != nil {
+			return errors.New("prepare new test-secret guest directory failed")
 		}
-		if err := placeholder.Close(); err != nil {
-			return errors.New("create test-secret mountpoints failed")
+	}
+	values, err := files.RedactionValues()
+	if err != nil || len(values) != len(mounts) {
+		return errors.New("test-secret memory handles unavailable")
+	}
+	for i, mount := range mounts {
+		file, err := os.OpenFile(filepath.Join(directory, filepath.Base(mount.Destination)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0400)
+		if err != nil {
+			return errors.New("create private tmpfs test-secret failed")
+		}
+		_, writeErr := file.WriteString(values[i])
+		modeErr := file.Chmod(0444)
+		closeErr := file.Close()
+		values[i] = ""
+		if writeErr != nil || modeErr != nil || closeErr != nil {
+			return errors.New("prepare private tmpfs test-secret failed")
 		}
 	}
 	spec.Mounts = append(spec.Mounts, ociMount{Destination: "/run", Type: "bind", Source: root, Options: []string{"bind", "ro", "nosuid", "nodev", "noexec"}})
-	for _, mount := range mounts {
-		spec.Mounts = append(spec.Mounts, ociMount{Destination: mount.Destination, Type: "bind", Source: mount.Source, Options: []string{"bind", "ro", "nosuid", "nodev", "noexec"}})
-	}
 	return nil
 }

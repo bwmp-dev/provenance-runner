@@ -696,14 +696,14 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("build OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
-	if err := addSecretMounts(&spec, e.secretFiles, bundle); err != nil {
-		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
+	if err := e.provider.addSecretMounts(&spec, e.secretFiles, containerID); err != nil {
+		return nil, errors.Join(err, prepared.Cleanup(context.Background()))
 	}
 	if err := writeJSONFile(filepath.Join(bundle, "config.json"), spec); err != nil {
-		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
+		return nil, errors.Join(fmt.Errorf("write OCI config: %w", err), prepared.Cleanup(context.Background()))
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
+		return nil, errors.Join(err, prepared.Cleanup(context.Background()))
 	}
 	transferred = true
 	secretTransferred = true
@@ -1099,6 +1099,9 @@ func (e *preparedEnvironment) Cleanup(ctx context.Context) error {
 	}
 	if err := e.evidence.Close(); err != nil {
 		return fmt.Errorf("close gVisor evidence collector: %w", err)
+	}
+	if err := e.provider.removeSecretTmpfs(e.containerID); err != nil {
+		return err
 	}
 	if e.secretFiles != nil {
 		if err := e.secretFiles.Close(); err != nil {
