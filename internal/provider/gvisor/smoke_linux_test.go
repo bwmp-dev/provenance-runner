@@ -348,6 +348,57 @@ func TestRunscSmoke(t *testing.T) {
 		assertNoSandboxResidue(t, provider, prepared.containerID)
 	})
 
+	t.Run("secret cleanup after failed runtime start", func(t *testing.T) {
+		files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: []byte("synthetic-start-failure")}})
+		if err != nil {
+			t.Fatal("create synthetic failure fixture failed")
+		}
+		defer files.Close()
+		env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
+			Command: "/bin/true", InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		owned, err := env.Prepare(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared := owned.(*preparedEnvironment)
+		defer cleanupSmokeEnvironment(t, prepared)
+		// Deliberately break only this owned fixture's source after preparation.
+		// The runtime must enter and then fail its startup path, not run a guest.
+		configPath := filepath.Join(prepared.bundle, "config.json")
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var spec ociSpec
+		if err := json.Unmarshal(data, &spec); err != nil {
+			t.Fatal(err)
+		}
+		spec.Mounts[len(spec.Mounts)-1].Source = filepath.Join(prepared.bundle, "intentionally-absent-source")
+		if err := writeJSONFile(configPath, spec); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := prepared.Execute(ctx); err == nil {
+			t.Fatal("broken runtime source unexpectedly started")
+		}
+		cleanupSmokeEnvironment(t, prepared)
+		if _, err := files.Mounts(); err == nil {
+			t.Fatal("failed start retained secret handles")
+		}
+		if _, err := os.Lstat(filepath.Join(provider.secretTmpfsRoot(), prepared.containerID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("failed start retained private tmpfs values")
+		}
+		if err := os.Remove(provider.secretTmpfsRoot()); err != nil {
+			t.Fatal("failed-start tmpfs parent retained unexpected entries")
+		}
+		assertNoSandboxResidue(t, provider, prepared.containerID)
+	})
+
 	t.Run("contained execution and cleanup", func(t *testing.T) {
 		config := configuration{
 			Command:     "/bin/sh",

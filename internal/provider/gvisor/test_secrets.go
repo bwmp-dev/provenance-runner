@@ -24,7 +24,12 @@ func validateSecretRoot(root string, files *testsecrets.Files) error {
 	}
 	uid, gid, err := rootFSOwnership(path)
 	currentUID, currentGID := rootFSCurrentIdentity()
-	if err != nil || uid != currentUID || gid != currentGID || requireReadOnlyFilesystem(path) != nil {
+	// /run is an existing image directory, not one of the runner-owned
+	// generated placeholders. Measured images retain its archive owner 0:0.
+	// Both supported owners are trusted; immutable backing and exact mode are
+	// still mandatory, and no existing rootfs validation is bypassed.
+	trustedOwner := (uid == currentUID && gid == currentGID) || (uid == 0 && gid == 0)
+	if err != nil || !trustedOwner || requireReadOnlyFilesystem(path) != nil {
 		return errors.New("test-secret root mountpoint is not immutable")
 	}
 	return nil
