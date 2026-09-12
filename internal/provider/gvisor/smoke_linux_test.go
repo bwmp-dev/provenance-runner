@@ -4,23 +4,47 @@ package gvisor
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
+
+// Runtime diagnostics are confined to the synthetic smoke fixture. They are
+// separate from the workload collector so startup detail cannot displace its
+// bounded output or obscure a redaction assertion.
+type secretSmokeDebugRunner struct {
+	commandRunner
+	path string
+}
+
+func (r secretSmokeDebugRunner) Run(ctx context.Context, invocation command) commandResult {
+	for i, arg := range invocation.Args {
+		if strings.HasPrefix(arg, "--root=") {
+			args := append([]string{}, invocation.Args[:i]...)
+			args = append(args, "--debug-log="+r.path)
+			invocation.Args = append(args, invocation.Args[i:]...)
+			break
+		}
+	}
+	return r.commandRunner.Run(ctx, invocation)
+}
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == MeasuredLauncherCommand {
@@ -235,6 +259,216 @@ func TestRunscSmoke(t *testing.T) {
 		})
 	}
 
+	t.Run("sealed secret files and redaction", func(t *testing.T) {
+		diagnosticPath := filepath.Join(t.TempDir(), "synthetic-runtime.log")
+		originalRunner := provider.runner
+		provider.runner = secretSmokeDebugRunner{originalRunner, diagnosticPath}
+		defer func() { provider.runner = originalRunner }()
+		secret := []byte("synthetic-sealed-smoke")
+		files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: secret}})
+		if err != nil {
+			t.Fatal("create synthetic memory files failed")
+		}
+		defer files.Close()
+		mounts, err := files.Mounts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
+			Command: "/bin/sh", Arguments: []string{"-c", `test "$(id -u)" = 65532 && test "$(wc -c < /run/provenance/test-secrets/token)" = 22 && ! (printf x > /run/provenance/test-secrets/token) 2>/dev/null && ! touch /run/escape 2>/dev/null && cat /run/provenance/test-secrets/token && echo && echo secret-file-smoke-ok`},
+			InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+		})
+		if err != nil {
+			t.Fatal("resolve secret sandbox failed:", err)
+		}
+		owned, err := env.Prepare(context.Background())
+		if err != nil {
+			t.Fatal("prepare secret sandbox failed:", err)
+		}
+		prepared := owned.(*preparedEnvironment)
+		defer cleanupSmokeEnvironment(t, prepared)
+		live := &secretSmokeObserver{}
+		prepared.AttachObserver(live)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		outcome, err := prepared.Execute(ctx)
+		if err != nil || outcome.Failure != nil {
+			failed, collectErr := prepared.Collect(context.Background())
+			diagnostic, _ := os.ReadFile(diagnosticPath)
+			if len(diagnostic) > 16384 {
+				diagnostic = diagnostic[len(diagnostic)-16384:]
+			}
+			// Fixture-only diagnostics, explicitly scrubbed even if collector
+			// redaction is itself the failing invariant.
+			t.Fatalf("synthetic secret sandbox failed: %v; collect=%v; stderr=%q; runtime=%q", err, collectErr, strings.ReplaceAll(failed.Stderr, string(secret), "[synthetic redacted]"), strings.ReplaceAll(string(diagnostic), string(secret), "[synthetic redacted]"))
+		}
+		output, err := prepared.Collect(ctx)
+		if err != nil || !strings.Contains(output.Stdout, "secret-file-smoke-ok") || strings.Contains(output.Stdout, string(secret)) || strings.Contains(output.Stderr, string(secret)) {
+			t.Fatal("secret read/redaction assertion failed")
+		}
+		if !strings.Contains(live.text(), "secret-file-smoke-ok") || strings.Contains(live.text(), string(secret)) {
+			t.Fatal("live secret redaction failed")
+		}
+		if output.CompleteLog == nil || output.CompleteLog.Archive == nil {
+			t.Fatal("complete redacted log missing")
+		}
+		defer output.CompleteLog.Archive.Close()
+		archive, err := gzip.NewReader(io.NewSectionReader(output.CompleteLog.Archive, 0, output.CompleteLog.CompressedBytes))
+		if err != nil {
+			t.Fatal("complete log framing failed")
+		}
+		complete, err := io.ReadAll(io.LimitReader(archive, 65537))
+		archive.Close()
+		if err != nil || len(complete) > 65536 || !bytes.Contains(complete, []byte("secret-file-smoke-ok")) || bytes.Contains(complete, secret) {
+			t.Fatal("stored secret redaction failed")
+		}
+		cancelled, stop := context.WithCancel(context.Background())
+		stop()
+		if !errors.Is(prepared.Cleanup(cancelled), context.Canceled) {
+			t.Fatal("cancelled cleanup unexpectedly completed")
+		}
+		if _, err := files.Mounts(); err != nil {
+			t.Fatal("failed cleanup prematurely closed memory handles")
+		}
+		cleanupSmokeEnvironment(t, prepared)
+		if _, err := files.Mounts(); err == nil {
+			t.Fatal("successful cleanup retained memory handles")
+		}
+		if _, err := os.Lstat(filepath.Join(provider.secretTmpfsRoot(), prepared.containerID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("private tmpfs values survived cleanup")
+		}
+		if err := os.Remove(provider.secretTmpfsRoot()); err != nil {
+			t.Fatal("private tmpfs parent retained unexpected entries")
+		}
+		for _, mount := range mounts {
+			if _, err := os.Stat(mount.Source); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("secret descriptor survived cleanup")
+			}
+		}
+		assertNoSandboxResidue(t, provider, prepared.containerID)
+	})
+
+	t.Run("secret cleanup after failed runtime start", func(t *testing.T) {
+		files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: []byte("synthetic-start-failure")}})
+		if err != nil {
+			t.Fatal("create synthetic failure fixture failed")
+		}
+		defer files.Close()
+		env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
+			Command: "/bin/true", InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		owned, err := env.Prepare(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared := owned.(*preparedEnvironment)
+		defer cleanupSmokeEnvironment(t, prepared)
+		// Deliberately break only this owned fixture's source after preparation.
+		// The runtime must enter and then fail its startup path, not run a guest.
+		source := filepath.Join(provider.secretTmpfsRoot(), prepared.containerID, "run")
+		if err := os.Rename(source, source+"-withheld"); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := prepared.Execute(ctx); err == nil {
+			t.Fatal("broken runtime source unexpectedly started")
+		}
+		cleanupSmokeEnvironment(t, prepared)
+		if _, err := files.Mounts(); err == nil {
+			t.Fatal("failed start retained secret handles")
+		}
+		if _, err := os.Lstat(filepath.Join(provider.secretTmpfsRoot(), prepared.containerID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("failed start retained private tmpfs values")
+		}
+		if err := os.Remove(provider.secretTmpfsRoot()); err != nil {
+			t.Fatal("failed-start tmpfs parent retained unexpected entries")
+		}
+		assertNoSandboxResidue(t, provider, prepared.containerID)
+	})
+
+	for _, restart := range []bool{false, true} {
+		name := "secret cancellation cleanup"
+		if restart {
+			name = "secret restart reconciliation"
+		}
+		t.Run(name, func(t *testing.T) {
+			files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: []byte("synthetic-lifecycle")}})
+			if err != nil {
+				t.Fatal("create synthetic lifecycle fixture failed")
+			}
+			defer files.Close()
+			env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
+				// Padding advances the redactor's deliberate cross-write holdback
+				// before waiting for the sanitized readiness line.
+				Command: "/bin/sh", Arguments: []string{"-c", `test -s /run/provenance/test-secrets/token || exit 1; echo secret-lifecycle-ready; printf '%0512d\n' 0; trap '' TERM; while :; do sleep 1; done`},
+				InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			owned, err := env.Prepare(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared := owned.(*preparedEnvironment)
+			defer cleanupSmokeEnvironment(t, prepared)
+			live := &secretSmokeObserver{}
+			prepared.AttachObserver(live)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := prepared.Execute(ctx); done <- err }()
+			deadline := time.Now().Add(10 * time.Second)
+			for !strings.Contains(live.text(), "secret-lifecycle-ready") {
+				select {
+				case <-done:
+					t.Fatal("secret lifecycle guest exited before ready")
+				default:
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("secret lifecycle guest did not become ready")
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if restart {
+				// A new provider has only persisted ownership metadata, never the
+				// prior plaintext delivery or in-memory Files object.
+				restarted, err := New(providerConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := restarted.Reconcile(ctx); err != nil {
+					t.Fatal("secret restart reconciliation failed:", err)
+				}
+			} else {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if !restart && !errors.Is(err, context.Canceled) {
+					t.Fatal("secret cancellation was not observed")
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("secret lifecycle process survived teardown")
+			}
+			cleanupSmokeEnvironment(t, prepared)
+			if _, err := files.Mounts(); err == nil {
+				t.Fatal("secret lifecycle retained memory handles")
+			}
+			if _, err := os.Lstat(filepath.Join(provider.secretTmpfsRoot(), prepared.containerID)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("secret lifecycle retained tmpfs values")
+			}
+			if err := os.Remove(provider.secretTmpfsRoot()); err != nil {
+				t.Fatal("secret lifecycle retained unexpected entries")
+			}
+			assertNoSandboxResidue(t, provider, prepared.containerID)
+		})
+	}
+
 	t.Run("contained execution and cleanup", func(t *testing.T) {
 		config := configuration{
 			Command:     "/bin/sh",
@@ -428,6 +662,19 @@ func TestRunscSmoke(t *testing.T) {
 		cleanupNeeded = false
 	})
 }
+
+type secretSmokeObserver struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (o *secretSmokeObserver) ObserveLog(entry execution.LiveLogEntry) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.data.Write(entry.Data)
+}
+func (*secretSmokeObserver) ObserveUsage(execution.ResourceUsage) {}
+func (o *secretSmokeObserver) text() string                       { o.mu.Lock(); defer o.mu.Unlock(); return o.data.String() }
 
 func smokeRootIdentity(root, sandbox, image, loop string) (func() (string, error), func() error, error) {
 	if image == "" {

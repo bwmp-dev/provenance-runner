@@ -14,8 +14,9 @@ import (
 const teardownPollInterval = 25 * time.Millisecond
 
 // confirmContainerTeardown waits until the runtime state and systemd scope for
-// exactly containerID are absent. It never removes runtime-owned state: doing
-// so could conceal a live sandbox from later reconciliation.
+// exactly containerID are absent. It never removes runtime state files: doing
+// so could conceal a live sandbox. Only after their absence is proven may it
+// rmdir exact empty native cgroup leaves left by a partially started runtime.
 func (p *Provider) confirmContainerTeardown(ctx context.Context, containerID string) error {
 	if !validContainerID(containerID) {
 		return errors.New("invalid container ID for teardown confirmation")
@@ -26,7 +27,7 @@ func (p *Provider) confirmContainerTeardown(ctx context.Context, containerID str
 			return err
 		}
 		if len(residue) == 0 {
-			return nil
+			return p.pruneEmptyNativeCgroups(containerID)
 		}
 		select {
 		case <-ctx.Done():

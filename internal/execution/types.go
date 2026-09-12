@@ -9,6 +9,7 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
 const ResultSchemaVersion = "provenance.local-result/v1alpha1"
@@ -62,6 +63,9 @@ type IsolatedWorkloadProvider interface {
 }
 
 type IsolatedWorkload struct {
+	// Trusted, already sealed memory only. Caller retains ownership until
+	// Prepare; successful preparation transfers teardown ownership to sandbox.
+	TestSecretFiles        *testsecrets.Files `json:"-"`
 	Command                string
 	Arguments              []string
 	Environment            map[string]string
