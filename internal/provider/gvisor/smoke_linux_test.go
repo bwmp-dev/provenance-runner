@@ -269,7 +269,10 @@ func TestRunscSmoke(t *testing.T) {
 		defer cancel()
 		outcome, err := prepared.Execute(ctx)
 		if err != nil || outcome.Failure != nil {
-			t.Fatal("synthetic secret sandbox failed:", err)
+			failed, collectErr := prepared.Collect(context.Background())
+			// Fixture-only diagnostics, explicitly scrubbed even if collector
+			// redaction is itself the failing invariant.
+			t.Fatalf("synthetic secret sandbox failed: %v; collect=%v; stderr=%q", err, collectErr, strings.ReplaceAll(failed.Stderr, string(secret), "[synthetic redacted]"))
 		}
 		output, err := prepared.Collect(ctx)
 		if err != nil || !strings.Contains(output.Stdout, "secret-file-smoke-ok") || strings.Contains(output.Stdout, string(secret)) || strings.Contains(output.Stderr, string(secret)) {
