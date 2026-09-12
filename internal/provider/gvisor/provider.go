@@ -696,7 +696,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("build OCI config: %w", err), collector.Close(), os.RemoveAll(bundle))
 	}
-	if err := addSecretMounts(&spec, e.secretFiles); err != nil {
+	if err := addSecretMounts(&spec, e.secretFiles, bundle); err != nil {
 		return nil, errors.Join(err, collector.Close(), os.RemoveAll(bundle))
 	}
 	if err := writeJSONFile(filepath.Join(bundle, "config.json"), spec); err != nil {

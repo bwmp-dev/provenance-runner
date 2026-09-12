@@ -3,6 +3,8 @@
 package gvisor
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -17,11 +19,19 @@ func TestSecretMountsArePrivateReadOnlyAndBudgeted(t *testing.T) {
 	}
 	defer f.Close()
 	spec := ociSpec{Mounts: []ociMount{{Destination: "/tmp", Type: "tmpfs", Options: []string{"size=4194304"}}}}
-	if err := addSecretMounts(&spec, f); err != nil {
+	bundle := t.TempDir()
+	if err := addSecretMounts(&spec, f, bundle); err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Mounts) != 3 || spec.Mounts[0].Options[0] != "size=3145728" || spec.Mounts[1].Destination != "/run" || spec.Mounts[1].Type != "tmpfs" {
+	if len(spec.Mounts) != 3 || spec.Mounts[0].Options[0] != "size=3145728" || spec.Mounts[1].Destination != "/run" || spec.Mounts[1].Type != "bind" {
 		t.Fatal("secret filesystem was not privately budgeted")
+	}
+	placeholder := filepath.Join(spec.Mounts[1].Source, "provenance", "test-secrets", "token")
+	if data, err := os.ReadFile(placeholder); err != nil || len(data) != 0 {
+		t.Fatal("mountpoint persisted value bytes")
+	}
+	if !slices.Contains(spec.Mounts[1].Options, "ro") {
+		t.Fatal("metadata skeleton is guest writable")
 	}
 	m := spec.Mounts[2]
 	if m.Destination != "/run/provenance/test-secrets/token" || !strings.HasPrefix(m.Source, "/proc/") {
@@ -35,7 +45,7 @@ func TestSecretMountsArePrivateReadOnlyAndBudgeted(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := addSecretMounts(&spec, f); err == nil {
+	if err := addSecretMounts(&spec, f, bundle); err == nil {
 		t.Fatal("closed memory handle accepted")
 	}
 }

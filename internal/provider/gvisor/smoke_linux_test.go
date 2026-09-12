@@ -26,20 +26,6 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
-type secretSmokeDebugRunner struct{ commandRunner }
-
-func (r secretSmokeDebugRunner) Run(ctx context.Context, invocation command) commandResult {
-	for i, arg := range invocation.Args {
-		if strings.HasPrefix(arg, "--root=") {
-			args := append([]string{}, invocation.Args[:i]...)
-			args = append(args, "--debug", "--debug-log=/dev/stderr")
-			invocation.Args = append(args, invocation.Args[i:]...)
-			break
-		}
-	}
-	return r.commandRunner.Run(ctx, invocation)
-}
-
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == MeasuredLauncherCommand {
 		if expected := os.Getenv("PROVENANCE_MEASUREMENT_EXPECTED_PROFILE"); expected != "" {
@@ -254,10 +240,6 @@ func TestRunscSmoke(t *testing.T) {
 	}
 
 	t.Run("sealed secret files and redaction", func(t *testing.T) {
-		// Debug only this synthetic fixture, never real workload invocations.
-		originalRunner := provider.runner
-		provider.runner = secretSmokeDebugRunner{originalRunner}
-		defer func() { provider.runner = originalRunner }()
 		secret := []byte("synthetic-sealed-smoke")
 		files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: secret}})
 		if err != nil {

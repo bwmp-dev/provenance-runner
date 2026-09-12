@@ -2,6 +2,8 @@ package gvisor
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -14,8 +16,8 @@ func validateSecretRoot(root string, files *testsecrets.Files) error {
 	if _, err := files.Mounts(); err != nil {
 		return errors.New("test-secret memory handles unavailable")
 	}
-	// Only /run is an image mountpoint. All dynamic child names are created in
-	// the overlaid private tmpfs, never by editing the immutable host image.
+	// Only /run is an image mountpoint. Dynamic child names live in a private
+	// metadata-only bind mount, never in the immutable host image.
 	path, err := validateRootFSMountTarget(root, "/run", rootFSMountTarget{destination: "/run", kind: rootFSMountDirectory, mode: 0755})
 	if err != nil {
 		return errors.New("test-secret root mountpoint unavailable")
@@ -28,7 +30,7 @@ func validateSecretRoot(root string, files *testsecrets.Files) error {
 	return nil
 }
 
-func addSecretMounts(spec *ociSpec, files *testsecrets.Files) error {
+func addSecretMounts(spec *ociSpec, files *testsecrets.Files, bundle string) error {
 	if files == nil {
 		return nil
 	}
@@ -58,7 +60,28 @@ func addSecretMounts(spec *ociSpec, files *testsecrets.Files) error {
 	if !reserved {
 		return errors.New("test-secret tmpfs budget unavailable")
 	}
-	spec.Mounts = append(spec.Mounts, ociMount{Destination: "/run", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev", "noexec", "mode=0555", "size=" + strconv.FormatInt(secretMountReserve, 10)}})
+	// gVisor's gofer prepares bind destinations before guest tmpfs mounts
+	// exist. A guest tmpfs parent would therefore try to create children on
+	// the immutable image. Supply an owned metadata-only skeleton instead:
+	// every placeholder is empty; values remain exclusively in sealed memfds.
+	root := filepath.Join(bundle, "test-secret-mountpoints")
+	if err := os.Mkdir(root, 0755); err != nil {
+		return errors.New("create test-secret mountpoints failed")
+	}
+	directory := filepath.Join(root, "provenance", "test-secrets")
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		return errors.New("create test-secret mountpoints failed")
+	}
+	for _, mount := range mounts {
+		placeholder, err := os.OpenFile(filepath.Join(directory, filepath.Base(mount.Destination)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0444)
+		if err != nil {
+			return errors.New("create test-secret mountpoints failed")
+		}
+		if err := placeholder.Close(); err != nil {
+			return errors.New("create test-secret mountpoints failed")
+		}
+	}
+	spec.Mounts = append(spec.Mounts, ociMount{Destination: "/run", Type: "bind", Source: root, Options: []string{"bind", "ro", "nosuid", "nodev", "noexec"}})
 	for _, mount := range mounts {
 		spec.Mounts = append(spec.Mounts, ociMount{Destination: mount.Destination, Type: "bind", Source: mount.Source, Options: []string{"bind", "ro", "nosuid", "nodev", "noexec"}})
 	}
