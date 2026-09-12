@@ -368,17 +368,8 @@ func TestRunscSmoke(t *testing.T) {
 		defer cleanupSmokeEnvironment(t, prepared)
 		// Deliberately break only this owned fixture's source after preparation.
 		// The runtime must enter and then fail its startup path, not run a guest.
-		configPath := filepath.Join(prepared.bundle, "config.json")
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var spec ociSpec
-		if err := json.Unmarshal(data, &spec); err != nil {
-			t.Fatal(err)
-		}
-		spec.Mounts[len(spec.Mounts)-1].Source = filepath.Join(prepared.bundle, "intentionally-absent-source")
-		if err := writeJSONFile(configPath, spec); err != nil {
+		source := filepath.Join(provider.secretTmpfsRoot(), prepared.containerID, "run")
+		if err := os.Rename(source, source+"-withheld"); err != nil {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -398,6 +389,83 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		assertNoSandboxResidue(t, provider, prepared.containerID)
 	})
+
+	for _, restart := range []bool{false, true} {
+		name := "secret cancellation cleanup"
+		if restart {
+			name = "secret restart reconciliation"
+		}
+		t.Run(name, func(t *testing.T) {
+			files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: []byte("synthetic-lifecycle")}})
+			if err != nil {
+				t.Fatal("create synthetic lifecycle fixture failed")
+			}
+			defer files.Close()
+			env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
+				Command: "/bin/sh", Arguments: []string{"-c", `test -s /run/provenance/test-secrets/token || exit 1; echo secret-lifecycle-ready; trap '' TERM; while :; do sleep 1; done`},
+				InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			owned, err := env.Prepare(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared := owned.(*preparedEnvironment)
+			defer cleanupSmokeEnvironment(t, prepared)
+			live := &secretSmokeObserver{}
+			prepared.AttachObserver(live)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := prepared.Execute(ctx); done <- err }()
+			deadline := time.Now().Add(10 * time.Second)
+			for !strings.Contains(live.text(), "secret-lifecycle-ready") {
+				select {
+				case <-done:
+					t.Fatal("secret lifecycle guest exited before ready")
+				default:
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("secret lifecycle guest did not become ready")
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if restart {
+				// A new provider has only persisted ownership metadata, never the
+				// prior plaintext delivery or in-memory Files object.
+				restarted, err := New(providerConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := restarted.Reconcile(ctx); err != nil {
+					t.Fatal("secret restart reconciliation failed:", err)
+				}
+			} else {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if !restart && !errors.Is(err, context.Canceled) {
+					t.Fatal("secret cancellation was not observed")
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("secret lifecycle process survived teardown")
+			}
+			cleanupSmokeEnvironment(t, prepared)
+			if _, err := files.Mounts(); err == nil {
+				t.Fatal("secret lifecycle retained memory handles")
+			}
+			if _, err := os.Lstat(filepath.Join(provider.secretTmpfsRoot(), prepared.containerID)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("secret lifecycle retained tmpfs values")
+			}
+			if err := os.Remove(provider.secretTmpfsRoot()); err != nil {
+				t.Fatal("secret lifecycle retained unexpected entries")
+			}
+			assertNoSandboxResidue(t, provider, prepared.containerID)
+		})
+	}
 
 	t.Run("contained execution and cleanup", func(t *testing.T) {
 		config := configuration{
