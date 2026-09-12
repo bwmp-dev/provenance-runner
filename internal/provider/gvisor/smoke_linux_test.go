@@ -26,6 +26,26 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
+// Runtime diagnostics are confined to the synthetic smoke fixture. They are
+// separate from the workload collector so startup detail cannot displace its
+// bounded output or obscure a redaction assertion.
+type secretSmokeDebugRunner struct {
+	commandRunner
+	path string
+}
+
+func (r secretSmokeDebugRunner) Run(ctx context.Context, invocation command) commandResult {
+	for i, arg := range invocation.Args {
+		if strings.HasPrefix(arg, "--root=") {
+			args := append([]string{}, invocation.Args[:i]...)
+			args = append(args, "--debug-log="+r.path)
+			invocation.Args = append(args, invocation.Args[i:]...)
+			break
+		}
+	}
+	return r.commandRunner.Run(ctx, invocation)
+}
+
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == MeasuredLauncherCommand {
 		if expected := os.Getenv("PROVENANCE_MEASUREMENT_EXPECTED_PROFILE"); expected != "" {
@@ -240,6 +260,10 @@ func TestRunscSmoke(t *testing.T) {
 	}
 
 	t.Run("sealed secret files and redaction", func(t *testing.T) {
+		diagnosticPath := filepath.Join(t.TempDir(), "synthetic-runtime.log")
+		originalRunner := provider.runner
+		provider.runner = secretSmokeDebugRunner{originalRunner, diagnosticPath}
+		defer func() { provider.runner = originalRunner }()
 		secret := []byte("synthetic-sealed-smoke")
 		files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: secret}})
 		if err != nil {
@@ -270,9 +294,13 @@ func TestRunscSmoke(t *testing.T) {
 		outcome, err := prepared.Execute(ctx)
 		if err != nil || outcome.Failure != nil {
 			failed, collectErr := prepared.Collect(context.Background())
+			diagnostic, _ := os.ReadFile(diagnosticPath)
+			if len(diagnostic) > 16384 {
+				diagnostic = diagnostic[len(diagnostic)-16384:]
+			}
 			// Fixture-only diagnostics, explicitly scrubbed even if collector
 			// redaction is itself the failing invariant.
-			t.Fatalf("synthetic secret sandbox failed: %v; collect=%v; stderr=%q", err, collectErr, strings.ReplaceAll(failed.Stderr, string(secret), "[synthetic redacted]"))
+			t.Fatalf("synthetic secret sandbox failed: %v; collect=%v; stderr=%q; runtime=%q", err, collectErr, strings.ReplaceAll(failed.Stderr, string(secret), "[synthetic redacted]"), strings.ReplaceAll(string(diagnostic), string(secret), "[synthetic redacted]"))
 		}
 		output, err := prepared.Collect(ctx)
 		if err != nil || !strings.Contains(output.Stdout, "secret-file-smoke-ok") || strings.Contains(output.Stdout, string(secret)) || strings.Contains(output.Stderr, string(secret)) {
