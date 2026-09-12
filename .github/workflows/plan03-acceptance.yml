@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload exact-head exit-gate evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: plan03-exit-gate-${{ env.PLAN03_CANDIDATE_SHA }}
           path: ${{ env.PLAN03_EVIDENCE_ROOT }}
