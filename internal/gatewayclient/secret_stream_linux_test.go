@@ -32,9 +32,10 @@ func (exchangeSandbox) ResolveWorkload(context.Context, execution.Request, execu
 }
 
 type exchangeWorker struct {
-	wait    bool
-	started chan struct{}
-	files   chan *testsecrets.Files
+	wait        bool
+	failCleanup bool
+	started     chan struct{}
+	files       chan *testsecrets.Files
 }
 
 func (*exchangeWorker) SupportsTestSecretSource() bool { return true }
@@ -56,6 +57,11 @@ func (w *exchangeWorker) Execute(ctx context.Context, job *runnerv1.JobSpecifica
 	close(w.started)
 	if w.wait {
 		<-ctx.Done()
+	}
+	if w.failCleanup {
+		result := execution.FailedResult(job.Lease.JobId, execution.PhaseExecution, execution.ClassificationInfrastructureFailure, "synthetic_cleanup_failed", errors.New("synthetic teardown failure"))
+		result.Cleanup = &execution.CleanupResult{Attempted: true, Succeeded: false, Error: "synthetic teardown failure"}
+		return result
 	}
 	return execution.Result{SchemaVersion: execution.ResultSchemaVersion, JobID: job.Lease.JobId, Status: "passed", Classification: execution.ClassificationPassed, Phase: execution.PhaseCompleted, Cleanup: &execution.CleanupResult{Attempted: true, Succeeded: true}, StartedAt: time.Now(), CompletedAt: time.Now()}
 }
@@ -88,13 +94,22 @@ func addSecretSelection(t *testing.T, job *runnerv1.JobSpecification) {
 }
 
 func TestSecretStreamAcceptedLeaseDeliveryAndDisconnectCleanup(t *testing.T) {
-	for _, disconnect := range []bool{false, true} {
-		t.Run(map[bool]string{false: "completion", true: "disconnect"}[disconnect], func(t *testing.T) {
+	for _, scenario := range []struct {
+		name        string
+		disconnect  bool
+		failCleanup bool
+	}{
+		{name: "completion"},
+		{name: "disconnect", disconnect: true},
+		{name: "disconnect preserves cleanup failure", disconnect: true, failCleanup: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			disconnect := scenario.disconnect
 			now := time.Now().UTC()
 			offer := validLeaseOffer(now)
 			addSecretSelection(t, offer.Job)
 			offer.Job.JobCorrelation = validJobCorrelation(offer)
-			worker := &exchangeWorker{wait: disconnect, started: make(chan struct{}), files: make(chan *testsecrets.Files, 1)}
+			worker := &exchangeWorker{wait: disconnect, failCleanup: scenario.failCleanup, started: make(chan struct{}), files: make(chan *testsecrets.Files, 1)}
 			serverResult := make(chan error, 1)
 			server := &testGateway{connect: func(stream grpc.BidiStreamingServer[runnerv1.RunnerMessage, runnerv1.GatewayMessage]) (err error) {
 				defer func() { serverResult <- err }()
@@ -210,8 +225,26 @@ func TestSecretStreamAcceptedLeaseDeliveryAndDisconnectCleanup(t *testing.T) {
 			if disconnect {
 				select {
 				case event := <-client.workerEvents:
-					if event.result == nil || event.result.Classification != execution.ClassificationInfrastructureFailure || event.result.Failure.Code != "test_secret_connection_lost" {
+					wantCode := "test_secret_connection_lost"
+					if scenario.failCleanup {
+						wantCode = "synthetic_cleanup_failed"
+					}
+					if event.result == nil || event.result.Classification != execution.ClassificationInfrastructureFailure || event.result.Failure == nil || event.result.Failure.Code != wantCode {
 						t.Fatal("disconnect did not produce retryable infrastructure result")
+					}
+					if scenario.failCleanup {
+						if event.result.Cleanup == nil || event.result.Cleanup.Succeeded || event.result.Cleanup.Error != "synthetic teardown failure" {
+							t.Fatal("disconnect concealed cleanup failure")
+						}
+						// Process the result on a replacement session: disconnected cleanup
+						// must quarantine the slot before it can accept another lease.
+						replacement := &clientSession{client: client, send: func(*runnerv1.RunnerMessage) error { return nil }}
+						if err := replacement.handleWorkerEvent(event); err != nil {
+							t.Fatal(err)
+						}
+						if !client.draining.Load() || client.capacity().AvailableJobs != 0 {
+							t.Fatal("disconnect cleanup failure returned capacity")
+						}
 					}
 				default:
 					t.Fatal("missing disconnect result")
@@ -239,6 +272,31 @@ func TestSecretCapabilityRequiresExplicitGateAndSupportingWorker(t *testing.T) {
 	client.worker = nil
 	if advertisedFeature(client.capabilities().Features, want) {
 		t.Fatal("missing worker advertised secret support")
+	}
+}
+
+func TestSecretAcceptanceGateCannotRoundTripThroughConfiguration(t *testing.T) {
+	config := validConfig()
+	config.enableTestSecrets = true
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Config
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.enableTestSecrets || bytes.Contains(bytes.ToLower(encoded), []byte("testsecrets")) {
+		t.Fatal("private acceptance gate escaped into configuration")
+	}
+	for _, key := range []string{"enableTestSecrets", "EnableTestSecrets", "testSecretsV1"} {
+		var injected Config
+		if err := json.Unmarshal([]byte(`{"`+key+`":true}`), &injected); err != nil {
+			t.Fatal(err)
+		}
+		if injected.enableTestSecrets {
+			t.Fatal("configuration enabled an unaccepted rollout")
+		}
 	}
 }
 
