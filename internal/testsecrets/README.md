@@ -31,6 +31,14 @@ runtime teardown; failed cleanup preserves the bundle for retry/quarantine.
 This sandbox implementation does not yet establish the full gateway/worker
 accepted-lease, expiry, reconnect or slot-quarantine lifecycle.
 
+Trusted sandbox composition must supply `TestSecretExpiresAt` alongside the
+sealed files. The provider refuses missing or expired delivery timestamps during
+resolution, preparation, and immediately before launching the runtime. Expiry
+does not close files underneath a running sandbox: teardown remains responsible
+for removing the private tmpfs and closing handles after the runtime is gone.
+The delivery timestamp is not accepted from job JSON or persisted in bundle
+metadata. Remote delivery and lease-refresh integration are still pending.
+
 The caller clears delivery buffers after redactor and file preparation.
 The helper avoids ordinary diagnostic/JSON serialization of values. This does
 not promise protection against the trusted host user, root, debuggers, swap,
