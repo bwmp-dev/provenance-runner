@@ -36,6 +36,16 @@ func (strictProtocolCodec) Unmarshal(data []byte, value any) error {
 		return fmt.Errorf("protobuf codec cannot unmarshal %T", value)
 	}
 	if _, gatewayMessage := value.(*runnerv1.GatewayMessage); gatewayMessage {
+		// Inspect the wire before decoding: protobuf oneof replacement could
+		// otherwise allocate then discard a secret delivery hidden by a later
+		// payload. This runner does not yet negotiate secret delivery.
+		deliveries, err := messageFieldPayloads(data, 32)
+		if err != nil {
+			return errors.New("gateway message has malformed protobuf framing")
+		}
+		if len(deliveries) != 0 {
+			return errors.New("unsolicited test-secret delivery")
+		}
 		occurrences, err := countJobCorrelationWireOccurrences(data)
 		if err != nil {
 			return errors.New("gateway message has malformed protobuf framing")

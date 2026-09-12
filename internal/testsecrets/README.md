@@ -39,6 +39,15 @@ for removing the private tmpfs and closing handles after the runtime is gone.
 The delivery timestamp is not accepted from job JSON or persisted in bundle
 metadata. Remote delivery and lease-refresh integration are still pending.
 
+Paper's trusted composition accepts an ephemeral `execution.TestSecretSource`
+context callback. It invokes that callback only after all pinned downloads and
+workspace materialization, immediately before sandbox preparation. Unsupported
+sandboxes are refused without invoking the callback. Returned files must be
+available and unexpired; failed acquisition or resolution closes caller-owned
+handles. An explicitly supporting sandbox takes ownership on every Prepare path,
+including partial failure. This hook does not itself authorize delivery and is
+not yet connected to the authenticated remote worker or advertised capabilities.
+
 The caller clears delivery buffers after redactor and file preparation.
 The helper avoids ordinary diagnostic/JSON serialization of values. This does
 not promise protection against the trusted host user, root, debuggers, swap,
@@ -54,6 +63,11 @@ The caller must clear successful inputs after preparing files and redaction.
 
 This is not stream integration or capability advertisement. The worker still
 refuses secret-bearing offers, including configuration selections with omitted
-references. Pending-request connection binding, accepted-lease sequencing,
+references. The current transport rejects all secret delivery wire carriers
+before decoding, including a carrier hidden by a later protobuf oneof payload.
+Decoded deliveries from custom streams are refused before replay hashing and
+their owned value buffers cleared on refusal, receive failure and cancellation.
+This does not claim erasure of transport-owned raw buffers or arbitrary copies.
+Pending-request connection binding, accepted-lease sequencing,
 redactor registration, real sandbox mounts and teardown remain required before
 activation. The general transport message limit is unchanged.

@@ -469,6 +469,16 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if err != nil {
 		return prepared, err
 	}
+	workload.TestSecretFiles, workload.TestSecretExpiresAt, err = execution.AcquireTestSecretFiles(ctx, e.provider.config.Sandbox)
+	if err != nil {
+		return prepared, err
+	}
+	secretTransferred := false
+	defer func() {
+		if !secretTransferred && workload.TestSecretFiles != nil {
+			_ = workload.TestSecretFiles.Close()
+		}
+	}()
 	sandboxEnvironment, err := e.provider.config.Sandbox.ResolveWorkload(ctx, e.request, workload)
 	if err != nil {
 		return prepared, fmt.Errorf("resolve Paper sandbox: %w", err)
@@ -476,6 +486,8 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	if sandboxEnvironment == nil {
 		return prepared, errors.New("resolve Paper sandbox: provider returned nil environment")
 	}
+	// The explicitly supporting sandbox owns files on every Prepare path.
+	secretTransferred = true
 	delegate, prepareErr := sandboxEnvironment.Prepare(ctx)
 	prepared.delegate = delegate
 	if prepareErr != nil {

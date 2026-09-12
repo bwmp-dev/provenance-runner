@@ -294,6 +294,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 			select {
 			case receivedMessages <- received{message: message, err: receiveErr}:
 			case <-sessionContext.Done():
+				clearTestSecretDelivery(message)
 				return
 			}
 			if receiveErr != nil {
@@ -316,9 +317,13 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 	case received := <-receivedMessages:
 		handshakeTimer.Stop()
 		if received.err != nil {
+			clearTestSecretDelivery(received.message)
 			return false, received.err
 		}
 		first = received.message
+	}
+	if err := refuseTestSecretDelivery(first); err != nil {
+		return false, err
 	}
 	now := c.now().UTC()
 	authenticated, err := c.validateAuthenticated(first, now)
@@ -412,6 +417,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 			return true, err
 		case received := <-receivedMessages:
 			if received.err != nil {
+				clearTestSecretDelivery(received.message)
 				return true, received.err
 			}
 			duplicate, err := session.gatewayMessageDuplicate(received.message)
