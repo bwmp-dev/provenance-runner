@@ -2,6 +2,7 @@ package gatewayclient
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"math"
@@ -103,7 +104,10 @@ func (s *clientSession) beginSecretRequest(request *workerSecretRequest) error {
 	if sequence == 0 || sequence > math.MaxInt64 {
 		return refuse()
 	}
-	id := fmt.Sprintf("secret-%016x-%016x", s.generation, sequence)
+	// Generation and sequence reset on process restart. A fresh random nonce
+	// prevents a still-valid old delivery from matching a newly opened request.
+	// This identifier contains no secret-derived material and is never journaled.
+	id := fmt.Sprintf("secret-%s-%016x-%016x", rand.Text(), s.generation, sequence)
 	message := &runnerv1.RunnerMessage{MessageId: id, SentAt: timestamppb.New(s.client.now()), Payload: &runnerv1.RunnerMessage_TestSecretsRequest{TestSecretsRequest: &runnerv1.TestSecretsRequest{Lease: proto.Clone(job.Lease).(*runnerv1.LeaseIdentity), Attempt: proto.Clone(job.Attempt).(*runnerv1.AttemptIdentity)}}}
 	if proto.Size(message) > MaximumMessageBytes {
 		return refuse()
