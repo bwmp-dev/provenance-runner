@@ -73,7 +73,10 @@ before decoding, and retains the 65536-byte bound for all other messages.
 Delivery bypasses ordinary replay hashing and is never journaled. Owned buffers
 are cleared after sealing and on refusal, receive failure and cancellation.
 Pending requests expire after at most 15 seconds and cannot cross a connection
-generation. Disconnect cancels secret-bearing workers and reports an
+generation. Request IDs also include fresh cryptographic randomness, so resetting
+in-memory generation/sequence counters on process restart cannot reuse an old
+delivery identity. The persisted journal retains selection metadata only; opening
+it in a new client still requires fresh authorized delivery. Disconnect cancels secret-bearing workers and reports an
 infrastructure failure after cleanup; no-secret workers retain reconnect grace.
 An existing cleanup failure takes precedence over the connection-loss result.
 Any failed worker cleanup drains the slot before capacity is released, including

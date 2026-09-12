@@ -5,6 +5,9 @@ package gatewayclient
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,6 +15,87 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestSecretJournalRestartRetainsOnlyMetadataAndRequiresFreshDelivery(t *testing.T) {
+	s, request, _ := secretExchangeFixture(t)
+	path := filepath.Join(t.TempDir(), "journal.json")
+	journal, err := openJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := s.client.journal.snapshot().Active
+	active.OfferMessageID = "synthetic-secret-offer"
+	active.OfferDigest = bytes.Repeat([]byte{1}, sha256.Size)
+	active.JobCorrelationV1 = true
+	if err := journal.update(func(state *journalState) error { state.Active = active; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s.client.journal = journal
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.beginSecretRequest(request); err != nil {
+		t.Fatal(err)
+	}
+	delivery, _ := secretExchangeDelivery(s)
+	stale := proto.Clone(delivery).(*runnerv1.GatewayMessage)
+	if err := s.receiveSecretDelivery(delivery); err != nil {
+		t.Fatal(err)
+	}
+	response := <-request.response
+	if response.err != nil || response.files == nil {
+		t.Fatal("initial secret delivery failed")
+	}
+	if err := response.files.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("secret request or response changed the durable journal")
+	}
+	reopened, err := openJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newClient(validConfig(), nil)
+	t.Cleanup(func() { _ = client.Close() })
+	client.journal = reopened
+	client.now = s.client.now
+	// A process restart resets both in-memory generation and request counters.
+	// Reusing generation 1 is intentional: freshness cannot depend on counters.
+	client.sessionGeneration.Store(1)
+	next := &clientSession{client: client, generation: 1, reconciled: true, jobCorrelationV1: true, testSecretsV1: true, send: func(*runnerv1.RunnerMessage) error { return nil }}
+	fresh := &workerSecretRequest{ctx: context.Background(), generation: 1, response: make(chan secretResponse, 1)}
+	if err := next.beginSecretRequest(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if next.pendingSecret == nil || next.pendingSecret.requestID == stale.GetTestSecretsDelivery().RequestMessageId {
+		t.Fatal("restart reused a previous connection request identity")
+	}
+	if err := next.receiveSecretDelivery(stale); err == nil {
+		t.Fatal("restarted worker accepted stale connection plaintext")
+	}
+	if refused := <-fresh.response; refused.err == nil || refused.files != nil || stale.GetTestSecretsDelivery().Secrets[0].Value != nil {
+		t.Fatal("stale delivery retained or released plaintext")
+	}
+	if err := next.beginSecretRequest(fresh); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := secretExchangeDelivery(next)
+	if err := next.receiveSecretDelivery(current); err != nil {
+		t.Fatal(err)
+	}
+	response = <-fresh.response
+	if response.err != nil || response.files == nil {
+		t.Fatal("fresh authorized delivery after restart failed")
+	}
+	defer response.files.Close()
+	after, err = os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("restarted delivery persisted secret-bearing state")
+	}
+}
 
 func secretExchangeFixture(t *testing.T) (*clientSession, *workerSecretRequest, *[]*runnerv1.RunnerMessage) {
 	t.Helper()
