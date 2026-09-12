@@ -3,14 +3,77 @@
 package gvisor
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	"golang.org/x/sys/unix"
 )
+
+func TestSecretExpiryFailsClosedBeforePreparationAndLaunch(t *testing.T) {
+	now := time.Now()
+	for _, expiry := range []time.Time{{}, now, now.Add(-time.Second)} {
+		f, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: []byte("synthetic")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateSecretExpiry(f, expiry, now); err == nil {
+			t.Fatal("invalid expiry accepted")
+		}
+		var provider *Provider
+		if _, err := provider.resolveWorkload(context.Background(), execution.Request{}, execution.IsolatedWorkload{TestSecretFiles: f, TestSecretExpiresAt: expiry}); err == nil {
+			t.Fatal("expired resolution accepted")
+		}
+		if _, err := f.Mounts(); err != nil {
+			t.Fatal("resolution failure took caller-owned handles")
+		}
+		// Nil providers deliberately prove no filesystem or runtime is touched.
+		e := &environment{secretFiles: f, secretExpiresAt: expiry}
+		if _, err := e.Prepare(context.Background()); err == nil {
+			t.Fatal("expired preparation accepted")
+		}
+		if _, err := f.Mounts(); err == nil {
+			t.Fatal("failed preparation retained memory handles")
+		}
+		p := &preparedEnvironment{secretFiles: f, secretExpiresAt: expiry}
+		if _, err := p.Execute(context.Background()); err == nil {
+			t.Fatal("expired execution accepted")
+		}
+		if _, err := p.runContainer(context.Background(), command{}, time.Second); err == nil {
+			t.Fatal("expired launch accepted")
+		}
+	}
+	f := &testsecrets.Files{}
+	if err := validateSecretExpiry(f, now.Add(time.Second), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSecretExpiry(nil, time.Time{}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSecretExpiry(nil, now.Add(time.Second), now); err == nil {
+		t.Fatal("expiry without files accepted")
+	}
+	encoded, err := json.Marshal(execution.IsolatedWorkload{TestSecretFiles: f, TestSecretExpiresAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["TestSecretExpiresAt"]; ok {
+		t.Fatal("trusted expiry serialized")
+	}
+	if _, ok := fields["TestSecretFiles"]; ok {
+		t.Fatal("trusted handles serialized")
+	}
+}
 
 func TestSecretMountsArePrivateReadOnlyAndBudgeted(t *testing.T) {
 	f, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: []byte("synthetic")}})

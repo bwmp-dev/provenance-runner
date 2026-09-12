@@ -276,7 +276,7 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
 			Command: "/bin/sh", Arguments: []string{"-c", `test "$(id -u)" = 65532 && test "$(wc -c < /run/provenance/test-secrets/token)" = 22 && ! (printf x > /run/provenance/test-secrets/token) 2>/dev/null && ! touch /run/escape 2>/dev/null && cat /run/provenance/test-secrets/token && echo && echo secret-file-smoke-ok`},
-			InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+			InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files, TestSecretExpiresAt: time.Now().Add(5 * time.Minute),
 		})
 		if err != nil {
 			t.Fatal("resolve secret sandbox failed:", err)
@@ -355,7 +355,7 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		defer files.Close()
 		env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
-			Command: "/bin/true", InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+			Command: "/bin/true", InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files, TestSecretExpiresAt: time.Now().Add(5 * time.Minute),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -405,7 +405,7 @@ func TestRunscSmoke(t *testing.T) {
 				// Padding advances the redactor's deliberate cross-write holdback
 				// before waiting for the sanitized readiness line.
 				Command: "/bin/sh", Arguments: []string{"-c", `test -s /run/provenance/test-secrets/token || exit 1; echo secret-lifecycle-ready; printf '%0512d\n' 0; trap '' TERM; while :; do sleep 1; done`},
-				InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
+				InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files, TestSecretExpiresAt: time.Now().Add(5 * time.Minute),
 			})
 			if err != nil {
 				t.Fatal(err)

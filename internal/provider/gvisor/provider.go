@@ -349,6 +349,9 @@ func (p *Provider) ResolveWorkload(ctx context.Context, request execution.Reques
 }
 
 func (p *Provider) resolveWorkload(ctx context.Context, request execution.Request, workload execution.IsolatedWorkload) (execution.Environment, error) {
+	if err := validateSecretExpiry(workload.TestSecretFiles, workload.TestSecretExpiresAt, time.Now()); err != nil {
+		return nil, err
+	}
 	if workload.TestSecretFiles != nil {
 		values, err := workload.TestSecretFiles.RedactionValues()
 		if err != nil {
@@ -413,6 +416,7 @@ func (p *Provider) resolveWorkload(ctx context.Context, request execution.Reques
 	}
 	return &environment{
 		secretFiles:           workload.TestSecretFiles,
+		secretExpiresAt:       workload.TestSecretExpiresAt,
 		provider:              p,
 		config:                config,
 		inputs:                inputs,
@@ -580,6 +584,7 @@ func (p *Provider) validateMountSource(inputs, path string) (string, error) {
 }
 
 type environment struct {
+	secretExpiresAt       time.Time
 	secretFiles           *testsecrets.Files
 	provider              *Provider
 	config                configuration
@@ -615,6 +620,9 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 		}
 	}()
 	if e.secretFiles != nil {
+		if err := validateSecretExpiry(e.secretFiles, e.secretExpiresAt, time.Now()); err != nil {
+			return nil, err
+		}
 		if err := validateSecretRoot(e.provider.config.RootFS, e.secretFiles); err != nil {
 			return nil, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_secret_mounts_invalid", err)
 		}
@@ -655,6 +663,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 	}
 	prepared := &preparedEnvironment{
 		secretFiles:           e.secretFiles,
+		secretExpiresAt:       e.secretExpiresAt,
 		measurement:           measured,
 		provider:              e.provider,
 		containerID:           containerID,
@@ -711,6 +720,7 @@ func (e *environment) Prepare(ctx context.Context) (execution.PreparedEnvironmen
 }
 
 type preparedEnvironment struct {
+	secretExpiresAt            time.Time
 	secretFiles                *testsecrets.Files
 	measurement                *runtimeidentity.Lease
 	measuredRuntime            *runtimeidentity.Snapshot
@@ -750,6 +760,9 @@ func (e *preparedEnvironment) AttachObserver(observer execution.ExecutionObserve
 }
 
 func (e *preparedEnvironment) Execute(ctx context.Context) (outcome execution.ExecutionOutcome, executionErr error) {
+	if err := validateSecretExpiry(e.secretFiles, e.secretExpiresAt, time.Now()); err != nil {
+		return execution.ExecutionOutcome{}, err
+	}
 	if e.measurement != nil {
 		if err := e.measurement.Validate(); err != nil {
 			return execution.ExecutionOutcome{}, execution.NewClassifiedError(execution.ClassificationInfrastructureFailure, "gvisor_runtime_measurement_drift", runtimeidentity.ErrDrift)
@@ -863,6 +876,9 @@ func (e *preparedEnvironment) executionCommand(stdout, stderr io.Writer) command
 // outlive the process that the command runner is able to reap.
 func (e *preparedEnvironment) runContainer(ctx context.Context, invocation command, terminationTimeout time.Duration) (commandResult, error) {
 	if err := ctx.Err(); err != nil {
+		return commandResult{}, err
+	}
+	if err := validateSecretExpiry(e.secretFiles, e.secretExpiresAt, time.Now()); err != nil {
 		return commandResult{}, err
 	}
 
