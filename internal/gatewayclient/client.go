@@ -63,7 +63,7 @@ type RemoteWorkerTestSecrets interface {
 
 func canUseTestSecrets(config Config, worker RemoteWorker) bool {
 	supported, ok := worker.(RemoteWorkerTestSecrets)
-	return config.enableTestSecrets && ok && supported.SupportsTestSecretSource()
+	return config.EnableTestSecrets && ok && supported.SupportsTestSecretSource()
 }
 
 type permanentError struct {

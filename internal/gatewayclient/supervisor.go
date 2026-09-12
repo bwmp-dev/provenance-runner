@@ -173,7 +173,7 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 		return s.rejectOffer(offer, runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED, "worker_unavailable: remote execution is unavailable")
 	}
 	offerConfig := s.client.config
-	offerConfig.enableTestSecrets = s.testSecretsV1
+	offerConfig.EnableTestSecrets = s.testSecretsV1
 	if rejection := validateOffer(offer, offerConfig, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity); rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}

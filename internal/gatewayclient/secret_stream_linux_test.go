@@ -191,7 +191,7 @@ func TestSecretStreamAcceptedLeaseDeliveryAndDisconnectCleanup(t *testing.T) {
 			client, closeConnection := bufconnClient(t, server)
 			defer closeConnection()
 			client.worker = worker
-			client.config.enableTestSecrets = true
+			client.config.EnableTestSecrets = true
 			client.config.DisableTerminalEvidence = true
 			client.config.Resources.CPUMillis = 2000
 			client.connector.(*generatedConnector).allowTestSecrets = true
@@ -265,7 +265,7 @@ func TestSecretCapabilityRequiresExplicitGateAndSupportingWorker(t *testing.T) {
 	if advertisedFeature(client.capabilities().Features, want) {
 		t.Fatal("default advertised incomplete rollout")
 	}
-	client.config.enableTestSecrets = true
+	client.config.EnableTestSecrets = true
 	if !advertisedFeature(client.capabilities().Features, want) || validateAdvertisedFeatures(client.capabilities().Features) != nil {
 		t.Fatal("enabled capable worker not negotiated")
 	}
@@ -277,7 +277,7 @@ func TestSecretCapabilityRequiresExplicitGateAndSupportingWorker(t *testing.T) {
 
 func TestSecretAcceptanceGateCannotRoundTripThroughConfiguration(t *testing.T) {
 	config := validConfig()
-	config.enableTestSecrets = true
+	config.EnableTestSecrets = true
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +286,7 @@ func TestSecretAcceptanceGateCannotRoundTripThroughConfiguration(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.enableTestSecrets || bytes.Contains(bytes.ToLower(encoded), []byte("testsecrets")) {
+	if decoded.EnableTestSecrets || bytes.Contains(bytes.ToLower(encoded), []byte("testsecrets")) {
 		t.Fatal("private acceptance gate escaped into configuration")
 	}
 	for _, key := range []string{"enableTestSecrets", "EnableTestSecrets", "testSecretsV1"} {
@@ -294,7 +294,7 @@ func TestSecretAcceptanceGateCannotRoundTripThroughConfiguration(t *testing.T) {
 		if err := json.Unmarshal([]byte(`{"`+key+`":true}`), &injected); err != nil {
 			t.Fatal(err)
 		}
-		if injected.enableTestSecrets {
+		if injected.EnableTestSecrets {
 			t.Fatal("configuration enabled an unaccepted rollout")
 		}
 	}

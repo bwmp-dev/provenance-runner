@@ -2,8 +2,11 @@
 
 This Linux primitive prepares anonymous `memfd` files backed by shmem/tmpfs.
 Production defaults do not advertise test-secret support. The authenticated
-worker composition is behind a private, non-JSON acceptance gate, not an
-operator rollout switch. Full composed acceptance and deployed key custody
+worker composition requires the explicit `connect --enable-test-secrets`
+operator switch and an explicitly supporting provider. This switch is never
+accepted from connection/job JSON or enabled by installer defaults. It permits
+controlled lifecycle acceptance without a patched binary; it does not enable
+backend scheduling or supply key custody. Full composed acceptance and deployed key custody
 remain prerequisites for enabling secret-bearing scheduling.
 
 The entire name-ordered set is validated before allocation: at most 64 unique
@@ -52,8 +55,8 @@ response to a single pending request and original connection generation.
 The caller clears delivery buffers after redactor and file preparation.
 The helper avoids ordinary diagnostic/JSON serialization of values. This does
 not promise protection against the trusted host user, root, debuggers, swap,
-crash dumps, or forensic recovery. Do not enable capability advertisement until
-the complete sandbox lifecycle has passed its acceptance tests.
+crash dumps, or forensic recovery. Only use the opt-in for a controlled acceptance
+runner until the complete lifecycle and staged deployment gates have passed.
 # Delivery validation (toolkit alpha.23)
 
 `TakeDelivery` requires the complete selected reference set, exact request,
@@ -63,7 +66,7 @@ of the protobuf response; every rejected response clears all recognized values.
 The caller must clear successful inputs after preparing files and redaction.
 
 The default worker refuses secret-bearing offers and all delivery wire carriers.
-The internal acceptance gate additionally requires an explicitly supporting
+The explicit operator opt-in additionally requires an explicitly supporting
 worker. Enabled offers must exactly match configuration names and immutable
 versions; duplicate JSON keys, omitted references and inaccessible composition
 are refused. Only the delivery variant permits 98304 encoded bytes. The codec
