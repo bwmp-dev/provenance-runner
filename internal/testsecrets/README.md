@@ -25,3 +25,16 @@ The helper avoids ordinary diagnostic/JSON serialization of values. This does
 not promise protection against the trusted host user, root, debuggers, swap,
 crash dumps, or forensic recovery. Do not enable capability advertisement until
 the complete sandbox lifecycle has passed its acceptance tests.
+# Delivery validation (toolkit alpha.23)
+
+`TakeDelivery` requires the complete selected reference set, exact request,
+lease and attempt, bounded current expiry, UTF-8 values and the 64-KiB aggregate
+limit. Unknown protobuf fields are refused. Success transfers owned buffers out
+of the protobuf response; every rejected response clears all recognized values.
+The caller must clear successful inputs after preparing files and redaction.
+
+This is not stream integration or capability advertisement. The worker still
+refuses secret-bearing offers, including configuration selections with omitted
+references. Pending-request connection binding, accepted-lease sequencing,
+redactor registration, real sandbox mounts and teardown remain required before
+activation. The general transport message limit is unchanged.

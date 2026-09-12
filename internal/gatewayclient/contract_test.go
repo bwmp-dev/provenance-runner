@@ -53,8 +53,8 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	// Exact CI-accepted toolkit source; no new tagged release is claimed here.
-	const authority = "v0.0.0-20260910180251-e7b5404fe9a7"
+	// Toolkit v0.1.0-alpha.23, released from green main.
+	const authority = "v0.0.0-20260912012756-11548839339c"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)

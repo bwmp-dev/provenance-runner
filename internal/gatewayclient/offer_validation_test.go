@@ -25,6 +25,22 @@ func TestValidateOfferAcceptsBoundedPaperOfferWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestValidateOfferRefusesUnimplementedSecretInputs(t *testing.T) {
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	for _, withReferences := range []bool{false, true} {
+		offer := validLeaseOffer(now)
+		offer.Job.NormalizedConfigurationJson = []byte(`{"tests":{"secrets":{"token":1}}}`)
+		hash := sha256.Sum256(offer.Job.NormalizedConfigurationJson)
+		offer.Job.Hashes.Configuration.Value = hash[:]
+		if withReferences {
+			offer.Job.TestSecrets = []*runnerv1.TestSecretReference{{SecretId: "10000000-0000-0000-0000-000000000001", Name: "token", Version: 1}}
+		}
+		if rejected := validateOffer(offer, validOfferConfig(), now, 10*time.Minute, false, false); rejected == nil || rejected.Code != "test_secrets_unavailable" {
+			t.Fatal("secret selection silently accepted")
+		}
+	}
+}
+
 func TestValidateOfferReturnsStableBoundedRejections(t *testing.T) {
 	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
 	config := validOfferConfig()
