@@ -73,8 +73,9 @@ type Config struct {
 	DisableTerminalEvidence bool `json:"-"`
 	// Explicit consumer-first rollout opt-in. Never accepted from job JSON.
 	EnableTerminalEvidenceV2 bool `json:"-"`
-	// Internal acceptance-only rollout gate until full lifecycle acceptance.
-	enableTestSecrets bool
+	// Explicit operator opt-in for controlled lifecycle acceptance and rollout.
+	// Never accepted from connection/job JSON; backend scheduling is separate.
+	EnableTestSecrets bool `json:"-"`
 	credential        []byte
 	journalFile       string
 	credentialStore   durableCredentialStore

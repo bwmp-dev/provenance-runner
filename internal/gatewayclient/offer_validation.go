@@ -53,7 +53,7 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	}
 	// Consuming an additive contract must not silently accept a job whose
 	// required inputs are not yet implemented by this worker.
-	if len(offer.GetJob().GetTestSecrets()) != 0 && (!config.enableTestSecrets || !jobCorrelationV1) {
+	if len(offer.GetJob().GetTestSecrets()) != 0 && (!config.EnableTestSecrets || !jobCorrelationV1) {
 		return rejectUnsupported("test_secrets_unavailable", "test-secret execution is not enabled")
 	}
 	if len(offer.GetJob().GetNormalizedConfigurationJson()) > MaximumMessageBytes {
@@ -87,10 +87,10 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if rejection := validateOfferHashes(job.GetHashes()); rejection != nil {
 		return rejection
 	}
-	if rejection := validateOfferConfigurationWithSecrets(job.GetNormalizedConfigurationJson(), job.GetHashes().GetConfiguration(), config.enableTestSecrets && jobCorrelationV1); rejection != nil {
+	if rejection := validateOfferConfigurationWithSecrets(job.GetNormalizedConfigurationJson(), job.GetHashes().GetConfiguration(), config.EnableTestSecrets && jobCorrelationV1); rejection != nil {
 		return rejection
 	}
-	if config.enableTestSecrets && testsecrets.ValidateSelection(job) != nil {
+	if config.EnableTestSecrets && testsecrets.ValidateSelection(job) != nil {
 		return rejectUnsupported("invalid_test_secret_selection", "test-secret references do not match normalized configuration")
 	}
 	if rejection := validateOfferEnvironment(job.GetEnvironment()); rejection != nil {
