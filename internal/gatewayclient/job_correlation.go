@@ -24,7 +24,8 @@ func validateAdvertisedFeatures(features []runnerv1.ProtocolFeature) error {
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_RESTART_UPLOAD_RECOVERY,
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY,
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V1,
-			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V2:
+			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V2,
+			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1:
 		default:
 			return errors.New("runner capabilities contain an unknown protocol feature")
 		}

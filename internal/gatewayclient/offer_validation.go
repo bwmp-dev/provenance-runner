@@ -15,6 +15,7 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
 	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -52,7 +53,7 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	}
 	// Consuming an additive contract must not silently accept a job whose
 	// required inputs are not yet implemented by this worker.
-	if len(offer.GetJob().GetTestSecrets()) != 0 {
+	if len(offer.GetJob().GetTestSecrets()) != 0 && (!config.enableTestSecrets || !jobCorrelationV1) {
 		return rejectUnsupported("test_secrets_unavailable", "test-secret execution is not enabled")
 	}
 	if len(offer.GetJob().GetNormalizedConfigurationJson()) > MaximumMessageBytes {
@@ -86,8 +87,11 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if rejection := validateOfferHashes(job.GetHashes()); rejection != nil {
 		return rejection
 	}
-	if rejection := validateOfferConfiguration(job.GetNormalizedConfigurationJson(), job.GetHashes().GetConfiguration()); rejection != nil {
+	if rejection := validateOfferConfigurationWithSecrets(job.GetNormalizedConfigurationJson(), job.GetHashes().GetConfiguration(), config.enableTestSecrets && jobCorrelationV1); rejection != nil {
 		return rejection
+	}
+	if config.enableTestSecrets && testsecrets.ValidateSelection(job) != nil {
+		return rejectUnsupported("invalid_test_secret_selection", "test-secret references do not match normalized configuration")
 	}
 	if rejection := validateOfferEnvironment(job.GetEnvironment()); rejection != nil {
 		return rejection
@@ -232,6 +236,10 @@ func validateOfferHashes(hashes *runnerv1.JobHashes) *OfferRejection {
 }
 
 func validateOfferConfiguration(configuration []byte, expected *runnerv1.Digest) *OfferRejection {
+	return validateOfferConfigurationWithSecrets(configuration, expected, false)
+}
+
+func validateOfferConfigurationWithSecrets(configuration []byte, expected *runnerv1.Digest, enabled bool) *OfferRejection {
 	if len(configuration) == 0 || len(configuration) > MaximumMessageBytes || !utf8.Valid(configuration) {
 		return rejectUnsupported("invalid_configuration", "normalized configuration is missing or invalid")
 	}
@@ -256,7 +264,7 @@ func validateOfferConfiguration(configuration []byte, expected *runnerv1.Digest)
 	if json.Unmarshal(configuration, &selection) != nil {
 		return rejectUnsupported("invalid_configuration", "normalized test selection is invalid")
 	}
-	if len(selection.Tests.Secrets) != 0 {
+	if len(selection.Tests.Secrets) != 0 && !enabled {
 		return rejectUnsupported("test_secrets_unavailable", "test-secret execution is not enabled")
 	}
 	return nil

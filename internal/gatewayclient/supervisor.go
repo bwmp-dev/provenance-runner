@@ -12,6 +12,7 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -21,6 +22,8 @@ import (
 const maximumRememberedGatewayMessageIDs = 4096
 
 type clientSession struct {
+	testSecretsV1                 bool
+	pendingSecret                 *pendingSecretRequest
 	client                        *Client
 	authenticated                 *runnerv1.Authenticated
 	send                          func(*runnerv1.RunnerMessage) error
@@ -169,7 +172,9 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 	if s.client.worker == nil {
 		return s.rejectOffer(offer, runnerv1.LeaseRejectionReason_LEASE_REJECTION_REASON_UNSUPPORTED, "worker_unavailable: remote execution is unavailable")
 	}
-	if rejection := validateOffer(offer, s.client.config, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity); rejection != nil {
+	offerConfig := s.client.config
+	offerConfig.enableTestSecrets = s.testSecretsV1
+	if rejection := validateOffer(offer, offerConfig, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity); rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}
 	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime(), s.objectUploadIdentity)
@@ -973,10 +978,19 @@ func (s *clientSession) queueRenewal(now time.Time) error {
 }
 
 func (s *clientSession) handleWorkerEvent(event workerEvent) error {
+	if event.secretRequest != nil {
+		return s.beginSecretRequest(event.secretRequest)
+	}
 	if event.evidence != nil {
 		return s.sendWorkerEvidence(event.evidence)
 	}
 	if event.result != nil {
+		// No slot reuse after failed teardown, even if the terminal receipt is
+		// acknowledged or this connection is replaced. Process startup must
+		// reconcile owned sandbox state before accepting jobs again.
+		if event.result.Cleanup != nil && !event.result.Cleanup.Succeeded {
+			s.client.Drain()
+		}
 		s.client.markWorkerStopped()
 		if event.finalEvidence != nil {
 			_ = s.sendWorkerEvidence(event.finalEvidence)
@@ -1061,6 +1075,9 @@ func (s *clientSession) drainDeferred(now time.Time) error {
 
 func (s *clientSession) discardDeferred(reason error) {
 	for _, event := range s.client.takeDeferredWorkerEvents() {
+		if event.secretRequest != nil {
+			finishSecretRequest(event.secretRequest, secretResponse{err: errSecretDeliveryUnavailable})
+		}
 		if event.start != nil {
 			event.start <- reason
 		}
@@ -1370,15 +1387,29 @@ func (c *Client) startWorker(ctx context.Context) error {
 		}
 		execute = worker.ExecuteV2
 	}
-	workerContext, cancel := context.WithCancel(ctx)
+	workerContext, cancel := context.WithCancelCause(ctx)
+	if len(specification.TestSecrets) != 0 {
+		if !canUseTestSecrets(c.config, c.worker) {
+			c.workerMu.Unlock()
+			cancel(context.Canceled)
+			return errSecretDeliveryUnavailable
+		}
+		generation := c.sessionGeneration.Load()
+		workerContext = execution.WithTestSecretSource(workerContext, func(sourceContext context.Context) (*testsecrets.Files, time.Time, error) {
+			return c.requestTestSecretFiles(sourceContext, generation)
+		})
+		c.workerSecretGeneration = generation
+		c.workerSecretCancel = func() { cancel(errSecretConnectionLost) }
+	}
 	observer := newLiveExecutionObserver(c, specification)
 	workerContext = execution.WithObserver(workerContext, observer)
 	c.workerRunning = true
-	c.workerCancel = cancel
+	c.workerCancel = func() { cancel(context.Canceled) }
 	c.workerWG.Add(1)
 	c.workerMu.Unlock()
 	go func() {
 		defer c.workerWG.Done()
+		defer cancel(context.Canceled)
 		result := execute(workerContext, specification, func(startContext context.Context, _ execution.ExecutionStart) error {
 			response := make(chan error, 1)
 			select {
@@ -1394,6 +1425,11 @@ func (c *Client) startWorker(ctx context.Context) error {
 			}
 		})
 		var finalUsage *workerEvidenceEvent
+		if errors.Is(context.Cause(workerContext), errSecretConnectionLost) && (result.Cleanup == nil || result.Cleanup.Succeeded) {
+			result.Status = "failed"
+			result.Classification = execution.ClassificationInfrastructureFailure
+			result.Failure = execution.NewFailure(execution.ClassificationInfrastructureFailure, "test_secret_connection_lost", "test-secret execution stopped after connection loss")
+		}
 		if result.Usage.MeasuredResources != nil {
 			finalUsage = observer.finalUsageEvent(*result.Usage.MeasuredResources)
 		}
@@ -1410,6 +1446,9 @@ func (c *Client) discardQueuedWorkerEvents(reason error) {
 	for {
 		select {
 		case event := <-c.workerEvents:
+			if event.secretRequest != nil {
+				finishSecretRequest(event.secretRequest, secretResponse{err: errSecretDeliveryUnavailable})
+			}
 			if event.start != nil {
 				event.start <- reason
 			}
@@ -1435,6 +1474,8 @@ func (c *Client) markWorkerStopped() {
 	defer c.workerMu.Unlock()
 	c.workerRunning = false
 	c.workerCancel = nil
+	c.workerSecretCancel = nil
+	c.workerSecretGeneration = 0
 }
 
 func (c *Client) isWorkerRunning() bool {

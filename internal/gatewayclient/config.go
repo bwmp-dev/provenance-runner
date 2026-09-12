@@ -73,9 +73,11 @@ type Config struct {
 	DisableTerminalEvidence bool `json:"-"`
 	// Explicit consumer-first rollout opt-in. Never accepted from job JSON.
 	EnableTerminalEvidenceV2 bool `json:"-"`
-	credential               []byte
-	journalFile              string
-	credentialStore          durableCredentialStore
+	// Internal acceptance-only rollout gate until full lifecycle acceptance.
+	enableTestSecrets bool
+	credential        []byte
+	journalFile       string
+	credentialStore   durableCredentialStore
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {

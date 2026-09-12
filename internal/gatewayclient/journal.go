@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -179,6 +180,9 @@ func validateJournalState(state journalState) error {
 	}
 	if rejection := validateOfferJobCorrelation(specification, ExpectedScope{}, state.Active.JobCorrelationV1); rejection != nil {
 		return errors.New("active specification job correlation negotiation is invalid")
+	}
+	if len(specification.TestSecrets) != 0 && (!state.Active.JobCorrelationV1 || testsecrets.ValidateSelection(specification) != nil) {
+		return errors.New("active test-secret selection is invalid")
 	}
 	for _, dependency := range specification.GetDependencies() {
 		if dependency == nil || !pluginname.ValidPaper(dependency.GetPluginName()) {
