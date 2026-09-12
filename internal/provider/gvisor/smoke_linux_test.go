@@ -4,16 +4,19 @@ package gvisor
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -260,6 +263,8 @@ func TestRunscSmoke(t *testing.T) {
 		}
 		prepared := owned.(*preparedEnvironment)
 		defer cleanupSmokeEnvironment(t, prepared)
+		live := &secretSmokeObserver{}
+		prepared.AttachObserver(live)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		outcome, err := prepared.Execute(ctx)
@@ -269,6 +274,30 @@ func TestRunscSmoke(t *testing.T) {
 		output, err := prepared.Collect(ctx)
 		if err != nil || !strings.Contains(output.Stdout, "secret-file-smoke-ok") || strings.Contains(output.Stdout, string(secret)) || strings.Contains(output.Stderr, string(secret)) {
 			t.Fatal("secret read/redaction assertion failed")
+		}
+		if !strings.Contains(live.text(), "secret-file-smoke-ok") || strings.Contains(live.text(), string(secret)) {
+			t.Fatal("live secret redaction failed")
+		}
+		if output.CompleteLog == nil || output.CompleteLog.Archive == nil {
+			t.Fatal("complete redacted log missing")
+		}
+		defer output.CompleteLog.Archive.Close()
+		archive, err := gzip.NewReader(io.NewSectionReader(output.CompleteLog.Archive, 0, output.CompleteLog.CompressedBytes))
+		if err != nil {
+			t.Fatal("complete log framing failed")
+		}
+		complete, err := io.ReadAll(io.LimitReader(archive, 65537))
+		archive.Close()
+		if err != nil || len(complete) > 65536 || !bytes.Contains(complete, []byte("secret-file-smoke-ok")) || bytes.Contains(complete, secret) {
+			t.Fatal("stored secret redaction failed")
+		}
+		cancelled, stop := context.WithCancel(context.Background())
+		stop()
+		if !errors.Is(prepared.Cleanup(cancelled), context.Canceled) {
+			t.Fatal("cancelled cleanup unexpectedly completed")
+		}
+		if _, err := files.Mounts(); err != nil {
+			t.Fatal("failed cleanup prematurely closed memory handles")
 		}
 		cleanupSmokeEnvironment(t, prepared)
 		if _, err := files.Mounts(); err == nil {
@@ -475,6 +504,19 @@ func TestRunscSmoke(t *testing.T) {
 		cleanupNeeded = false
 	})
 }
+
+type secretSmokeObserver struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (o *secretSmokeObserver) ObserveLog(entry execution.LiveLogEntry) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.data.Write(entry.Data)
+}
+func (*secretSmokeObserver) ObserveUsage(execution.ResourceUsage) {}
+func (o *secretSmokeObserver) text() string                       { o.mu.Lock(); defer o.mu.Unlock(); return o.data.String() }
 
 func smokeRootIdentity(root, sandbox, image, loop string) (func() (string, error), func() error, error) {
 	if image == "" {
