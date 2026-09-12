@@ -348,6 +348,10 @@ func TestRunscSmoke(t *testing.T) {
 		assertNoSandboxResidue(t, provider, prepared.containerID)
 	})
 
+	t.Run("Paper secret source composition", func(t *testing.T) {
+		runPaperSecretCompositionSmoke(t, provider, inputsRoot)
+	})
+
 	t.Run("secret cleanup after failed runtime start", func(t *testing.T) {
 		files, err := testsecrets.New([]testsecrets.Input{{Name: "token", Value: []byte("synthetic-start-failure")}})
 		if err != nil {
