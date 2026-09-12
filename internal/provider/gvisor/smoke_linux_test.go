@@ -402,7 +402,9 @@ func TestRunscSmoke(t *testing.T) {
 			}
 			defer files.Close()
 			env, err := provider.ResolveWorkload(context.Background(), execution.Request{JobID: "smoke", Limits: execution.Limits{MaxOutputBytes: 65536}}, execution.IsolatedWorkload{
-				Command: "/bin/sh", Arguments: []string{"-c", `test -s /run/provenance/test-secrets/token || exit 1; echo secret-lifecycle-ready; trap '' TERM; while :; do sleep 1; done`},
+				// Padding advances the redactor's deliberate cross-write holdback
+				// before waiting for the sanitized readiness line.
+				Command: "/bin/sh", Arguments: []string{"-c", `test -s /run/provenance/test-secrets/token || exit 1; echo secret-lifecycle-ready; printf '%0512d\n' 0; trap '' TERM; while :; do sleep 1; done`},
 				InputsPath: filepath.Join(inputsRoot, "smoke"), Network: "none", MemoryBytes: 128 << 20, CPUMillis: 500, PIDs: 64, DiskBytes: 8 << 20, TestSecretFiles: files,
 			})
 			if err != nil {

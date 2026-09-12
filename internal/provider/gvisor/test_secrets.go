@@ -16,8 +16,8 @@ func validateSecretRoot(root string, files *testsecrets.Files) error {
 	if _, err := files.Mounts(); err != nil {
 		return errors.New("test-secret memory handles unavailable")
 	}
-	// Only /run is an image mountpoint. Dynamic child names live in a private
-	// metadata-only bind mount, never in the immutable host image.
+	// Only /run is an image mountpoint. Dynamic child names live in the
+	// job-private tmpfs bind mount, never in the immutable host image.
 	path, err := validateRootFSMountTarget(root, "/run", rootFSMountTarget{destination: "/run", kind: rootFSMountDirectory, mode: 0755})
 	if err != nil {
 		return errors.New("test-secret root mountpoint unavailable")

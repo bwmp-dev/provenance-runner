@@ -1,7 +1,7 @@
 # Job-private memory files
 
 This Linux primitive prepares anonymous `memfd` files backed by shmem/tmpfs.
-It is not yet wired to gateway delivery or sandbox preparation and does not
+It is not yet wired to gateway delivery or the remote worker and does not
 advertise test-secret support. Full acceptance still requires exact delivered
 identity validation, redactor registration, non-root read-only sandbox mounts,
 failure/cancellation teardown and restart reconciliation.
@@ -13,12 +13,23 @@ close-on-exec and never backed by workspace files. The owner retains them until
 sandbox and gofer teardown has completed, then closes them. Closing only the
 owner's descriptors cannot revoke another process's already-open reference.
 
-Files have read permissions suitable for the distinct non-root guest UID, but
-no shared host-directory entry. Access to their `/proc/<owner>/fd/<n>` handles
-is subject to the kernel's process-inspection permission checks. Those handles
-are trusted composition inputs, not customer-selectable mounts. Mounts must also
-be read-only, nosuid, nodev and noexec. Never weaken permissions on an existing
-host directory or expose these handles to unrelated jobs.
+The sealed files are trusted composition inputs, not customer-selectable mounts.
+They cannot be directly bind-mounted by the pinned runtime; non-root gofer access
+to parent process descriptors is also restricted. The gVisor provider copies the
+bounded set into an exclusively created job directory under a verified tmpfs
+parent owned by the runner with mode 0700. Only that job's inner subtree is mounted
+at `/run`, read-only, nosuid, nodev and noexec. No values enter bundle files or
+the immutable image. The guest can read but cannot modify the files; other guest
+sandboxes cannot reach the private host parent. No existing host permissions are
+broadened. A missing or unsafe tmpfs refuses preparation rather than falling back
+to persistent storage.
+
+The tmpfs path is derived from the runner state-root identity and random container
+ID, not supplied by a job. Ownership metadata is committed before creation. Normal
+cleanup and startup reconciliation remove the exact job directory only after
+runtime teardown; failed cleanup preserves the bundle for retry/quarantine.
+This sandbox implementation does not yet establish the full gateway/worker
+accepted-lease, expiry, reconnect or slot-quarantine lifecycle.
 
 The caller clears delivery buffers after redactor and file preparation.
 The helper avoids ordinary diagnostic/JSON serialization of values. This does
