@@ -51,6 +51,9 @@ type settledRunnerEvent struct {
 }
 
 func (s *clientSession) rememberGatewayMessage(message *runnerv1.GatewayMessage) error {
+	if err := refuseTestSecretDelivery(message); err != nil {
+		return err
+	}
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(message)
 	if err != nil {
 		return permanent("encode gateway message: %v", err)
@@ -61,6 +64,9 @@ func (s *clientSession) rememberGatewayMessage(message *runnerv1.GatewayMessage)
 }
 
 func (s *clientSession) gatewayMessageDuplicate(message *runnerv1.GatewayMessage) (bool, error) {
+	if err := refuseTestSecretDelivery(message); err != nil {
+		return false, err
+	}
 	if err := validateGatewayEnvelope(message, s.client.now().UTC()); err != nil {
 		return false, err
 	}
@@ -86,6 +92,9 @@ func (s *clientSession) gatewayMessageDuplicate(message *runnerv1.GatewayMessage
 }
 
 func (s *clientSession) handleGatewayMessage(message *runnerv1.GatewayMessage, now time.Time) error {
+	if err := refuseTestSecretDelivery(message); err != nil {
+		return err
+	}
 	switch {
 	case message.GetOffer() != nil:
 		return s.handleOffer(message, now)

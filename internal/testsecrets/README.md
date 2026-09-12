@@ -63,6 +63,11 @@ The caller must clear successful inputs after preparing files and redaction.
 
 This is not stream integration or capability advertisement. The worker still
 refuses secret-bearing offers, including configuration selections with omitted
-references. Pending-request connection binding, accepted-lease sequencing,
+references. The current transport rejects all secret delivery wire carriers
+before decoding, including a carrier hidden by a later protobuf oneof payload.
+Decoded deliveries from custom streams are refused before replay hashing and
+their owned value buffers cleared on refusal, receive failure and cancellation.
+This does not claim erasure of transport-owned raw buffers or arbitrary copies.
+Pending-request connection binding, accepted-lease sequencing,
 redactor registration, real sandbox mounts and teardown remain required before
 activation. The general transport message limit is unchanged.
