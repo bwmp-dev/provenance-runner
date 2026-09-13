@@ -26,6 +26,7 @@ type archiveSpool struct {
 	stdoutBytes int64
 	stderrBytes int64
 	state       string
+	redacted    bool
 	failure     string
 }
 
@@ -133,6 +134,7 @@ func (s *archiveSpool) finalize(ctx context.Context) (CompleteLog, error) {
 	s.discardSources()
 	return CompleteLog{
 		State:             CompleteLogStateComplete,
+		Redacted:          s.redacted,
 		ContentType:       "text/plain; charset=utf-8",
 		ContentEncoding:   "gzip",
 		SHA256:            hex.EncodeToString(digest.Sum(nil)),

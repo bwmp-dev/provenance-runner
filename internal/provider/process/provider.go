@@ -244,6 +244,7 @@ func (e *preparedEnvironment) Collect(ctx context.Context) (execution.CollectedO
 		OutputTruncated:  bundle.Usage.OutputTruncated,
 		StructuredEvents: events,
 		CompleteLog: &execution.CompleteLog{
+			Redacted:          bundle.CompleteLog.Redacted,
 			State:             bundle.CompleteLog.State,
 			Truncated:         bundle.CompleteLog.Truncated,
 			Error:             bundle.CompleteLog.Error,

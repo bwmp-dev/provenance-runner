@@ -194,6 +194,7 @@ type StructuredEvent struct {
 }
 
 type CompleteLog struct {
+	Redacted          bool     `json:"redacted,omitempty"`
 	State             string   `json:"state"`
 	Truncated         bool     `json:"truncated"`
 	Error             string   `json:"error,omitempty"`

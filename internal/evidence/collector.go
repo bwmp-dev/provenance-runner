@@ -220,6 +220,9 @@ func (c *Collector) emitRawLine(stream Stream, line []byte, lineTruncated, parti
 	// The disk-spooled complete archive and bounded live projection deliberately
 	// receive the same normalized, ANSI-free, redacted line.
 	c.complete.append(stream, line)
+	if c.complete.state == "" && redacted {
+		c.complete.redacted = true
+	}
 	c.live.append(stream, line)
 	if c.liveSink != nil {
 		c.liveSink(LiveEntry{Stream: stream, Data: append([]byte(nil), line...), Partial: partial, Redacted: redacted})

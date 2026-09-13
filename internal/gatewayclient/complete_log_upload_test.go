@@ -219,6 +219,7 @@ func TestPublicUploadIPRejectsNonPublicRanges(t *testing.T) {
 func TestCompleteLogUploaderRetriesExactBytesAndEmitsOnlySafeMetadata(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	log := testCompleteLog(t, []byte("complete log\n"))
+	log.Redacted = true
 	defer closeCompleteLog(log)
 	var attempts int
 	var bodies [][]byte
@@ -247,6 +248,9 @@ func TestCompleteLogUploaderRetriesExactBytesAndEmitsOnlySafeMetadata(t *testing
 	}
 	if attempts != completeLogUploadAttempts || len(bodies) != completeLogUploadAttempts {
 		t.Fatalf("attempts = %d bodies = %d", attempts, len(bodies))
+	}
+	if !object.GetRedacted() {
+		t.Fatal("upload lost exact archive redaction metadata")
 	}
 	for _, body := range bodies[1:] {
 		if !bytes.Equal(body, bodies[0]) {
