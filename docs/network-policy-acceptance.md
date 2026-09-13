@@ -224,3 +224,98 @@ is enabled or authorized by this foundation.
 Firewall syntax follows the [nftables manual](https://netfilter.org/projects/nftables/manpage.html).
 The byte bucket semantics were checked against Linux's
 [nft_limit implementation](https://github.com/torvalds/linux/blob/master/net/netfilter/nft_limit.c).
+## Prepared workload DNS responses
+
+`WorkloadDNS` is a bounded responder over one immutable job binding snapshot,
+not a recursive resolver or an installed network service. Its constructor checks
+the same owned snapshot as the firewall compiler. A future actuator must publish
+it only after that exact firewall is installed, withdraw it before cleanup, and
+replace it only after a successful refresh that preserves traffic counters.
+No production caller, listener, namespace or firewall rule is enabled here.
+
+The responder never resolves a name on demand, follows a workload CNAME, accepts
+resolver overrides or grants an unlisted hostname. It answers only one IN A/AAAA
+question using already-bound addresses. All answers expire at the entire
+snapshot's earliest kernel-rounded deadline. Backward time, expiry and permanent
+withdrawal stop answers. Unsupported envelopes are refused; UDP responses are
+bounded to 512 bytes and TCP to 4096, with truncation instead of amplification.
+
+Tests cover both families, case-insensitive DNS questions, exact binding scope,
+kernel deadline rounding, immutable copies, malformed/trailing/oversized queries,
+bounded truncation and concurrent withdrawal. A bounded parser fuzz target is
+included. Numeric-address alternatives now use lexical matching rather than
+machine-width integer conversion, preventing oversized hex labels from evading
+the existing no-IP policy. Socket admission, actual controlled DNS packet paths,
+firewall publication/refresh coupling and mapped-Sentry acceptance remain pending.
+
+## Owned DNS transport
+
+The transport follow-on adds `ServeOwnedDNS` over already-open UDP/TCP sockets
+supplied by the trusted actuator. It does not call Listen, enter a namespace or
+infer isolation from an IP address. The actuator remains responsible for exact
+namespace ownership and successful firewall installation before exposure.
+Validation requires matching non-wildcard endpoints and an explicit bounded list
+of exact job peer addresses. Invalid arguments leave socket ownership with the
+caller; successful admission transfers ownership to the server.
+
+UDP/TCP share a finite 64-request/second-window admission budget. TCP additionally
+allows at most eight active connections, one query per connection and a one-second
+read/write deadline. Oversized frames are rejected before payload allocation.
+Cancellation or failure of either socket loop permanently withdraws the DNS view,
+closes both listeners and all active connections, and joins the workers before
+returning. No log or error reflects query contents or upstream credentials.
+
+Unprivileged real loopback tests exercise UDP/TCP responses, exact peer refusal,
+oversized TCP framing, a partial frame during cancellation, shared response
+limits and post-cancellation withdrawal. They prove transport behavior only;
+actual namespace/firewall coupling and Sentry workload traffic are not yet proven.
+
+## Disposable controlled DNS packet acceptance
+
+`CompileFirewallWithDNS` is an explicit variant; the original compiler remains
+unchanged. It adds only job0 traffic from 10.0.1.2 to 10.0.1.1:53 over UDP/TCP and
+tracked replies. Workload DNS can return either address family through that
+single controlled endpoint. It opens no arbitrary resolver or management port.
+Input, output and forwarding share the same finite byte and connection objects.
+Refresh replaces all three rule chains atomically while retaining those objects;
+withdrawal empties all three chains and preserves their default-drop policies.
+
+`scripts/network-policy/dns_acceptance.py` runs actual query packets in newly
+created no-network containers, with no host mounts, published ports, Docker socket
+or production access. A fixture-only controller refuses the container's initial
+network namespace, installs the compiled firewall before starting DNS, and
+coordinates refresh/withdrawal. Both A/AAAA answers over UDP/TCP, unknown names,
+unsupported types, a previously reachable non-DNS port and spoofed source are
+tested. The test checks preserved shared counters, answers past the old deadline
+after renewal, denial at the new kernel deadline, all-chain withdrawal, refused
+resume and exact table cleanup. Two fresh containers separate expiry and
+withdrawal scenarios. The pinned existing Alpine fixture image is reused.
+
+Local disposable packet acceptance passed both scenarios on 2026-09-13. CI now
+retains its output alongside the existing routed-packet and mapped-Sentry tests.
+This is actual kernel/DNS fixture evidence, not production actuator integration
+or proof of DNS from inside the Sentry workload. The following fixture covers
+that separate boundary; production integration remains required before activation.
+
+## Non-root Sentry controlled DNS acceptance
+
+The disposable DNS fixture also runs the pinned Sentry in a verified caller-mapped
+network/user namespace. Its UID/EUID 65532 guest uses Go's standard resolver against
+the owned DNS endpoint and checks exact A and AAAA bindings over UDP and TCP, plus
+denial of unlisted names on both transports. The responder accepts only an empty
+EDNS0 capacity advertisement (512–4096); options, flags, versions, duplicate OPTs,
+and arbitrary additional records remain rejected. UDP answers remain bounded to
+512 bytes regardless of that advertisement.
+
+After Sentry exits successfully, the disposable controller restores only the job
+client interface addresses that runsc transferred into its netstack. Separate
+kernel clients then prove shared-counter-preserving refresh, all-chain withdrawal,
+permanent refresh refusal, table removal and namespace cleanup. These latter
+lifecycle probes are not represented as guest-in-Sentry withdrawal evidence.
+The Sentry case uses a bounded 30-second snapshot; the separate kernel expiry case
+continues to use eight seconds. Neither fixture installs a production actuator,
+advertises runner feature 9, nor enables production networking.
+
+Run `scripts/network-policy/dns_acceptance.py --image <verified-image-sha> --sentry`
+with the image built from `scripts/network-policy/Dockerfile.sentry`. CI retains
+the separate `sentry-dns-acceptance.log` alongside the exact source/image evidence.

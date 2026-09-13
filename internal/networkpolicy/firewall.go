@@ -21,6 +21,8 @@ type Firewall struct {
 	sets, rules, grants    string
 	families               uint8
 	limits                 Limits
+	controlledDNS          bool
+	dnsRules               string
 }
 
 func (f Firewall) Install() string      { return f.install }
@@ -34,7 +36,7 @@ func (f Firewall) ExpiresAt() time.Time { return f.expires }
 // execute this whole batch once, and refuse refresh after withdrawal/expiry.
 func (f Firewall) Refresh(next Firewall, now time.Time) (string, error) {
 	if f.table == "" || f.install == "" || next.table != f.table || next.install == "" ||
-		f.grants != next.grants || f.limits != next.limits || f.families != next.families {
+		f.grants != next.grants || f.limits != next.limits || f.families != next.families || f.controlledDNS != next.controlledDNS {
 		return "", ErrPolicy
 	}
 	if now.IsZero() || now.Before(f.issued) || now.Before(next.issued) || !now.Before(f.expires) || !next.expires.After(f.expires) {
@@ -49,6 +51,10 @@ func (f Firewall) Refresh(next Firewall, now time.Time) (string, error) {
 	}
 	out.WriteString(next.sets)
 	out.WriteString(next.rules)
+	if f.controlledDNS {
+		fmt.Fprintf(&out, "flush chain inet %s input\nflush chain inet %s output\n", f.table, f.table)
+		out.WriteString(next.dnsRules)
+	}
 	return out.String(), nil
 }
 
@@ -60,7 +66,11 @@ func (f Firewall) Withdraw() (string, error) {
 	if f.table == "" || f.install == "" {
 		return "", ErrPolicy
 	}
-	return fmt.Sprintf("flush chain inet %s forward\n", f.table), nil
+	program := fmt.Sprintf("flush chain inet %s forward\n", f.table)
+	if f.controlledDNS {
+		program += fmt.Sprintf("flush chain inet %s input\nflush chain inet %s output\n", f.table, f.table)
+	}
+	return program, nil
 }
 
 // CompileFirewall constructs a fail-closed snapshot. Every binding must belong
@@ -69,6 +79,18 @@ func (f Firewall) Withdraw() (string, error) {
 // teardown remain the future actuator's responsibility; never append refreshed
 // grants beside stale rules. No production caller currently uses this program.
 func CompileFirewall(job string, bindings []Binding, now time.Time) (Firewall, error) {
+	return compileFirewall(job, bindings, now, false)
+}
+
+// CompileFirewallWithDNS adds only the fixed job-to-controller DNS channel at
+// 10.0.1.1:53 on job0. It does not install rules or start a resolver. The actuator
+// must install the snapshot before exposing its owned WorkloadDNS sockets.
+// DNS and forwarded workload traffic share the same connection and byte budget.
+func CompileFirewallWithDNS(job string, bindings []Binding, now time.Time) (Firewall, error) {
+	return compileFirewall(job, bindings, now, true)
+}
+
+func compileFirewall(job string, bindings []Binding, now time.Time, controlledDNS bool) (Firewall, error) {
 	if !jobID.MatchString(job) || job == "00000000-0000-0000-0000-000000000000" || now.IsZero() || len(bindings) == 0 || len(bindings) > 128 {
 		return Firewall{}, ErrPolicy
 	}
@@ -169,6 +191,26 @@ func CompileFirewall(job string, bindings []Binding, now time.Time) (Firewall, e
 		rule("iifname \"wan0\" oifname \"job0\" ct direction reply ct state established %s daddr %s %s saddr . meta l4proto . th sport @allowed%d counter name forwarded accept", ip, jobAddress, ip, 4+family*2)
 	}
 	rule("counter drop")
+	var dnsRules strings.Builder
+	if controlledDNS {
+		dnsRule := func(chain, body string, args ...any) {
+			fmt.Fprintf(&dnsRules, "add rule inet %s %s %s\n", table, chain, fmt.Sprintf(body, args...))
+		}
+		for _, chain := range []string{"input", "output"} {
+			dnsRule(chain, "meta time >= %d counter drop", deadline)
+			dnsRule(chain, "ct state invalid,untracked counter drop")
+			dnsRule(chain, "limit name bandwidth counter name bandwidth_denied drop")
+		}
+		dnsRule("input", "meta mark set 1")
+		dnsRule("input", "ct state new add @connections { meta mark ct count over %d } counter drop", limits.Connections)
+		for _, transport := range []string{"udp", "tcp"} {
+			dnsRule("input", "iifname \"job0\" ct direction original ip saddr 10.0.1.2 ip daddr 10.0.1.1 %s dport 53 counter name forwarded accept", transport)
+			dnsRule("output", "oifname \"job0\" ct direction reply ct state established ip saddr 10.0.1.1 ip daddr 10.0.1.2 %s sport 53 counter name forwarded accept", transport)
+		}
+		dnsRule("input", "counter drop")
+		dnsRule("output", "counter drop")
+		out.WriteString(dnsRules.String())
+	}
 	return Firewall{table: table, install: out.String(), remove: fmt.Sprintf("delete table inet %s\n", table), expires: time.Unix(deadline, 0),
-		issued: now, sets: setProgram.String(), rules: ruleProgram.String(), grants: grants.String(), families: families, limits: limits}, nil
+		issued: now, sets: setProgram.String(), rules: ruleProgram.String(), grants: grants.String(), families: families, limits: limits, controlledDNS: controlledDNS, dnsRules: dnsRules.String()}, nil
 }
