@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,7 +19,10 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
+	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"golang.org/x/net/dns/dnsmessage"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 type fixtureResolver struct{}
@@ -79,7 +83,20 @@ func run() (result error) {
 		return errors.New("dedicated fixture network namespace required")
 	}
 	job := "10000000-0000-4000-8000-000000000001"
-	binder, err := networkpolicy.New(networkpolicy.Options{JobID: job, Mode: "allowlist", Permissions: []networkpolicy.Permission{{Hostname: "fixture.example.com", Port: 8080, Protocol: "tcp"}}, Limits: networkpolicy.Limits{Connections: 32, BytesPerSecond: 65536}, SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: *ttl}, fixtureResolver{})
+	// Synthetic complete metadata exercises the released wire adapter, not
+	// authentication or a measurement of this disposable controller's resources.
+	policy := &runnerv1.EffectivePolicy{
+		Sandbox:            runnerv1.SandboxKind_SANDBOX_KIND_GVISOR,
+		Requirement:        runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_REQUIRED,
+		Resources:          &runnerv1.ResourceLimits{CpuMillis: 2000, MemoryBytes: 2 << 30, DiskBytes: 4 << 30, ProcessCount: 256},
+		PreparationTimeout: durationpb.New(time.Minute), ExecutionTimeout: durationpb.New(time.Minute), GracefulShutdownTimeout: durationpb.New(10 * time.Second),
+		NetworkV2: &runnerv1.NetworkPolicyV2{Mode: runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST, Permissions: []*runnerv1.NetworkPermissionV2{{Hostname: "fixture.example.com", Port: 8080, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_TCP}}, MaximumConnections: 32, MaximumBytesPerSecond: 65536},
+	}
+	raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
+	if err != nil {
+		return err
+	}
+	binder, err := networkpolicy.NewV2Binder(job, raw, sha256.Sum256(raw), networkpolicy.LocalV2Boundary{Maximum: proto.Clone(policy.NetworkV2).(*runnerv1.NetworkPolicyV2), SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: *ttl}, fixtureResolver{})
 	if err != nil {
 		return err
 	}

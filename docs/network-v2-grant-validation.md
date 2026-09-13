@@ -25,6 +25,15 @@ cross-product grants, widening, invalid ports/names, malformed metadata and
 noncanonical wire. These are local validation and binder integration tests,
 not gateway authentication, five-source authority or installed network evidence.
 
+The disposable DNS fixture also constructs a synthetic complete effective policy
+through this adapter before resolving or compiling rules. Actual isolated packet
+tests pass dual-stack answers over TCP/UDP, refusal, shared-counter-preserving
+refresh, expiry and withdrawal. With the pinned Sentry fixture image
+`sha256:c7a58bb86199297bea8bbc9118770c17e2530308ad13d841dc02594e20912bb4`,
+the caller-mapped non-root guest passes controlled DNS and unlisted-name denial.
+The post-guest lifecycle probes remain separate kernel clients; synthetic full
+resource metadata is not a runtime measurement or authenticated platform grant.
+
 The existing gateway offer and Paper adapter continue to reject **all** v2 jobs,
 and protocol feature 9 remains unadvertised. Before runtime activation, the
 gateway must bind the authenticated effective policy to the actual job/lease and
