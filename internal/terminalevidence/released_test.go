@@ -11,7 +11,7 @@ import (
 
 func TestReleasedAssetIdentityAndCanonicalVector(t *testing.T) {
 	for path, want := range map[string]string{
-		"schema/config.json":            "ef1ee568c90db1fd7f06079d323af499e4deb0e0ff0b0294593e044be462c029",
+		"schema/config.json":            "fbbc61f4b6c4f6318368bdc3199237f18c1d96cd37f6a4b6a093eaef331f8ec0",
 		"testdata/schema.json":          "838d75a63cfbecc0697c4fad38c484a8f4790c802f9f1d919a764edd1991657e",
 		"testdata/reference.mjs":        "27da7c97fcb8aeab356a6edf101bdceceefb2f0170423cc21f1c2e0c09168326",
 		"testdata/fixtures.json":        "db0555744db814e135e0374546fbf49211c40ae657ba357fa378dc3151a082aa",

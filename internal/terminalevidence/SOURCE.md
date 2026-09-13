@@ -7,13 +7,16 @@ source `f17e6b0db9507cbf1325769bc23c1d288101f89a`, annotated tag
 `packages/verification-go/json.go`; it is not a separate public API.
 
 The configuration schema is an exact copy of `schemas/config/v1/schema.json`
-from accepted public source `b4e587c2ab4d25bc5d9220ea2eb3e16a08da343d`. It
-adds numeric Minecraft 26.1+ releases while preserving existing 1.x inputs.
+from released toolkit `v0.1.0-alpha.32`, accepted public source
+`6c0be40b84e5d0a3e6edffed5a99cf6a91fa5e4d` ([release acceptance](https://github.com/bwmp-dev/provenance/actions/runs/34753038869)).
+It includes bounded immutable `tests.secrets` selections and numeric Minecraft
+26.1+ releases while preserving existing 1.x inputs. Secret values remain invalid
+configuration inputs; this schema does not authorize or implement delivery.
 Terminal-evidence reference assets and historical vectors above remain unchanged.
 
 SHA-256 identities:
 
-- config schema: `ef1ee568c90db1fd7f06079d323af499e4deb0e0ff0b0294593e044be462c029`
+- config schema: `fbbc61f4b6c4f6318368bdc3199237f18c1d96cd37f6a4b6a093eaef331f8ec0`
 - terminal schema: `838d75a63cfbecc0697c4fad38c484a8f4790c802f9f1d919a764edd1991657e`
 - offline reference: `27da7c97fcb8aeab356a6edf101bdceceefb2f0170423cc21f1c2e0c09168326`
 - fixtures: `db0555744db814e135e0374546fbf49211c40ae657ba357fa378dc3151a082aa`
