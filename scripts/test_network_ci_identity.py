@@ -4,6 +4,16 @@ import unittest
 
 
 class NetworkCIIdentityTests(unittest.TestCase):
+    def test_self_hosted_go_jobs_never_archive_shared_build_trees(self):
+        workflows = Path(__file__).resolve().parents[1]/'.github/workflows'
+        count = 0
+        for path in workflows.glob('*.yml'):
+            for setup in path.read_text().split('uses: actions/setup-go@v5')[1:]:
+                settings = setup.split('      - ', 1)[0]
+                self.assertRegex(settings, r'(?m)^          cache: false$', path.name)
+                count += 1
+        self.assertEqual(count, 5)
+
     def test_short_expiry_precedes_slow_denial_matrix(self):
         source = (Path(__file__).resolve().parent/'network-policy/acceptance.py').read_text()
         self.assertLess(source.index("evidence['absoluteExpiryClosesEstablishedAndNewFlows']"), source.index("evidence['ipv4Ipv6WholeTuples']"))
