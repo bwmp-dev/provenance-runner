@@ -3,7 +3,8 @@
 Status: Address-binding and inactive routed-firewall foundations; not production
 runtime enforcement or WP-11A acceptance.
 The production runner still advertises and enforces `network=none`. This package
-has no production caller, firewall actuator, namespace manager or capability flag.
+has no production caller, production firewall actuator, namespace manager or
+capability flag. The owned lifecycle below is exercised by disposable actuators.
 
 ## Inputs and ownership
 
@@ -319,3 +320,32 @@ advertises runner feature 9, nor enables production networking.
 Run `scripts/network-policy/dns_acceptance.py --image <verified-image-sha> --sentry`
 with the image built from `scripts/network-policy/Dockerfile.sentry`. CI retains
 the separate `sentry-dns-acceptance.log` alongside the exact source/image evidence.
+
+## Owned route lifecycle composition
+
+`internal/networkpolicy.RouteSession` now owns the serialized install/renew/
+withdraw/close lifecycle behind a trusted, exclusively owned namespace actuator.
+Only a successful atomic firewall installation publishes a DNS view. Renewal
+invalidates the old view before replacing rules, preserves counter/connection/
+bandwidth objects, and cannot resume a withdrawn session. Invalid renewal,
+actuator failure, owner cancellation and expiry withdraw the session. Parent
+cancellation also interrupts an in-flight renewal using another call context.
+
+Withdrawal attempts default-drop and independent route disconnection even if one
+operation fails. Cleanup never removes the default-drop table before successful
+disconnection, and failed cleanup retains a retryable owner. Operation errors are
+bounded categories rather than command output. The absolute kernel deadline
+continues to apply if the userspace observer dies. DNS listener ownership and
+failure propagation remain the actuator caller's responsibility.
+
+The disposable DNS fixture uses this same lifecycle with actual atomic nft
+transactions and an actual job-facing link shutdown. Its packet acceptance checks
+both kernel deadline renewal and irreversible withdrawal, retained counters, and
+that the owned route is down when the table is removed. Mock fault/concurrency
+tests are not substituted for those packet checks.
+
+This does not expose a production privileged endpoint or establish ownership of
+an arbitrary namespace. The production namespace helper, mapped-Sentry/provider
+composition, authenticated withdrawal propagation and measured activation remain
+required. Gateway/Paper network-v2 refusal and none-only runtime claims remain
+unchanged; no full WP-11A acceptance is claimed by this library/fixture change.

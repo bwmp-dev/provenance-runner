@@ -166,6 +166,9 @@ def inside(mode, sentry_enabled=False):
             evidence['withdrawalClosesAllChainsAndCannotResume']=True
         remaining=json.loads(run('nft','-j','list','tables',namespace='filter'))['nftables']
         assert not any('table' in row for row in remaining), 'fixture table not removed'
+        job_link=json.loads(run('ip','-j','link','show','job0',namespace='filter'))[0]
+        assert 'UP' not in job_link['flags'], 'table removed before owned job route disconnected'
+        evidence['lifecycleControllerDisconnectedOwnedRoute']=True
         evidence['ownedTableRemoved']=True
     finally:
         for process in (sentry,service,echo):

@@ -42,15 +42,21 @@ func (fixtureResolver) Exchange(_ context.Context, raw []byte) ([]byte, error) {
 	return message.Pack()
 }
 
-func nft(program string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+type fixtureRoute struct{}
+
+func (fixtureRoute) Apply(ctx context.Context, program string) error {
 	command := exec.CommandContext(ctx, "nft", "-f", "-")
 	command.Stdin = strings.NewReader(program)
 	if err := command.Run(); err != nil {
 		return errors.New("fixture nft transaction failed")
 	}
 	return nil
+}
+
+func (fixtureRoute) Disconnect(ctx context.Context) error {
+	// This process has already verified its dedicated disposable namespace.
+	// Never delete the default-drop table while the job-facing route is live.
+	return exec.CommandContext(ctx, "ip", "link", "set", "job0", "down").Run()
 }
 
 func main() {
@@ -108,14 +114,17 @@ func run() (result error) {
 	if err != nil {
 		return err
 	}
-	if err = nft(rules.Install()); err != nil {
+	session, err := networkpolicy.StartRoute(context.Background(), job, []networkpolicy.Binding{binding}, fixtureRoute{})
+	if session != nil {
+		defer func() {
+			if err := session.Close(); err != nil {
+				result = err
+			}
+		}()
+	}
+	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := nft(rules.Remove()); err != nil {
-			result = err
-		}
-	}()
 	var cancel context.CancelFunc
 	var done chan error
 	stop := func() error {
@@ -140,7 +149,7 @@ func run() (result error) {
 		}
 	}()
 	start := func() error {
-		view, err := networkpolicy.NewWorkloadDNS(job, []networkpolicy.Binding{binding}, time.Now())
+		view, err := session.DNS()
 		if err != nil {
 			return err
 		}
@@ -187,11 +196,7 @@ func run() (result error) {
 			if err != nil {
 				return err
 			}
-			program, err := rules.Refresh(next, time.Now())
-			if err != nil {
-				return err
-			}
-			if err = nft(program); err != nil {
+			if err = session.Refresh(context.Background(), []networkpolicy.Binding{binding}); err != nil {
 				return err
 			}
 			if err = stop(); err != nil {
@@ -206,11 +211,7 @@ func run() (result error) {
 			}
 		case "withdraw":
 			withdrawn = true
-			program, err := rules.Withdraw()
-			if err != nil {
-				return err
-			}
-			if err = nft(program); err != nil {
+			if err = session.Withdraw(); err != nil {
 				return err
 			}
 			if err = stop(); err != nil {
