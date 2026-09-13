@@ -123,12 +123,13 @@ print(json.dumps(not allowed))
 '''
 
 
-def inside():
+def inside(sentry_enabled=False):
     if not Path('/.dockerenv').exists() or os.environ.get('PROVENANCE_DISPOSABLE_NETWORK_FIXTURE') != '1':
         raise RuntimeError('disposable container marker required')
     rules = json.load(sys.stdin)
     owned = []
     server = None
+    sentry = None
 
     def run(*args, namespace=None, input=None, timeout=10):
         command = (['ip', 'netns', 'exec', namespace] if namespace else []) + list(args)
@@ -156,7 +157,42 @@ def inside():
         # below still execute inside the newly created filter network namespace.
         run('mount', '-t', 'proc', 'proc', '/proc')
         for ns in ('job', 'filter', 'wan'):
-            run('ip', 'netns', 'add', ns)
+            if ns == 'job' and sentry_enabled:
+                fixture = Path('/fixture')
+                fixture.mkdir(mode=0o755)
+                for name in ('bundle', 'state'):
+                    (fixture/name).mkdir(mode=0o755)
+                spec = {
+                    'ociVersion': '1.0.2',
+                    'root': {'path': '/guestroot', 'readonly': True},
+                    'process': {
+                        'terminal': False, 'user': {'uid': 65532, 'gid': 65532},
+                        'args': ['/smoke', 'probe'], 'env': ['PATH=/'], 'cwd': '/',
+                        'noNewPrivileges': True,
+                        'capabilities': {key: [] for key in ('bounding', 'effective', 'inheritable', 'permitted', 'ambient')},
+                        'rlimits': [{'type': 'RLIMIT_NOFILE', 'hard': 1024, 'soft': 1024}],
+                    },
+                    'linux': {'namespaces': [{'type': name} for name in ('pid', 'ipc', 'uts', 'mount')] + [{'type': 'network', 'path': '/proc/self/ns/net'}]},
+                    'mounts': [],
+                }
+                (fixture/'bundle'/'config.json').write_text(json.dumps(spec))
+                for name in ('bundle', 'state'):
+                    os.chown(fixture/name, 65532, 65532)
+                sentry = subprocess.Popen(['/usr/local/bin/network-sentry-fixture', 'parent'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                first = sentry.stdout.readline()
+                if not first:
+                    raise RuntimeError('mapped namespace failed: ' + sentry.stderr.read(4096))
+                pid = json.loads(first)['namespacePID']
+                status = Path(f'/proc/{pid}/status').read_text()
+                assert re.search(r'^Uid:\s+65532\s+65532\s+65532\s+65532$', status, re.M), status
+                assert re.search(r'^Gid:\s+65532\s+65532\s+65532\s+65532$', status, re.M), status
+                assert re.search(r'^Groups:[ \t]*$', status, re.M), status
+                assert Path(f'/proc/{pid}/uid_map').read_text().split() == ['0', '65532', '1', '65534', '65533', '1']
+                assert Path(f'/proc/{pid}/gid_map').read_text().split() == ['0', '65532', '1', '65534', '65533', '1']
+                run('ip', 'netns', 'attach', ns, str(pid))
+                evidence['callerMappedNetworkNamespace'] = True
+            else:
+                run('ip', 'netns', 'add', ns)
             owned.append(ns)
             ip(ns, 'link', 'set', 'lo', 'up')
         for left, leftdev, left4, left6, right, rightdev, right4, right6 in (
@@ -238,10 +274,24 @@ def inside():
         assert not probe('1.1.1.1', 8080, 'tcp'), 'new flow accepted after expiry'
         assert not probe('2606:4700:4700::1111', 8081, 'udp'), 'IPv6 flow accepted after expiry'
         evidence['absoluteExpiryClosesEstablishedAndNewFlows'] = True
+        if sentry_enabled:
+            # The existing packet suite completes before starting the guest, so
+            # resetting its synthetic table here cannot create a live-guest gap.
+            run('nft', '-f', '-', namespace='filter', input=rules['remove'])
+            run('conntrack', '-F', namespace='filter')
+            run('nft', '-f', '-', namespace='filter', input=rules['sentry']['install'])
+            output, diagnostics = sentry.communicate('start', timeout=45)
+            assert sentry.returncode == 0, diagnostics[:8192]
+            result = json.loads(output)
+            assert len(result) == 10 and all(value is True for value in result.values()), result
+            evidence['userNamespacedSentryPacketPolicy'] = result
         run('nft', '-f', '-', namespace='filter', input=rules['remove'])
         assert not json.loads(run('nft', '-j', 'list', 'tables', namespace='filter'))['nftables'][1:], 'owned tables remain'
         evidence['ownedTablesRemoved'] = True
     finally:
+        if sentry is not None and sentry.poll() is None:
+            sentry.terminate()
+            sentry.wait(timeout=5)
         if server is not None:
             server.terminate()
             server.wait(timeout=5)
@@ -257,26 +307,30 @@ def main():
     parser.add_argument('--inside', action='store_true')
     parser.add_argument('--image')
     parser.add_argument('--go', default='go')
+    parser.add_argument('--sentry', action='store_true')
     args = parser.parse_args()
     if args.inside:
-        inside()
+        inside(args.sentry)
         return
     if not args.image or not re.fullmatch(r'sha256:[0-9a-f]{64}', args.image):
         parser.error('--image must be an exact locally built sha256 image ID')
     root = Path(__file__).resolve().parents[2]
-    def compile_rules(ttl):
-        return json.loads(subprocess.run([args.go, 'run', './scripts/network-policy/fixture-rules', '-ttl', ttl], cwd=root, capture_output=True, text=True, check=True, timeout=60).stdout)
+    def compile_rules(ttl, connections=2):
+        return json.loads(subprocess.run([args.go, 'run', './scripts/network-policy/fixture-rules', '-ttl', ttl, '-connections', str(connections)], cwd=root, capture_output=True, text=True, check=True, timeout=60).stdout)
     rules = compile_rules('5m')
+    if args.sentry:
+        rules['sentry'] = compile_rules('5m', 16)
     rules['expiry'] = compile_rules('30s')
     container = 'provenance-network-fixture-' + uuid.uuid4().hex
     try:
         command = [
             'docker', 'run', '--name', container, '--rm', '-i',
-            '--network', 'none', '--memory', '256m', '--cpus', '1', '--pids-limit', '128',
+            '--network', 'none', '--memory', '512m' if args.sentry else '256m', '--cpus', '1', '--pids-limit', '256' if args.sentry else '128',
             '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--cap-add', 'SYS_ADMIN', '--cap-add', 'NET_RAW',
+            *(['--cap-add', 'SETUID', '--cap-add', 'SETGID', '--cap-add', 'CHOWN', '--cap-add', 'SYS_PTRACE'] if args.sentry else []),
             '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined',
             '-e', 'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1', '--entrypoint', 'python3',
-            args.image, '-B', '-c', Path(__file__).read_text(), '--inside',
+            args.image, '-B', '-c', Path(__file__).read_text(), '--inside', *(['--sentry'] if args.sentry else []),
         ]
         result = subprocess.run(command, input=json.dumps(rules), text=True, timeout=90)
         if result.returncode:

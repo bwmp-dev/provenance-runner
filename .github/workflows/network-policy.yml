@@ -33,6 +33,17 @@ jobs:
           [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
           python3 -B scripts/network-policy/acceptance.py --image "$image" \
             2>&1 | tee "${evidence}/packet-acceptance.log"
+      - name: Exercise caller-mapped Sentry through isolated routed policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          docker build --iidfile "${PROVENANCE_NETWORK_EVIDENCE}/sentry-image.txt" \
+            -f scripts/network-policy/Dockerfile.sentry scripts/network-policy
+          image=$(< "${PROVENANCE_NETWORK_EVIDENCE}/sentry-image.txt")
+          [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
+          python3 -B scripts/network-policy/acceptance.py --image "$image" --sentry \
+            2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/sentry-acceptance.log"
       - name: Retain exact-head disposable packet evidence
         if: always() && env.PROVENANCE_NETWORK_EVIDENCE != ''
         uses: actions/upload-artifact@v4

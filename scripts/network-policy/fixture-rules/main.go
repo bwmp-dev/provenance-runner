@@ -33,9 +33,10 @@ func (resolver) Exchange(_ context.Context, raw []byte) ([]byte, error) {
 
 func main() {
 	ttl := flag.Duration("ttl", 5*time.Minute, "synthetic binding lifetime")
+	connections := flag.Uint64("connections", 2, "synthetic concurrent flow ceiling")
 	flag.Parse()
 	job := "10000000-0000-4000-8000-000000000001"
-	b, err := networkpolicy.New(networkpolicy.Options{JobID: job, Mode: "allowlist", Permissions: []networkpolicy.Permission{{Hostname: "fixture.example.com", Port: 8080, Protocol: "tcp"}, {Hostname: "fixture.example.com", Port: 8081, Protocol: "udp"}}, Limits: networkpolicy.Limits{Connections: 2, BytesPerSecond: 65536}, SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: *ttl}, resolver{})
+	b, err := networkpolicy.New(networkpolicy.Options{JobID: job, Mode: "allowlist", Permissions: []networkpolicy.Permission{{Hostname: "fixture.example.com", Port: 8080, Protocol: "tcp"}, {Hostname: "fixture.example.com", Port: 8081, Protocol: "udp"}}, Limits: networkpolicy.Limits{Connections: *connections, BytesPerSecond: 65536}, SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: *ttl}, resolver{})
 	if err != nil {
 		panic(err)
 	}
