@@ -260,6 +260,17 @@ def inside(sentry_enabled=False):
                 assert probe(address, port, protocol), ('unfiltered endpoint unreachable', address, port, protocol)
         mac = json.loads(ip('filter', '-j', 'link', 'show', 'job0'))[0]['address']
         assert json.loads(run('python3', '-B', '-c', RAW, '1.1.1.1', mac, '10.0.1.99', namespace='job')), 'unfiltered spoofed-source fixture unreachable'
+        # Exercise the short absolute deadline before the many deliberately
+        # timed-out denial probes. Those probes can consume the entire binding
+        # lifetime on a busy CI host. Do not extend or rewrite its real expiry.
+        run('conntrack', '-F', namespace='filter')
+        run('nft', '-f', '-', namespace='filter', input=rules['expiry']['install'])
+        assert json.loads(run('python3', '-B', '-c', EXPIRY, rules['expiry']['expires'], namespace='job', timeout=40)), 'established flow outlived binding'
+        assert not probe('1.1.1.1', 8080, 'tcp'), 'new flow accepted after expiry'
+        assert not probe('2606:4700:4700::1111', 8081, 'udp'), 'IPv6 flow accepted after expiry'
+        evidence['absoluteExpiryClosesEstablishedAndNewFlows'] = True
+        run('nft', '-f', '-', namespace='filter', input=rules['remove'])
+        run('conntrack', '-F', namespace='filter')
         run('nft', '-c', '-f', '-', namespace='filter', input=rules['install'])
         run('nft', '-f', '-', namespace='filter', input=rules['install'])
         evidence['syntaxAndUnfilteredReachability'] = True
@@ -328,13 +339,6 @@ def inside(sentry_enabled=False):
         for address in ('1.1.1.1', '2606:4700:4700::1111'):
             assert not probe(address, 8080, 'tcp') and not probe(address, 8081, 'udp'), 'withdrawal allowed new traffic'
         evidence['withdrawalClosesExistingAndNewDualStackTraffic'] = True
-        run('nft', '-f', '-', namespace='filter', input=rules['remove'])
-        run('conntrack', '-F', namespace='filter')
-        run('nft', '-f', '-', namespace='filter', input=rules['expiry']['install'])
-        assert json.loads(run('python3', '-B', '-c', EXPIRY, rules['expiry']['expires'], namespace='job', timeout=40)), 'established flow outlived binding'
-        assert not probe('1.1.1.1', 8080, 'tcp'), 'new flow accepted after expiry'
-        assert not probe('2606:4700:4700::1111', 8081, 'udp'), 'IPv6 flow accepted after expiry'
-        evidence['absoluteExpiryClosesEstablishedAndNewFlows'] = True
         if sentry_enabled:
             # The existing packet suite completes before starting the guest, so
             # resetting its synthetic table here cannot create a live-guest gap.
