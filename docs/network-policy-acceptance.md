@@ -1,6 +1,7 @@
 # Controlled network address-binding foundation
 
-Status: Local implementation; not runtime enforcement or WP-11A acceptance.
+Status: Address-binding and inactive routed-firewall foundations; not production
+runtime enforcement or WP-11A acceptance.
 The production runner still advertises and enforces `network=none`. This package
 has no production caller, firewall actuator, namespace manager or capability flag.
 
@@ -69,19 +70,80 @@ storage. Zero, pre-issuance and expired bindings are invalid.
   the already pinned `golang.org/x/net v0.58.0` as directly used and removes stale
   prior-protocol checksums; no dependency version or protocol pin changes.
 
+## Inactive routed-firewall compiler and kernel fixture
+
+`CompileFirewall` accepts only valid same-job bindings with identical finite
+limits. It emits one bounded deterministic nftables batch, never executes it,
+and never accepts shell fragments, paths, interface names or table names from
+the caller. All tuples retain address, transport and destination port together.
+There are at most 128 bindings and 4096 deduplicated packet tuples. Connection
+and byte-rate ceilings outside the supported positive uint32 range fail closed.
+
+The target is a **dedicated per-job routing namespace**, with exactly the trusted
+`job0` and `wan0` veth links, fixed job addresses `10.0.1.2`/`fd00:1::2`, and no alternate route, workloads, control-plane
+services or pre-existing policy. It is not the workload's OUTPUT hook. gVisor
+emits raw L2 traffic, so filtering ordinary local process traffic would miss the
+relevant path. Input/output/forward default to drop. Forwarding accepts only
+original-direction exact grants and established reverse-direction replies to
+those grants; there is no unconditional established/related bypass.
+Original packets must carry the exact job source address, and replies must target
+it; raw address spoofing cannot acquire a forwarded grant.
+
+One constant-key connection-count set covers both address families. One named
+byte-rate limit covers both families and directions. Explicit zero **additional**
+burst gives nftables a one-second byte bucket; it does not promise a zero-burst
+instantaneous rate. Shared accepted-byte and rate-denial counters are available
+for future accounting integration, not yet wired to job usage records.
+
+The earliest binding expires the complete snapshot. Absolute Unix-second expiry
+rounds down and precedes every acceptance rule, so ordinary installation delay
+does not extend grants. Set-element kernel timeouts provide a second, relative
+lifetime bound. A future actuator must still reject stale snapshots immediately
+before installation, withdraw rules on failed DNS refresh or clock anomalies,
+and replace snapshots atomically. Never delete a live table and then install its
+replacement: default acceptance during that gap would be unsafe. Teardown must
+disconnect the job before deleting its exact table and namespace. The compiler's
+delete program names only its owned table and never flushes a host ruleset.
+
+The trusted fixture creates job/router/fake-WAN namespaces inside one fresh
+Docker container with `--network none`, no mounts, no published ports and no
+Docker socket. Synthetic public and sensitive IPs exist only on the fake peer;
+they do not contact those real endpoints. NET_ADMIN/SYS_ADMIN/NET_RAW and relaxed
+container syscall/mount restrictions apply only to this disposable test process.
+The outer host and production/personal servers are not configured by the fixture.
+
+Run the repeatable fixture using an exact locally built image ID:
+
+```sh
+docker build --iidfile /tmp/provenance-network-fixture-image.txt \
+  -f scripts/network-policy/Dockerfile scripts/network-policy
+python3 -B scripts/network-policy/acceptance.py \
+  --image "$(< /tmp/provenance-network-fixture-image.txt)"
+```
+
+Local kernel acceptance passed whole IPv4/IPv6 tuples, reachable-but-unbound
+public/metadata/management denial, shared dual-stack concurrent connections,
+raw AF_PACKET enforcement, aggregate byte limiting, established/new flow expiry,
+and zero remaining owned tables/namespaces. Every denial endpoint is first
+proved reachable without policy. Full runner race tests also passed. The owning
+`Disposable network policy` workflow retains exact-head source/image/log evidence.
+This is a trusted synthetic packet fixture, **not actual network-enabled Sentry
+integration or the complete malicious-plugin/security suite**.
+
 ## Remaining enforcement gate
 
 A binding is evidence of resolution, not network permission. The future trusted
 actuator must bind it to the exact admitted job, withdraw old rules on failed
 refresh, install per-job namespace/firewall controls and finite traffic/connection
 limits, account for both address families, and guarantee expiry and job cleanup.
-It must deny unbound/direct-IP destinations; this library installs no packet rules
-and therefore proves no packet was blocked. Resolved public IPs can be shared by
+It must deny unbound/direct-IP destinations; production still installs no packet
+rules from this package. Resolved public IPs can be shared by
 multiple names; address binding alone is not an application-layer hostname check.
 
 Authenticated policy loading, the coordinated wire representation for protocols
-and bandwidth, namespace/firewall implementation, gVisor/measured-runtime wiring,
-disposable hostile packet tests and production activation remain required. They
+and bandwidth, the privileged namespace/firewall actuator, controlled workload
+DNS service, gVisor/measured-runtime wiring, disposable hostile integration tests
+and production activation remain required. They
 must not be replaced by successful library tests or by host-side download SSRF
 checks. Existing network-disabled execution and artifact-transfer boundaries are
 unchanged.
@@ -95,3 +157,7 @@ The future runtime integration must preserve gVisor's isolated networking model;
 its [networking documentation](https://gvisor.dev/docs/user_guide/networking/)
 distinguishes sandbox networking from host-stack passthrough. No passthrough mode
 is enabled or authorized by this foundation.
+
+Firewall syntax follows the [nftables manual](https://netfilter.org/projects/nftables/manpage.html).
+The byte bucket semantics were checked against Linux's
+[nft_limit implementation](https://github.com/torvalds/linux/blob/master/net/netfilter/nft_limit.c).

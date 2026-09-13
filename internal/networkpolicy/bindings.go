@@ -105,7 +105,7 @@ func New(options Options, resolver Exchange) (*Binder, error) {
 	for _, p := range options.Permissions {
 		// Hosted workloads have no SMTP exception in this foundation. Controlled
 		// DNS is the only resolver; arbitrary DNS/DoT ports are not grants.
-		if !hostname(p.Hostname) || p.Port == 0 || p.Port == 25 || p.Port == 465 || p.Port == 587 || p.Port == 53 || p.Port == 853 || (p.Protocol != "tcp" && p.Protocol != "udp") || seen[p] {
+		if !hostname(p.Hostname) || blockedPort(p.Port) || (p.Protocol != "tcp" && p.Protocol != "udp") || seen[p] {
 			return nil, ErrPolicy
 		}
 		seen[p] = true
@@ -164,6 +164,10 @@ func (b *Binder) Resolve(ctx context.Context, name string) (Binding, error) {
 	}
 	b.pins[name] = digest
 	return Binding{b.job, name, addresses, append([]Permission(nil), b.permissions[name]...), b.limits, start, expires}, nil
+}
+
+func blockedPort(port uint16) bool {
+	return port == 0 || port == 25 || port == 465 || port == 587 || port == 53 || port == 853
 }
 
 func hostname(host string) bool {
