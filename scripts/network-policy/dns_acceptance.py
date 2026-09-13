@@ -72,7 +72,7 @@ def inside(mode, sentry_enabled=False):
                 spec={
                     'ociVersion':'1.0.2', 'root':{'path':'/guestroot','readonly':True},
                     'process':{'terminal':False,'user':{'uid':65532,'gid':65532},
-                        'args':['/smoke','dns-probe'],'env':['PATH=/'],'cwd':'/',
+                        'args':['/smoke','dns-lifecycle'],'env':['PATH=/'],'cwd':'/',
                         'noNewPrivileges':True,
                         'capabilities':{key:[] for key in ('bounding','effective','inheritable','permitted','ambient')},
                         'rlimits':[{'type':'RLIMIT_NOFILE','hard':1024,'soft':1024}]},
@@ -114,34 +114,32 @@ def inside(mode, sentry_enabled=False):
         service=subprocess.Popen(['ip','netns','exec','filter','/dns-fixture','-ttl','30s' if sentry_enabled else '8s'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         first=report();assert first['phase']=='ready'
         if sentry_enabled:
-            output,errors=sentry.communicate('start',timeout=20)
-            assert sentry.returncode==0, errors[:4096]
-            result=json.loads(output)
-            expected={'nonRootGuest','udpip4','udpip6','tcpip4','tcpip6','udpUnlistedDenied','tcpUnlistedDenied'}
-            assert set(result)==expected and all(value is True for value in result.values()), result
+            def sentry_report(phase):
+                line=sentry.stdout.readline(4097)
+                assert line.endswith('\n') and len(line)<=4096, 'bounded live Sentry report missing'
+                assert json.loads(line)=={'phase':phase,'nonRootGuest':True}
+            sentry.stdin.write('s');sentry.stdin.flush()
+            sentry_report('ready')
             evidence['nonRootSentryBoundDNSBothFamiliesBothTransports']=True
-            # runsc transfers interface addresses into its userspace netstack.
-            # After its verified exit, restore only this disposable client's
-            # addresses for the independent kernel lifecycle probes below.
-            # The installed filter namespace/rules/counters are unchanged.
-            for address in ('10.0.1.2','10.0.1.99'):
-                run('ip','addr','replace',address+'/24','dev','eth0',namespace='job')
-            run('ip','link','set','eth0','up',namespace='job')
-            mac=json.loads(run('ip','-j','link','show','job0',namespace='filter'))[0]['address']
-            run('ip','neigh','replace','10.0.1.1','lladdr',mac,'nud','permanent','dev','eth0',namespace='job')
-        for kind,transport in ((1,'udp'),(28,'udp'),(1,'tcp'),(28,'tcp')):
-            got=probe(kind,transport);assert got.get('rcode')==0 and got.get('answers')==1, got
-        assert probe(host='unlisted.example.com').get('rcode')==5
-        assert probe(kind=16).get('rcode')==5
-        assert not probe(port=54)['responded']
-        assert not probe(source='10.0.1.99')['responded']
+        else:
+            for kind,transport in ((1,'udp'),(28,'udp'),(1,'tcp'),(28,'tcp')):
+                got=probe(kind,transport);assert got.get('rcode')==0 and got.get('answers')==1, got
+            assert probe(host='unlisted.example.com').get('rcode')==5
+            assert probe(kind=16).get('rcode')==5
+            assert not probe(port=54)['responded']
+            assert not probe(source='10.0.1.99')['responded']
+            evidence['unlistedNamesUnsupportedTypesOtherPortsAndSpoofedSourcesDenied']=True
         before=accepted_bytes();assert before>0
         evidence['bothFamiliesOverUDPAndTCP']=True
-        evidence['unlistedNamesUnsupportedTypesOtherPortsAndSpoofedSourcesDenied']=True
         time.sleep(1.1)
         refreshed=command('refresh');assert refreshed['phase']=='refreshed'
         assert accepted_bytes()>=before, 'DNS refresh reset shared byte counter'
-        assert probe().get('answers')==1
+        if sentry_enabled:
+            sentry.stdin.write('refresh\n');sentry.stdin.flush()
+            sentry_report('refreshed')
+            evidence['liveSentryRenewalBothFamiliesBothTransports']=True
+        else:
+            assert probe().get('answers')==1
         evidence['refreshPreservesSharedCounter']=True
         if mode=='expiry':
             old=datetime.datetime.fromisoformat(first['expires'].replace('Z','+00:00')).timestamp()
@@ -159,13 +157,22 @@ def inside(mode, sentry_enabled=False):
             rules=json.loads(run('nft','-j','list','table','inet',table,namespace='filter'))['nftables']
             assert not any('rule' in row for row in rules), 'withdrawal left packet permissions'
             assert accepted_bytes()>=before
-            assert not probe()['responded']
+            if sentry_enabled:
+                sentry.stdin.write('withdraw\n');sentry.stdin.flush()
+                sentry_report('withdrawn')
+                assert sentry.wait(timeout=5)==0
+                evidence['liveSentryWithdrawalBothFamiliesBothTransports']=True
+            else:
+                assert not probe()['responded']
             service.stdin.write('refresh\n');service.stdin.flush()
             assert service.wait(timeout=5)==1
             assert 'withdrawn fixture cannot refresh' in service.stderr.read(4096)
             evidence['withdrawalClosesAllChainsAndCannotResume']=True
         remaining=json.loads(run('nft','-j','list','tables',namespace='filter'))['nftables']
         assert not any('table' in row for row in remaining), 'fixture table not removed'
+        job_link=json.loads(run('ip','-j','link','show','job0',namespace='filter'))[0]
+        assert 'UP' not in job_link['flags'], 'table removed before owned job route disconnected'
+        evidence['lifecycleControllerDisconnectedOwnedRoute']=True
         evidence['ownedTableRemoved']=True
     finally:
         for process in (sentry,service,echo):

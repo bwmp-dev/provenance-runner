@@ -3,7 +3,8 @@
 Status: Address-binding and inactive routed-firewall foundations; not production
 runtime enforcement or WP-11A acceptance.
 The production runner still advertises and enforces `network=none`. This package
-has no production caller, firewall actuator, namespace manager or capability flag.
+has no production caller, production firewall actuator, namespace manager or
+capability flag. The owned lifecycle below is exercised by disposable actuators.
 
 ## Inputs and ownership
 
@@ -188,6 +189,12 @@ Local actual-Sentry acceptance passed TCP and UDP over both address families,
 unbound public destinations, metadata, wrong-port and wrong-protocol denial,
 plus the non-root guest check. The same run first exercises the kernel packet
 cap/expiry/spoofing checks. The workflow retains both logs and exact image IDs.
+The guest now also retains four real TCP/UDP sockets across atomic renewal and
+withdrawal. Both address families must continue on the same established flows
+after renewal, then deny both established and new flows after withdrawal. These
+guest phases do not restore host interface addresses or restart Sentry. This
+packet fixture uses the compiled atomic batches; the DNS fixture below separately
+exercises the shared owned-route controller.
 This mode adds SETUID/SETGID/CHOWN/SYS_PTRACE only to the disposable controller,
 bounded to 512 MiB, one CPU and 256 PIDs. It still has no host mounts, network,
 ports or Docker socket. It does not exercise production policy authentication,
@@ -307,11 +314,13 @@ EDNS0 capacity advertisement (512–4096); options, flags, versions, duplicate O
 and arbitrary additional records remain rejected. UDP answers remain bounded to
 512 bytes regardless of that advertisement.
 
-After Sentry exits successfully, the disposable controller restores only the job
-client interface addresses that runsc transferred into its netstack. Separate
-kernel clients then prove shared-counter-preserving refresh, all-chain withdrawal,
-permanent refresh refusal, table removal and namespace cleanup. These latter
-lifecycle probes are not represented as guest-in-Sentry withdrawal evidence.
+The same live guest remains running across a controller renewal and withdrawal.
+It must resolve both families on both transports after renewal, and must lose all
+four paths after withdrawal. The controller retains shared counters and refuses
+subsequent renewal permanently, then removes its table only after the job route
+is disconnected. No host address restoration substitutes for the live guest.
+The separate non-Sentry run retains unsupported-type, spoofed-peer, other-port,
+kernel expiry and namespace/table cleanup probes.
 The Sentry case uses a bounded 30-second snapshot; the separate kernel expiry case
 continues to use eight seconds. Neither fixture installs a production actuator,
 advertises runner feature 9, nor enables production networking.
@@ -319,3 +328,32 @@ advertises runner feature 9, nor enables production networking.
 Run `scripts/network-policy/dns_acceptance.py --image <verified-image-sha> --sentry`
 with the image built from `scripts/network-policy/Dockerfile.sentry`. CI retains
 the separate `sentry-dns-acceptance.log` alongside the exact source/image evidence.
+
+## Owned route lifecycle composition
+
+`internal/networkpolicy.RouteSession` now owns the serialized install/renew/
+withdraw/close lifecycle behind a trusted, exclusively owned namespace actuator.
+Only a successful atomic firewall installation publishes a DNS view. Renewal
+invalidates the old view before replacing rules, preserves counter/connection/
+bandwidth objects, and cannot resume a withdrawn session. Invalid renewal,
+actuator failure, owner cancellation and expiry withdraw the session. Parent
+cancellation also interrupts an in-flight renewal using another call context.
+
+Withdrawal attempts default-drop and independent route disconnection even if one
+operation fails. Cleanup never removes the default-drop table before successful
+disconnection, and failed cleanup retains a retryable owner. Operation errors are
+bounded categories rather than command output. The absolute kernel deadline
+continues to apply if the userspace observer dies. DNS listener ownership and
+failure propagation remain the actuator caller's responsibility.
+
+The disposable DNS fixture uses this same lifecycle with actual atomic nft
+transactions and an actual job-facing link shutdown. Its packet acceptance checks
+both kernel deadline renewal and irreversible withdrawal, retained counters, and
+that the owned route is down when the table is removed. Mock fault/concurrency
+tests are not substituted for those packet checks.
+
+This does not expose a production privileged endpoint or establish ownership of
+an arbitrary namespace. The production namespace helper, mapped-Sentry/provider
+composition, authenticated withdrawal propagation and measured activation remain
+required. Gateway/Paper network-v2 refusal and none-only runtime claims remain
+unchanged; no full WP-11A acceptance is claimed by this library/fixture change.
