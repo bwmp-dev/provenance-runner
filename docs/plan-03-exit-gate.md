@@ -32,7 +32,21 @@ kernel, cgroup, mount, or gVisor state simultaneously, while the ordinary test
 job remains unconstrained and can use another self-hosted runner in parallel.
 The dedicated-host systemd-user smoke has a separate repository-scoped,
 non-cancelling queue so two runs cannot mutate the remote smoke boundary at the
-same time without blocking the local privileged-gVisor queue.
+same time without blocking the local privileged-gVisor queue under normal
+scheduling. This queue is not an exactly-once delivery guarantee: main CI run
+[34737024382](https://github.com/bwmp-dev/provenance-runner/actions/runs/34737024382)
+delivered the same job in attempt 1 to `provenance-ci-2` and `provenance-ci-6`.
+Both executed the smoke; the later upload failed on the already retained name.
+The historical failure and original artifact remain intact.
+
+Each actual dedicated-host execution now allocates a fresh 128-bit UUID identity.
+Its artifact name, local evidence directory, remote directory and systemd scope
+all carry that identity, with the exact candidate SHA and workflow run/attempt
+recorded in `metadata.json`. Consumers must verify every retained artifact's
+manifest and metadata rather than assume one artifact per source SHA. No upload
+overwrites previous evidence, and a duplicate execution cannot clean another
+execution's remote directory. Existing host/binary assertions, zero-residual
+scope check, finite timeouts and the non-cancelling queue remain required.
 
 `go.mod` and `go.sum` changes do not automatically run the full gate. The
 integrator responsible for merging the pull request must classify the frozen

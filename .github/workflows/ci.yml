@@ -34,6 +34,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_rootfs_boot.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_runtime_selection.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_prepare_paper_catalog.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_smoke_execution_identity.py -v
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - name: Build
@@ -300,25 +301,35 @@ jobs:
           candidate="$(git rev-parse HEAD)"
           [[ "${candidate}" =~ ^[0-9a-f]{40}$ ]]
           binary="${RUNNER_TEMP}/gvisor-systemd-user-smoke.test"
-          evidence="${RUNNER_TEMP}/systemd-user-smoke-${candidate}"
+          identity=$(python3 scripts/smoke_execution_identity.py "${candidate}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}")
+          execution=$(jq -er .execution <<< "${identity}")
+          artifact=$(jq -er .artifact <<< "${identity}")
+          scope=$(jq -er .scope <<< "${identity}")
+          evidence="${RUNNER_TEMP}/${artifact}"
           mkdir -m 0700 "${evidence}"
           go test -c -trimpath -o "${binary}" ./internal/provider/gvisor
           binary_sha="$(sha256sum "${binary}" | cut -d' ' -f1)"
-          remote_dir="/var/lib/provenance-plan0506/ci-smoke/${candidate}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_dir=$(jq -er .remoteDirectory <<< "${identity}")
           jq -n \
             --arg candidateSha "${candidate}" \
             --arg binarySha256 "${binary_sha}" \
+            --arg execution "${execution}" --arg workflowAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg runnerName "${RUNNER_NAME}" --arg scope "${scope}" \
+            --arg remoteDirectory "${remote_dir}" --arg artifact "${artifact}" \
             --arg workflowRun "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{candidateSha:$candidateSha,binarySha256:$binarySha256,workflowRun:$workflowRun,hostAlias:"provenance-runner",expectedUser:"provenance",expectedUid:1001,expectedCgroupDriver:"systemd-user",expectedCgroupRoot:"/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"}' \
+            '{candidateSha:$candidateSha,binarySha256:$binarySha256,workflowRun:$workflowRun,execution:$execution,workflowAttempt:$workflowAttempt,runnerName:$runnerName,scope:$scope,remoteDirectory:$remoteDirectory,artifact:$artifact,hostAlias:"provenance-runner",expectedUser:"provenance",expectedUid:1001,expectedCgroupDriver:"systemd-user",expectedCgroupRoot:"/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice"}' \
             > "${evidence}/metadata.json"
           echo "SYSTEMD_SMOKE_BINARY=${binary}" >> "${GITHUB_ENV}"
           echo "SYSTEMD_SMOKE_EVIDENCE=${evidence}" >> "${GITHUB_ENV}"
           echo "SYSTEMD_SMOKE_REMOTE_DIR=${remote_dir}" >> "${GITHUB_ENV}"
+          echo "SYSTEMD_SMOKE_ARTIFACT=${artifact}" >> "${GITHUB_ENV}"
+          echo "SYSTEMD_SMOKE_SCOPE=${scope}" >> "${GITHUB_ENV}"
       - name: Run exact non-root smoke on dedicated host
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${SYSTEMD_SMOKE_REMOTE_DIR}" =~ ^/var/lib/provenance-plan0506/ci-smoke/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "${SYSTEMD_SMOKE_REMOTE_DIR}" =~ ^/var/lib/provenance-plan0506/ci-smoke/[0-9a-f]{40}-[0-9]+-[0-9]+-[0-9a-f]{32}$ ]]
+          [[ "${SYSTEMD_SMOKE_SCOPE}" =~ ^provenance-ci-[0-9]+-[0-9]+-[0-9a-f]{32}$ ]]
           ssh_options=(
             -F "${PROVENANCE_SSH_CONFIG}"
             -o BatchMode=yes
@@ -347,7 +358,7 @@ jobs:
              test \"\$(id -u)\" = 1001
              chmod 0500 '${SYSTEMD_SMOKE_REMOTE_DIR}/gvisor-smoke.test'
              systemctl --user start app.slice
-             exec systemd-run --user --scope --collect --quiet --slice=app.slice --unit=provenance-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} env \
+             exec systemd-run --user --scope --collect --quiet --slice=app.slice --unit=${SYSTEMD_SMOKE_SCOPE} env \
                PROVENANCE_RUNSC_SMOKE=1 \
                PROVENANCE_RUNSC_PATH=/opt/provenance-plan0506/bin/runsc-provenance \
                PROVENANCE_RUNSC_ROOTFS=/var/lib/provenance-plan0506/bootstrap-smoke/alpine-rootfs \
@@ -379,7 +390,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: systemd-user-smoke-${{ github.sha }}
+          name: ${{ env.SYSTEMD_SMOKE_ARTIFACT }}
           path: ${{ env.SYSTEMD_SMOKE_EVIDENCE }}
           if-no-files-found: error
           retention-days: 90
@@ -391,7 +402,7 @@ jobs:
           if [[ -z "${SYSTEMD_SMOKE_REMOTE_DIR:-}" ]]; then
             exit 0
           fi
-          [[ "${SYSTEMD_SMOKE_REMOTE_DIR}" =~ ^/var/lib/provenance-plan0506/ci-smoke/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "${SYSTEMD_SMOKE_REMOTE_DIR}" =~ ^/var/lib/provenance-plan0506/ci-smoke/[0-9a-f]{40}-[0-9]+-[0-9]+-[0-9a-f]{32}$ ]]
           ssh -F "${PROVENANCE_SSH_CONFIG}" \
             -o BatchMode=yes -o ClearAllForwardings=yes -o ExitOnForwardFailure=yes \
             -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no \
