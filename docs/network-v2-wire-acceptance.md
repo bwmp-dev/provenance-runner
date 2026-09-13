@@ -23,3 +23,13 @@ introduced here.
 Actual DNS/firewall/Sentry fixture evidence remains documented separately in
 `network-policy-acceptance.md`. Runtime integration and measured rollout are
 required before the runner may advertise or accept enabled networking.
+
+CI run 34750517173 retained an unsuccessful measured-runtime observation: all
+smoke subtests passed, but the independent executable monitor reported
+`PermissionError` and lacked a Sentry observation. Owned cleanup passed. That
+attempt is not accepted and its evidence is not deleted or overwritten. Measured
+artifact names and staging now carry a fresh execution identity, using the
+existing bounded allocator, so retries/redelivery cannot replace prior evidence.
+The monitor and required executable observations are unchanged; a new exact-head
+successful run is still required. The source of the intermittent permission
+failure is not claimed to be resolved by changing evidence names.

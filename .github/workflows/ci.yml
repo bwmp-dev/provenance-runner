@@ -174,10 +174,13 @@ jobs:
           provision=$(sudo bash scripts/prepare-measured-builder.sh "${PROVENANCE_INSTALL_ROOT}/measured-builder")
           builder=$(jq -er '.builder' <<< "$provision")
           libraries=$(jq -er '.libraryDirectory' <<< "$provision")
-          evidence="${RUNNER_TEMP}/measured-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          identity=$(python3 scripts/smoke_execution_identity.py "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}")
+          execution=$(jq -er .execution <<< "${identity}")
+          echo "PROVENANCE_MEASURED_EXECUTION=${execution}" >> "${GITHUB_ENV}"
+          evidence="${RUNNER_TEMP}/measured-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${execution}"
           echo "PROVENANCE_MEASURED_EVIDENCE=${evidence}" >> "${GITHUB_ENV}"
-          generation_evidence="${RUNNER_TEMP}/runtime-generation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          generation_scratch="${RUNNER_TEMP}/runtime-generation-work-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          generation_evidence="${RUNNER_TEMP}/runtime-generation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${execution}"
+          generation_scratch="${RUNNER_TEMP}/runtime-generation-work-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${execution}"
           echo "PROVENANCE_GENERATION_EVIDENCE=${generation_evidence}" >> "${GITHUB_ENV}"
           bash scripts/test-runtime-generation-ci.sh \
             "${PROVENANCE_INSTALL_ROOT}/gvisor/runsc" "${PROVENANCE_INSTALL_ROOT}/measured-builder" \
@@ -193,14 +196,14 @@ jobs:
         if: always() && env.PROVENANCE_MEASURED_EVIDENCE != ''
         uses: actions/upload-artifact@v4
         with:
-          name: measured-runtime-${{ github.sha }}
+          name: measured-runtime-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.PROVENANCE_MEASURED_EXECUTION }}
           path: ${{ env.PROVENANCE_MEASURED_EVIDENCE }}
           if-no-files-found: error
       - name: Retain disposable Ubuntu generation evidence
         if: always() && env.PROVENANCE_GENERATION_EVIDENCE != ''
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-generation-${{ github.sha }}
+          name: runtime-generation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.PROVENANCE_MEASURED_EXECUTION }}
           path: ${{ env.PROVENANCE_GENERATION_EVIDENCE }}
           if-no-files-found: error
       - name: Remove delegated cgroup subtree
