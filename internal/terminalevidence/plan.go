@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"github.com/dlclark/regexp2"
@@ -22,9 +23,15 @@ import (
 
 //go:embed schema/config.json
 var schemaBytes []byte
+
+//go:embed schema/config-v2.json
+var schemaV2Bytes []byte
 var schemaOnce sync.Once
+var schemaV2Once sync.Once
 var configurationSchema *jsonschema.Schema
+var configurationV2Schema *jsonschema.Schema
 var schemaError error
+var schemaV2Error error
 
 type noRemoteSchemas struct{}
 
@@ -42,6 +49,10 @@ func (r ecmaRegex) MatchString(value string) bool {
 }
 
 func validatedConfiguration(raw []byte) (map[string]any, error) {
+	return validatedConfigurationVersion(raw, false)
+}
+
+func validatedConfigurationVersion(raw []byte, networkV2 bool) (map[string]any, error) {
 	v, err := parseJSON(raw)
 	if err != nil {
 		return nil, ErrInvalid
@@ -50,10 +61,14 @@ func validatedConfiguration(raw []byte) (map[string]any, error) {
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return nil, ErrInvalid
 	}
-	schemaOnce.Do(func() {
+	selectedOnce, selectedSchema, selectedError := &schemaOnce, &configurationSchema, &schemaError
+	if networkV2 {
+		selectedOnce, selectedSchema, selectedError = &schemaV2Once, &configurationV2Schema, &schemaV2Error
+	}
+	selectedOnce.Do(func() {
 		var document any
 		if json.Unmarshal(schemaBytes, &document) != nil {
-			schemaError = ErrInvalid
+			*selectedError = ErrInvalid
 			return
 		}
 		compiler := jsonschema.NewCompiler()
@@ -69,12 +84,24 @@ func validatedConfiguration(raw []byte) (map[string]any, error) {
 		})
 		const uri = "https://schemas.provenance.dev/config/v1/schema.json"
 		if compiler.AddResource(uri, document) != nil {
-			schemaError = ErrInvalid
+			*selectedError = ErrInvalid
 			return
 		}
-		configurationSchema, schemaError = compiler.Compile(uri)
+		selectedURI := uri
+		if networkV2 {
+			if json.Unmarshal(schemaV2Bytes, &document) != nil {
+				*selectedError = ErrInvalid
+				return
+			}
+			selectedURI = "https://schemas.provenance.dev/config/v2/schema.json"
+			if compiler.AddResource(selectedURI, document) != nil {
+				*selectedError = ErrInvalid
+				return
+			}
+		}
+		*selectedSchema, *selectedError = compiler.Compile(selectedURI)
 	})
-	if schemaError != nil || configurationSchema.Validate(v) != nil {
+	if *selectedError != nil || (*selectedSchema).Validate(v) != nil {
 		return nil, ErrInvalid
 	}
 	value, ok := v.(map[string]any)
@@ -110,7 +137,11 @@ func newContext(job *runnerv1.JobSpecification, v2 bool) (*Context, error) {
 	if b.AttemptNumber == 0 {
 		return nil, ErrInvalid
 	}
-	if _, err := validatedConfiguration(job.GetNormalizedConfigurationJson()); err != nil {
+	networkV2 := job.GetEffectivePolicy().GetNetworkV2() != nil
+	if networkV2 && !v2 {
+		return nil, ErrInvalid
+	}
+	if _, err := validatedConfigurationVersion(job.GetNormalizedConfigurationJson(), networkV2); err != nil {
 		return nil, err
 	}
 	var config struct {
@@ -142,6 +173,13 @@ func newContext(job *runnerv1.JobSpecification, v2 bool) (*Context, error) {
 		return nil, ErrInvalid
 	}
 	c := &Context{binding: b, requested: map[string]any{"artifactSha256": artifact, "configurationSha256": configuration, "environmentSha256": environment, "policySha256": policy}, planned: map[string]planned{}}
+	if networkV2 {
+		maximum, err := configurationNetworkMaximumV2(job.NormalizedConfigurationJson)
+		if err != nil || !networkpolicy.WithinLocalMaximumV2(job.EffectivePolicy.NetworkV2, maximum) {
+			return nil, ErrInvalid
+		}
+		c.networkMode = map[runnerv1.NetworkMode]string{runnerv1.NetworkMode_NETWORK_MODE_NONE: "none", runnerv1.NetworkMode_NETWORK_MODE_RESTRICTED: "restricted", runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST: "allowlist"}[job.EffectivePolicy.NetworkV2.Mode]
+	}
 	c.v2 = v2
 	add := func(id, kind, name string, supported bool, selector map[string]string) error {
 		if !identifier.MatchString(id) {
@@ -214,6 +252,10 @@ func digest(d *runnerv1.Digest) string {
 	return hex.EncodeToString(d.GetValue())
 }
 func policyMatches(policy *runnerv1.EffectivePolicy, want string) bool {
+	if policy.GetNetworkV2() != nil {
+		hash, err := networkpolicy.EffectivePolicyV2SHA256(policy)
+		return err == nil && hex.EncodeToString(hash[:]) == want
+	}
 	raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
 	if err != nil {
 		return false

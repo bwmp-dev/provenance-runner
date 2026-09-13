@@ -1,5 +1,30 @@
 # IFC-019 producer inputs
 
+## Staged versioned network contexts
+
+Evidence-v2 contexts can consume an exclusive versioned network job with the
+complete canonical configuration-v2 schema. The bundled schema is copied exactly
+from toolkit release `v0.1.0-alpha.33`, source
+`13922769f414aec4ad7458ebaeef21d543aebb4e`,
+`schemas/config/v2/schema.json`, SHA-256
+`b30e96dc97b2c6d9fa062dbc69dd301ef1f5ebef50019cf9eecdf585a23eff56`.
+Its v1 references resolve only against the existing pinned bundled schema; no
+remote schema loading or implicit configuration upgrade is permitted.
+
+The complete exclusive policy uses the shared validated deterministic wire
+identity, never a legacy JSON hash. The context checks that every granted tuple
+and finite cap fits the immutable configuration request. Configuration array
+order and its hash are retained; only a separate comparison copy is sorted.
+Mixed versions, tuple cross-products, wider caps, unknown configuration fields
+and missing non-network fields fail. Evidence-v1 still refuses these jobs.
+
+An enabled grant with no measured runtime produces partial evidence with null
+runtime. An existing network-disabled measurement cannot describe it. This does
+not expand runtime measurement eligibility, admit enabled offers, change Paper
+adaptation, advertise a capability or install networking. Those production
+fences remain intact while runtime composition and measured acceptance are
+completed. Existing schema-v1 jobs and frozen evidence identities are unchanged.
+
 The offline terminal-evidence reference, schema and vectors are exact copies from `bwmp-dev/provenance` contracts v0.1.0-alpha.16,
 source `f17e6b0db9507cbf1325769bc23c1d288101f89a`, annotated tag
 `255565aa4d836301c3d6b7d742d8fbe4d8b801df`. Apache-2.0 license is retained in

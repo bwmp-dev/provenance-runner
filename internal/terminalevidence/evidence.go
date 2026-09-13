@@ -53,10 +53,11 @@ type planned struct {
 
 // Context has no exported mutable fields. It contains no URLs or credentials.
 type Context struct {
-	binding   Binding
-	requested map[string]any
-	planned   map[string]planned
-	v2        bool
+	binding     Binding
+	requested   map[string]any
+	planned     map[string]planned
+	v2          bool
+	networkMode string // original validated grant, never a measured runtime claim
 }
 
 func (c *Context) Matches(lease *runnerv1.LeaseIdentity, attempt *runnerv1.AttemptIdentity) bool {
@@ -120,7 +121,7 @@ func Build(c *Context, runnerID string, observations []Observation, measured ...
 	}
 	if len(measured) == 1 && measured[0] != nil {
 		copy := *measured[0]
-		if !copy.Valid() {
+		if !copy.Valid() || (c.networkMode != "" && copy.NetworkMode != c.networkMode) {
 			return nil, ErrInvalid
 		}
 		encoded, _ := json.Marshal(copy)

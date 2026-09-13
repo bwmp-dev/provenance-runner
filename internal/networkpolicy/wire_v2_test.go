@@ -38,6 +38,30 @@ func releasedEffectiveV2(t *testing.T) (*runnerv1.EffectivePolicy, []byte) {
 	return p, raw
 }
 
+func TestEffectivePolicyV2IdentityUsesReleasedCompleteWire(t *testing.T) {
+	policy, raw := releasedEffectiveV2(t)
+	before := proto.Clone(policy)
+	identity, err := EffectivePolicyV2SHA256(policy)
+	if err != nil || identity != sha256.Sum256(raw) || !proto.Equal(before, policy) {
+		t.Fatal("released policy identity changed", err)
+	}
+	for _, change := range []func(*runnerv1.EffectivePolicy){
+		func(p *runnerv1.EffectivePolicy) {
+			p.Network = &runnerv1.NetworkPolicy{Mode: runnerv1.NetworkMode_NETWORK_MODE_NONE}
+		},
+		func(p *runnerv1.EffectivePolicy) { p.Resources.ProcessCount = 0 },
+		func(p *runnerv1.EffectivePolicy) { p.NetworkV2.MaximumBytesPerSecond = 0 },
+		func(p *runnerv1.EffectivePolicy) { p.ProtoReflect().SetUnknown([]byte{0xa0, 0x06, 0x01}) },
+		func(p *runnerv1.EffectivePolicy) { p.Resources.ProtoReflect().SetUnknown([]byte{0xa0, 0x06, 0x01}) },
+	} {
+		changed := proto.Clone(policy).(*runnerv1.EffectivePolicy)
+		change(changed)
+		if _, err := EffectivePolicyV2SHA256(changed); err != ErrPolicy {
+			t.Fatal("malformed complete policy received an identity", err)
+		}
+	}
+}
+
 func TestV2BinderReleasedIdentityWholeTuplesAndCopiedLocalBoundary(t *testing.T) {
 	p, raw := releasedEffectiveV2(t)
 	local := LocalV2Boundary{Maximum: proto.Clone(p.NetworkV2).(*runnerv1.NetworkPolicyV2), SensitiveNetworks: prefixes("93.184.216.0/24"), MaximumTTL: time.Minute}
