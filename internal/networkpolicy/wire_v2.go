@@ -32,20 +32,16 @@ func NewV2Binder(job string, raw []byte, expected [sha256.Size]byte, local Local
 		return nil, ErrPolicy
 	}
 	var effective runnerv1.EffectivePolicy
-	if proto.Unmarshal(raw, &effective) != nil || !closedWireV2(effective.ProtoReflect()) || effective.Network != nil || ValidateWireV2(effective.NetworkV2) != nil {
+	if proto.Unmarshal(raw, &effective) != nil {
+		return nil, ErrPolicy
+	}
+	identity, err := EffectivePolicyV2SHA256(&effective)
+	if err != nil || identity != expected {
 		return nil, ErrPolicy
 	}
 	canonical, err := (proto.MarshalOptions{Deterministic: true}).Marshal(&effective)
 	if err != nil || !bytes.Equal(raw, canonical) || !WithinLocalMaximumV2(effective.NetworkV2, local.Maximum) {
 		return nil, ErrPolicy
-	}
-	if effective.Sandbox == runnerv1.SandboxKind_SANDBOX_KIND_UNSPECIFIED || effective.Requirement == runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_UNSPECIFIED || effective.Resources == nil || effective.Resources.CpuMillis == 0 || effective.Resources.MemoryBytes == 0 || effective.Resources.DiskBytes == 0 || effective.Resources.ProcessCount == 0 {
-		return nil, ErrPolicy
-	}
-	for _, d := range []*durationpb.Duration{effective.PreparationTimeout, effective.ExecutionTimeout, effective.GracefulShutdownTimeout} {
-		if d == nil || d.CheckValid() != nil || d.Seconds < 0 || d.Nanos < 0 || (d.Seconds == 0 && d.Nanos == 0) {
-			return nil, ErrPolicy
-		}
 	}
 	p := effective.NetworkV2
 	options := Options{JobID: job, Mode: "none", SensitiveNetworks: local.SensitiveNetworks}
@@ -65,6 +61,28 @@ func NewV2Binder(job string, raw []byte, expected [sha256.Size]byte, local Local
 		}
 	}
 	return New(options, resolver)
+}
+
+// EffectivePolicyV2SHA256 validates the entire exclusive versioned policy and
+// returns its released deterministic wire identity. It is not gateway authority,
+// local maximum admission, installed enforcement or permission to advertise v2.
+func EffectivePolicyV2SHA256(effective *runnerv1.EffectivePolicy) ([sha256.Size]byte, error) {
+	if effective == nil || proto.Size(effective) > 65536 || !closedWireV2(effective.ProtoReflect()) || effective.Network != nil || ValidateWireV2(effective.NetworkV2) != nil {
+		return [sha256.Size]byte{}, ErrPolicy
+	}
+	if effective.Sandbox == runnerv1.SandboxKind_SANDBOX_KIND_UNSPECIFIED || effective.Requirement == runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_UNSPECIFIED || effective.Resources == nil || effective.Resources.CpuMillis == 0 || effective.Resources.MemoryBytes == 0 || effective.Resources.DiskBytes == 0 || effective.Resources.ProcessCount == 0 {
+		return [sha256.Size]byte{}, ErrPolicy
+	}
+	for _, d := range []*durationpb.Duration{effective.PreparationTimeout, effective.ExecutionTimeout, effective.GracefulShutdownTimeout} {
+		if d == nil || d.CheckValid() != nil || d.Seconds < 0 || d.Nanos < 0 || (d.Seconds == 0 && d.Nanos == 0) {
+			return [sha256.Size]byte{}, ErrPolicy
+		}
+	}
+	raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(effective)
+	if err != nil {
+		return [sha256.Size]byte{}, ErrPolicy
+	}
+	return sha256.Sum256(raw), nil
 }
 
 // ValidateWireV2 accepts only the released canonical bounded representation.
