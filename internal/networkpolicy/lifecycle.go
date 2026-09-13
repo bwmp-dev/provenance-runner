@@ -16,9 +16,28 @@ var ErrActuation = errors.New("network_actuation_failed")
 // namespace ownership independently of mutable paths or caller-supplied names.
 // This interface is not evidence of namespace ownership or installed protection.
 type OwnedRoute interface {
-	Apply(context.Context, string) error
+	JobID() string
+	Apply(context.Context, FirewallChange) error
 	Disconnect(context.Context) error
 }
+
+// FirewallChange is sealed to this package's validated lifecycle/compiler.
+// Privileged backends must not expose a raw nft program input to workloads or
+// their callers. The zero value is invalid; Program is only an execution view.
+type FirewallChange struct {
+	job, program string
+	kind         routeChangeKind
+}
+type routeChangeKind uint8
+
+const (
+	routeInstall routeChangeKind = iota + 1
+	routeRefresh
+	routeWithdraw
+	routeRemove
+)
+
+func (c FirewallChange) Program() string { return c.program }
 
 // RouteSession serializes installation, renewal and irreversible withdrawal.
 // Its DNS view is published only after the corresponding rules were installed.
@@ -43,7 +62,7 @@ const routeOperationTimeout = 3 * time.Second
 // an error: the owner must still call Close and retain it until cleanup succeeds.
 // Cancellation and expiry withdraw independently of the caller's refresh loop.
 func StartRoute(ctx context.Context, job string, bindings []Binding, route OwnedRoute) (*RouteSession, error) {
-	if ctx == nil || route == nil || ctx.Err() != nil {
+	if ctx == nil || route == nil || ctx.Err() != nil || route.JobID() != job {
 		return nil, ErrPolicy
 	}
 	now := time.Now()
@@ -58,7 +77,7 @@ func StartRoute(ctx context.Context, job string, bindings []Binding, route Owned
 	watch, stop := context.WithCancel(ctx)
 	s := &RouteSession{job: job, route: route, rules: rules, view: view, wake: make(chan struct{}, 1), done: make(chan struct{}), stop: stop, ctx: watch}
 	s.mu.Lock()
-	err = s.apply(ctx, rules.Install())
+	err = s.apply(ctx, rules.Install(), routeInstall)
 	if err == nil && (ctx.Err() != nil || !time.Now().Before(rules.ExpiresAt())) {
 		err = ErrExpired
 	}
@@ -70,10 +89,10 @@ func StartRoute(ctx context.Context, job string, bindings []Binding, route Owned
 	return s, err
 }
 
-func (s *RouteSession) apply(ctx context.Context, program string) error {
+func (s *RouteSession) apply(ctx context.Context, program string, kind routeChangeKind) error {
 	bounded, cancel := context.WithTimeout(ctx, routeOperationTimeout)
 	defer cancel()
-	if s.route.Apply(bounded, program) != nil || bounded.Err() != nil {
+	if s.route.Apply(bounded, FirewallChange{job: s.job, program: program, kind: kind}) != nil || bounded.Err() != nil {
 		return ErrActuation
 	}
 	return nil
@@ -127,7 +146,7 @@ func (s *RouteSession) Refresh(ctx context.Context, bindings []Binding) error {
 		return fail(err)
 	}
 	s.view.Withdraw()
-	if err := s.apply(ctx, program); err != nil {
+	if err := s.apply(ctx, program, routeRefresh); err != nil {
 		return fail(err)
 	}
 	if ctx.Err() != nil || s.ctx.Err() != nil || !time.Now().Before(next.ExpiresAt()) {
@@ -148,7 +167,7 @@ func (s *RouteSession) withdrawLocked() error {
 	// firewall result never prevents the independent route-disconnection attempt.
 	program, err := s.rules.Withdraw()
 	if err == nil {
-		err = s.apply(context.Background(), program)
+		err = s.apply(context.Background(), program, routeWithdraw)
 	}
 	if !s.disconnected {
 		ctx, cancel := context.WithTimeout(context.Background(), routeOperationTimeout)
@@ -194,7 +213,7 @@ func (s *RouteSession) Close() error {
 	err := s.withdrawLocked()
 	s.stop()
 	if s.disconnected {
-		if removeErr := s.apply(context.Background(), s.rules.Remove()); removeErr != nil {
+		if removeErr := s.apply(context.Background(), s.rules.Remove(), routeRemove); removeErr != nil {
 			err = errors.Join(err, removeErr)
 		} else {
 			s.removed = true

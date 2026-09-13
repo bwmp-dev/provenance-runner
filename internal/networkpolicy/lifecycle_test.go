@@ -18,7 +18,10 @@ type recordingRoute struct {
 	beforeApply               func(context.Context, string)
 }
 
-func (r *recordingRoute) Apply(ctx context.Context, program string) error {
+func (*recordingRoute) JobID() string { return "10000000-0000-4000-8000-000000000001" }
+
+func (r *recordingRoute) Apply(ctx context.Context, change FirewallChange) error {
+	program := change.Program()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

@@ -44,7 +44,10 @@ func (fixtureResolver) Exchange(_ context.Context, raw []byte) ([]byte, error) {
 
 type fixtureRoute struct{}
 
-func (fixtureRoute) Apply(ctx context.Context, program string) error {
+func (fixtureRoute) JobID() string { return "10000000-0000-4000-8000-000000000001" }
+
+func (fixtureRoute) Apply(ctx context.Context, change networkpolicy.FirewallChange) error {
+	program := change.Program()
 	command := exec.CommandContext(ctx, "nft", "-f", "-")
 	command.Stdin = strings.NewReader(program)
 	if err := command.Run(); err != nil {
