@@ -21,6 +21,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='provenance-namespace-fixture-') as temporary:
         binary=Path(temporary)/'namespace.test'
         subprocess.run([args.go,'test','-c','-o',str(binary),'./internal/networkpolicy'],cwd=root,env=os.environ|{'CGO_ENABLED':'0'},check=True,timeout=180)
+        # CI deliberately uses umask 077. Mapped non-root children execute this
+        # public fixture binary too; do not inherit a root-only build mode.
+        binary.chmod(0o555)
         container='provenance-namespace-fixture-'+uuid.uuid4().hex
         try:
             extra=['--cap-add','CHOWN','--cap-add','NET_RAW','-e','PROVENANCE_DISPOSABLE_SENTRY_FIXTURE=1'] if args.sentry else []

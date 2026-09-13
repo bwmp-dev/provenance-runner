@@ -187,8 +187,8 @@ func TestRetainedRouteSentryActuation(t *testing.T) {
 			UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(uid), Size: 1}, {ContainerID: 65534, HostID: int(uid + 1), Size: 1}},
 			GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(uid), Size: 1}, {ContainerID: 65534, HostID: int(uid + 1), Size: 1}},
 			GidMappingsEnableSetgroups: false, Credential: &syscall.Credential{Uid: 0, Gid: 0, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
-		if cmd.Start() != nil {
-			t.Fatal("native fixture child unavailable")
+		if err := cmd.Start(); err != nil {
+			t.Fatal("native fixture child unavailable", err)
 		}
 		t.Cleanup(func() {
 			input.Close()
