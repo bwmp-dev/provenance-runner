@@ -3,7 +3,7 @@ module github.com/bwmp-dev/provenance-runner
 go 1.25.13
 
 require (
-	github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260912012756-11548839339c
+	github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260913072252-2d4ae24ca251
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/net v0.58.0
