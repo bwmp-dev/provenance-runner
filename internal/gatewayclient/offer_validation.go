@@ -301,7 +301,7 @@ func validateOfferPolicy(policy *runnerv1.EffectivePolicy, maximum Resources) *O
 		return rejectPolicy("unsupported_sandbox", "effective sandbox is not supported by this runner")
 	}
 	network := policy.GetNetwork()
-	if network == nil || network.GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE || len(network.GetAllowlist()) != 0 || network.GetMaximumConnections() != 0 {
+	if policy.GetNetworkV2() != nil || network == nil || network.GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE || len(network.GetAllowlist()) != 0 || network.GetMaximumConnections() != 0 {
 		return rejectPolicy("unsupported_network", "effective network policy exceeds this runner's maximum")
 	}
 	resources := policy.GetResources()

@@ -1,0 +1,61 @@
+{
+  "none": {
+    "mode": 1,
+    "permissions": [],
+    "maximumConnections": 0,
+    "maximumBytesPerSecond": 0
+  },
+  "enabled": {
+    "mode": 3,
+    "permissions": [
+      {
+        "hostname": "a.example",
+        "port": 443,
+        "transport": 1
+      },
+      {
+        "hostname": "b.example",
+        "port": 8443,
+        "transport": 2
+      }
+    ],
+    "maximumConnections": 8,
+    "maximumBytesPerSecond": 65536
+  },
+  "legacyNoneEffectiveHex": "12020801",
+  "enabledPolicyHex": "080312100a09612e6578616d706c6510bb03180112100a09622e6578616d706c6510fb411802180820808004",
+  "effectivePolicy": {
+    "sandbox": 3,
+    "resources": {
+      "cpuMillis": 2000,
+      "memoryBytes": "2147483648",
+      "diskBytes": "4294967296",
+      "processCount": 256
+    },
+    "preparationTimeout": "120s",
+    "executionTimeout": "900s",
+    "gracefulShutdownTimeout": "30s",
+    "requirement": 1,
+    "networkV2": {
+      "mode": 3,
+      "permissions": [
+        {
+          "hostname": "a.example",
+          "port": 443,
+          "transport": 1
+        },
+        {
+          "hostname": "b.example",
+          "port": 8443,
+          "transport": 2
+        }
+      ],
+      "maximumConnections": 8,
+      "maximumBytesPerSecond": 65536
+    }
+  },
+  "effectivePolicyWireHex": "08031a1208d00f108080808008188080808010208002220208782a030884073202081e380182012c080312100a09612e6578616d706c6510bb03180112100a09622e6578616d706c6510fb411802180820808004",
+  "effectivePolicySha256": "3ca98f6960797c5caee3c3f9095201eb61f749c3e3e53a8641b311aa80193801",
+  "legacyFullPolicyWireHex": "0803120208011a1208d00f108080808008188080808010208002220208782a030884073202081e3801",
+  "legacyFullPolicySha256": "cb70bae1ac8b86e891449ee3224dfc4b7132234983d4b8d22360cbac4d125a08"
+}

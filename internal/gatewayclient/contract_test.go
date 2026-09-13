@@ -28,6 +28,8 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 		{(&runnerv1.RunnerMessage{}).ProtoReflect().Descriptor(), "credential_rotation_acknowledgement", 30},
 		{(&runnerv1.RotateCredential{}).ProtoReflect().Descriptor(), "issued_at", 10},
 		{(&runnerv1.RotateCredential{}).ProtoReflect().Descriptor(), "credential_fingerprint", 11},
+		{(&runnerv1.EffectivePolicy{}).ProtoReflect().Descriptor(), "network_v2", 16},
+		{(&runnerv1.RunnerPolicy{}).ProtoReflect().Descriptor(), "maximum_network_v2", 10},
 	}
 	for _, field := range fields {
 		descriptor := field.message.Fields().ByName(field.name)
@@ -53,8 +55,8 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	// Toolkit v0.1.0-alpha.23, released from green main.
-	const authority = "v0.0.0-20260912012756-11548839339c"
+	// Toolkit v0.1.0-alpha.30, released and independently verified from green main.
+	const authority = "v0.0.0-20260913072252-2d4ae24ca251"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)

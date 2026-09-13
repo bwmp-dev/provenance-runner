@@ -89,7 +89,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if policy.GetSandbox() != runnerv1.SandboxKind_SANDBOX_KIND_GVISOR {
 		return localjob.Job{}, errors.New("adapt Paper job: effective_policy.sandbox must be gVisor")
 	}
-	if policy.GetNetwork() == nil || policy.GetNetwork().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE {
+	if policy.GetNetworkV2() != nil || policy.GetNetwork() == nil || policy.GetNetwork().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE {
 		return localjob.Job{}, errors.New("adapt Paper job: effective_policy.network.mode must be none")
 	}
 	preparationTimeout, err := remoteTimeout("effective_policy.preparation_timeout", policy.GetPreparationTimeout())
