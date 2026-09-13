@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -20,7 +21,54 @@ const workloadDNSDeadline = time.Second
 // Only exact trusted job peers are served. No request can select a resolver.
 // On validation failure the caller retains ownership of its sockets.
 func ServeOwnedDNS(ctx context.Context, view *WorkloadDNS, udp net.PacketConn, tcp net.Listener, peers []netip.Addr) error {
-	if ctx == nil || view == nil || udp == nil || tcp == nil || len(peers) == 0 || len(peers) > 2 {
+	if view == nil {
+		return ErrPolicy
+	}
+	return serveOwnedDNS(ctx, view.Answer, view.Withdraw, udp, tcp, peers)
+}
+
+// ServeRouteDNS owns stable job-namespace sockets for the entire route session.
+// Each request sees only the currently installed DNS view. Renewal does not
+// rebind sockets or reset the shared transport budget. Socket failure or owner
+// cancellation withdraws the route; route termination closes every DNS socket.
+// Namespace/socket provenance is still the trusted caller's responsibility.
+// Invalid socket inputs remain caller-owned, but still withdraw this route.
+func ServeRouteDNS(ctx context.Context, session *RouteSession, udp net.PacketConn, tcp net.Listener, peers []netip.Addr) error {
+	if ctx == nil || session == nil || session.ctx == nil || session.done == nil {
+		return ErrPolicy
+	}
+	if _, err := session.DNS(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-session.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() { cancel(); <-watchDone }()
+	var stopOnce sync.Once
+	var withdrawal error
+	stop := func() { stopOnce.Do(func() { withdrawal = session.Withdraw() }) }
+	answer := func(query []byte, stream bool, now time.Time) ([]byte, error) {
+		view, err := session.DNS()
+		if err != nil {
+			return nil, err
+		}
+		return view.Answer(query, stream, now)
+	}
+	err := serveOwnedDNS(ctx, answer, stop, udp, tcp, peers)
+	stop()
+	return errors.Join(err, withdrawal)
+}
+
+func serveOwnedDNS(ctx context.Context, answer func([]byte, bool, time.Time) ([]byte, error), withdraw func(), udp net.PacketConn, tcp net.Listener, peers []netip.Addr) error {
+	if ctx == nil || udp == nil || tcp == nil || len(peers) == 0 || len(peers) > 2 {
 		return ErrPolicy
 	}
 	u, err := netip.ParseAddrPort(udp.LocalAddr().String())
@@ -44,14 +92,14 @@ func ServeOwnedDNS(ctx context.Context, view *WorkloadDNS, udp net.PacketConn, t
 	var activeMu sync.Mutex
 	active := map[net.Conn]bool{}
 	closeSockets := func() {
-		view.Withdraw()
 		_ = udp.Close()
 		_ = tcp.Close()
 		activeMu.Lock()
-		defer activeMu.Unlock()
 		for connection := range active {
 			_ = connection.Close()
 		}
+		activeMu.Unlock()
+		withdraw()
 	}
 	stop := context.AfterFunc(ctx, closeSockets)
 	defer func() { stop(); closeSockets() }()
@@ -91,7 +139,7 @@ func ServeOwnedDNS(ctx context.Context, view *WorkloadDNS, udp net.PacketConn, t
 			if n > 512 || !peerAllowed(peer) || !admit() {
 				continue
 			}
-			response, err := view.Answer(buffer[:n], false, time.Now())
+			response, err := answer(buffer[:n], false, time.Now())
 			if err != nil {
 				continue
 			}
@@ -140,7 +188,7 @@ func ServeOwnedDNS(ctx context.Context, view *WorkloadDNS, udp net.PacketConn, t
 				if _, err := io.ReadFull(connection, body[:size]); err != nil {
 					return
 				}
-				answer, err := view.Answer(body[:size], true, time.Now())
+				answer, err := answer(body[:size], true, time.Now())
 				if err != nil {
 					return
 				}
@@ -152,14 +200,21 @@ func ServeOwnedDNS(ctx context.Context, view *WorkloadDNS, udp net.PacketConn, t
 			}()
 		}
 	}()
+	failed := false
 	select {
 	case <-ctx.Done():
 	case <-errors:
+		// Preserve an initiating socket failure even when withdrawing the route
+		// subsequently cancels the supervision context during cleanup.
+		failed = parent.Err() == nil
 		cancel()
 	}
 	closeSockets()
 	loops.Wait()
 	connections.Wait()
+	if failed {
+		return ErrDNS
+	}
 	if parent.Err() != nil {
 		return parent.Err()
 	}

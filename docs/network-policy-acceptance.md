@@ -438,3 +438,24 @@ network-disabled container, mapped children, private proc mount and owned files;
 it exposes no host mounts, credentials, socket or external network. CI retains
 the separate `native-sentry-actuation.log` exact-head report. This remains a
 disposable composition test, not production runtime measurement or activation.
+
+## Route-owned DNS supervision
+
+`ServeRouteDNS` serves each query from the session's currently installed view
+while retaining the same UDP/TCP sockets, shared request budget and connection
+limit across renewal. Old views remain withdrawn. A listener failure or owner
+cancellation closes both transports and withdraws the route; route withdrawal or
+expiry also closes all DNS connections. Cleanup errors are retained, and a socket
+failure remains distinguishable from the cancellation caused by its own cleanup.
+Invalid socket inputs stay caller-owned but withdraw the associated live route.
+The caller must still establish socket namespace provenance; the server does not
+infer that from a local address or advertise any new capability.
+
+Loopback transport/race tests cover renewal on stable sockets, both listener
+failures, owner cancellation, route withdrawal/expiry, cleanup failure and invalid
+socket ownership. These use a recording actuator, not measured runtime proof.
+The disposable DNS fixture now keeps its listeners across renewal. Its live
+Sentry case deliberately closes the controller's UDP socket and requires the
+resulting route withdrawal, denied guest DNS, preserved accounting, disconnected
+job link and eventual table/namespace cleanup. Ordinary kernel fixtures retain
+explicit withdrawal and renewed deadline coverage. Production admission stays off.
