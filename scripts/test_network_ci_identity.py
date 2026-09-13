@@ -4,6 +4,13 @@ import unittest
 
 
 class NetworkCIIdentityTests(unittest.TestCase):
+    def test_short_expiry_precedes_slow_denial_matrix(self):
+        source = (Path(__file__).resolve().parent/'network-policy/acceptance.py').read_text()
+        self.assertLess(source.index("evidence['absoluteExpiryClosesEstablishedAndNewFlows']"), source.index("evidence['ipv4Ipv6WholeTuples']"))
+        self.assertEqual(source.count("rules['expiry'] = compile_rules('30s')"), 1)
+        self.assertEqual(source.count("evidence['absoluteExpiryClosesEstablishedAndNewFlows']"), 1)
+        self.assertIn("assert 0<remaining<35, remaining", source)
+
     def test_cache_is_not_archived_from_the_shared_host(self):
         workflow = (Path(__file__).resolve().parents[1]/'.github/workflows/network-policy.yml').read_text()
         setup = workflow.split('uses: actions/setup-go@v5', 1)[1].split('      - name:', 1)[0]
