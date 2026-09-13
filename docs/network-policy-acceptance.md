@@ -105,6 +105,33 @@ replacement: default acceptance during that gap would be unsafe. Teardown must
 disconnect the job before deleting its exact table and namespace. The compiler's
 delete program names only its owned table and never flushes a host ruleset.
 
+`Firewall.Refresh` now emits one atomic renewal batch for the same still-live
+job, address/transport/port grants and finite limits. It flushes only the forward
+chain's rules and replaces only the short-lived allowed sets in that transaction.
+The base chains keep default drop, while named counters, the byte bucket and
+the shared connection-count set survive. Recreating a table or limiter during
+renewal would replenish the job's traffic allowance and is deliberately refused.
+Zero/future-issued/expired snapshots, changed grants/limits and non-advancing
+expiry fail closed. This is renewal, not authorization for a new or changed grant.
+
+`Firewall.Withdraw` removes every forwarding rule while retaining default-drop
+base chains and accounting objects. It blocks established replies as well as new
+flows. The future trusted actuator must own the installed-snapshot compare-and-
+swap, submit the complete batch in one nft invocation, record withdrawal as a
+terminal lifecycle state, and disconnect before removal. A copied old snapshot
+must never act as permission to resume a withdrawn job. Failed DNS refresh and
+unknown command acknowledgements still require explicit denial/recovery; these
+program generators do not supply that production orchestration.
+
+The disposable kernel fixture additionally passed atomic renewal with live
+dual-stack connections, preservation of their shared connection ceiling,
+rollback of an invalid atomic batch, retained counters and byte allowance across
+renewal, and withdrawal of established/new TCP/UDP traffic. The bandwidth check
+reuses the same two UDP tuples before and after renewal so an exhausted
+connection ceiling cannot masquerade as rate enforcement. One local run
+forwarded 79,916 bytes over 0.408 seconds spanning renewal, within the original
+65,536-byte bucket plus elapsed refill; it did not receive a second fresh bucket.
+
 The trusted fixture creates job/router/fake-WAN namespaces inside one fresh
 Docker container with `--network none`, no mounts, no published ports and no
 Docker socket. Synthetic public and sensitive IPs exist only on the fake peer;
