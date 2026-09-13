@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -92,7 +93,59 @@ func main() {
 		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 			panic(err)
 		}
-	case "probe":
+	case "dns-lifecycle":
+		if os.Getuid() != 65532 || os.Geteuid() != 65532 {
+			panic("non-root guest required")
+		}
+		probe := func(allowed bool) {
+			for _, transport := range []string{"udp", "tcp"} {
+				resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, transport, "10.0.1.1:53")
+				}}
+				for _, family := range []string{"ip4", "ip6"} {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					addresses, err := resolver.LookupIP(ctx, family, "fixture.example.com.")
+					cancel()
+					want := "1.1.1.1"
+					if family == "ip6" {
+						want = "2606:4700:4700::1111"
+					}
+					if allowed {
+						if err != nil || len(addresses) != 1 || addresses[0].String() != want {
+							panic("live Sentry DNS binding failed")
+						}
+					} else if err == nil || len(addresses) != 0 {
+						panic("withdrawn Sentry DNS remained available")
+					}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				addresses, err := resolver.LookupIP(ctx, "ip4", "unlisted.example.com.")
+				cancel()
+				if err == nil || len(addresses) != 0 {
+					panic("unlisted Sentry DNS answered")
+				}
+			}
+		}
+		report := func(phase string) {
+			if json.NewEncoder(os.Stdout).Encode(map[string]any{"phase": phase, "nonRootGuest": true}) != nil {
+				panic("report failed")
+			}
+		}
+		probe(true)
+		report("ready")
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 64), 64)
+		if !scanner.Scan() || scanner.Text() != "refresh" {
+			panic("refresh barrier missing")
+		}
+		probe(true)
+		report("refreshed")
+		if !scanner.Scan() || scanner.Text() != "withdraw" {
+			panic("withdraw barrier missing")
+		}
+		probe(false)
+		report("withdrawn")
+	case "probe", "probe-lifecycle":
 		if os.Getuid() != 65532 || os.Geteuid() != 65532 {
 			panic("non-root guest required")
 		}
@@ -133,7 +186,82 @@ func main() {
 		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 			panic(err)
 		}
+		if os.Args[1] == "probe-lifecycle" {
+			packetLifecycle()
+		}
 	default:
 		panic("unknown fixture mode")
 	}
+}
+
+// Keep the same Sentry and four sockets alive across the controller's atomic
+// refresh and withdrawal. These are real guest packets, not restored host links.
+func packetLifecycle() {
+	var connections []net.Conn
+	defer func() {
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	}()
+	endpoints := []struct{ network, address string }{
+		{"tcp", "1.1.1.1:8080"}, {"tcp", "[2606:4700:4700::1111]:8080"},
+		{"udp", "1.1.1.1:8081"}, {"udp", "[2606:4700:4700::1111]:8081"},
+	}
+	echo := func(connection net.Conn) bool {
+		if connection.SetDeadline(time.Now().Add(750*time.Millisecond)) != nil {
+			return false
+		}
+		if _, err := connection.Write([]byte("live")); err != nil {
+			return false
+		}
+		var answer [4]byte
+		_, err := io.ReadFull(connection, answer[:])
+		return err == nil && string(answer[:]) == "live"
+	}
+	for _, endpoint := range endpoints {
+		connection, err := net.DialTimeout(endpoint.network, endpoint.address, time.Second)
+		if err != nil {
+			panic("persistent guest connection unavailable")
+		}
+		connections = append(connections, connection)
+		if !echo(connection) {
+			panic("persistent guest connection failed before renewal")
+		}
+	}
+	report := func(phase string) {
+		if json.NewEncoder(os.Stdout).Encode(map[string]string{"phase": phase}) != nil {
+			panic("packet report failed")
+		}
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 64), 64)
+	report("flows-ready")
+	if !scanner.Scan() || scanner.Text() != "refresh" {
+		panic("packet refresh barrier missing")
+	}
+	for _, connection := range connections {
+		if !echo(connection) {
+			panic("renewal broke persistent guest flow")
+		}
+	}
+	report("flows-refreshed")
+	if !scanner.Scan() || scanner.Text() != "withdraw" {
+		panic("packet withdrawal barrier missing")
+	}
+	for _, connection := range connections {
+		if echo(connection) {
+			panic("withdrawal retained established guest flow")
+		}
+	}
+	for _, endpoint := range endpoints {
+		connection, err := net.DialTimeout(endpoint.network, endpoint.address, 750*time.Millisecond)
+		if err == nil {
+			allowed := echo(connection)
+			_ = connection.Close()
+			if allowed {
+				panic("withdrawal admitted new guest flow")
+			}
+		}
+	}
+	report("flows-withdrawn")
 }

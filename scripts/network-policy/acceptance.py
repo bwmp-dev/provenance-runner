@@ -197,7 +197,7 @@ def inside(sentry_enabled=False):
                     'root': {'path': '/guestroot', 'readonly': True},
                     'process': {
                         'terminal': False, 'user': {'uid': 65532, 'gid': 65532},
-                        'args': ['/smoke', 'probe'], 'env': ['PATH=/'], 'cwd': '/',
+                        'args': ['/smoke', 'probe-lifecycle'], 'env': ['PATH=/'], 'cwd': '/',
                         'noNewPrivileges': True,
                         'capabilities': {key: [] for key in ('bounding', 'effective', 'inheritable', 'permitted', 'ambient')},
                         'rlimits': [{'type': 'RLIMIT_NOFILE', 'hard': 1024, 'soft': 1024}],
@@ -345,11 +345,26 @@ def inside(sentry_enabled=False):
             run('nft', '-f', '-', namespace='filter', input=rules['remove'])
             run('conntrack', '-F', namespace='filter')
             run('nft', '-f', '-', namespace='filter', input=rules['sentry']['install'])
-            output, diagnostics = sentry.communicate('start', timeout=45)
-            assert sentry.returncode == 0, diagnostics[:8192]
-            result = json.loads(output)
+            def guest_report():
+                line=sentry.stdout.readline(4097)
+                assert line.endswith('\n') and len(line)<=4096, 'bounded live Sentry packet report missing'
+                return json.loads(line)
+            sentry.stdin.write('s');sentry.stdin.flush()
+            result = guest_report()
             assert len(result) == 10 and all(value is True for value in result.values()), result
             evidence['userNamespacedSentryPacketPolicy'] = result
+            assert guest_report()=={'phase':'flows-ready'}
+            before=counter('forwarded')['bytes']
+            run('nft', '-f', '-', namespace='filter', input=rules['sentry']['refresh'])
+            assert counter('forwarded')['bytes']>=before, 'live Sentry refresh reset counters'
+            sentry.stdin.write('refresh\n');sentry.stdin.flush()
+            assert guest_report()=={'phase':'flows-refreshed'}
+            run('nft', '-f', '-', namespace='filter', input=rules['sentry']['withdraw'])
+            sentry.stdin.write('withdraw\n');sentry.stdin.flush()
+            assert guest_report()=={'phase':'flows-withdrawn'}
+            assert sentry.wait(timeout=5)==0
+            evidence['liveSentryRefreshPreservesEstablishedDualStackTCPUDP']=True
+            evidence['liveSentryWithdrawalDeniesEstablishedAndNewDualStackTCPUDP']=True
         run('nft', '-f', '-', namespace='filter', input=rules['remove'])
         assert not json.loads(run('nft', '-j', 'list', 'tables', namespace='filter'))['nftables'][1:], 'owned tables remain'
         evidence['ownedTablesRemoved'] = True
@@ -387,7 +402,7 @@ def main():
         return json.loads(subprocess.run([args.go, 'run', './scripts/network-policy/fixture-rules', '-ttl', ttl, '-connections', str(connections), *(['-refresh'] if refresh else [])], cwd=root, capture_output=True, text=True, check=True, timeout=60).stdout)
     rules = compile_rules('5m', refresh=True)
     if args.sentry:
-        rules['sentry'] = compile_rules('5m', 16)
+        rules['sentry'] = compile_rules('5m', 16, refresh=True)
     rules['expiry'] = compile_rules('30s')
     container = 'provenance-network-fixture-' + uuid.uuid4().hex
     try:
@@ -400,7 +415,7 @@ def main():
             '-e', 'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1', '--entrypoint', 'python3',
             args.image, '-B', '-c', Path(__file__).read_text(), '--inside', *(['--sentry'] if args.sentry else []),
         ]
-        result = subprocess.run(command, input=json.dumps(rules), text=True, timeout=90)
+        result = subprocess.run(command, input=json.dumps(rules), text=True, timeout=120)
         if result.returncode:
             raise RuntimeError(f'disposable packet acceptance failed: exit {result.returncode}')
     finally:
