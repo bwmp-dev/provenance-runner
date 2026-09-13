@@ -17,11 +17,51 @@ import (
 type Firewall struct {
 	table, install, remove string
 	expires                time.Time
+	issued                 time.Time
+	sets, rules, grants    string
+	families               uint8
+	limits                 Limits
 }
 
 func (f Firewall) Install() string      { return f.install }
 func (f Firewall) Remove() string       { return f.remove }
 func (f Firewall) ExpiresAt() time.Time { return f.expires }
+
+// Refresh returns ONE atomic nft batch for renewal of the same still-live
+// grant. Counters, connection tracking and the byte bucket survive renewal;
+// deleting/recreating those objects would silently replenish traffic budgets.
+// The trusted actuator must compare-and-swap the currently installed snapshot,
+// execute this whole batch once, and refuse refresh after withdrawal/expiry.
+func (f Firewall) Refresh(next Firewall, now time.Time) (string, error) {
+	if f.table == "" || f.install == "" || next.table != f.table || next.install == "" ||
+		f.grants != next.grants || f.limits != next.limits || f.families != next.families {
+		return "", ErrPolicy
+	}
+	if now.IsZero() || now.Before(f.issued) || now.Before(next.issued) || !now.Before(f.expires) || !next.expires.After(f.expires) {
+		return "", ErrExpired
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "flush chain inet %s forward\n", f.table)
+	for family := uint8(0); family < 2; family++ {
+		if f.families&(1<<family) != 0 {
+			fmt.Fprintf(&out, "delete set inet %s allowed%d\n", f.table, 4+family*2)
+		}
+	}
+	out.WriteString(next.sets)
+	out.WriteString(next.rules)
+	return out.String(), nil
+}
+
+// Withdraw keeps every base chain's default drop and removes all forwarding
+// grants in one batch, including established replies. It intentionally retains
+// counters and traffic-budget objects. The actuator must mark the job withdrawn
+// and disconnect it before deleting its owned table; this is not a resume token.
+func (f Firewall) Withdraw() (string, error) {
+	if f.table == "" || f.install == "" {
+		return "", ErrPolicy
+	}
+	return fmt.Sprintf("flush chain inet %s forward\n", f.table), nil
+}
 
 // CompileFirewall constructs a fail-closed snapshot. Every binding must belong
 // to the authenticated job and have identical effective limits. Earliest expiry
@@ -76,7 +116,8 @@ func CompileFirewall(job string, bindings []Binding, now time.Time) (Firewall, e
 		return Firewall{}, ErrExpired
 	}
 	table := "pv_" + strings.ReplaceAll(job, "-", "")
-	var out strings.Builder
+	var out, setProgram, ruleProgram, grants strings.Builder
+	var families uint8
 	fmt.Fprintf(&out, "create table inet %s\n", table)
 	for family, entries := range sets {
 		if len(entries) == 0 {
@@ -87,7 +128,11 @@ func CompileFirewall(job string, bindings []Binding, now time.Time) (Firewall, e
 			values = append(values, value)
 		}
 		sort.Strings(values)
-		fmt.Fprintf(&out, "add set inet %s allowed%d { type ipv%d_addr . inet_proto . inet_service; flags timeout; timeout %dms; size 4096; elements = { %s }; }\n", table, 4+family*2, 4+family*2, expires.Sub(now).Milliseconds(), strings.Join(values, ", "))
+		families |= 1 << family
+		fmt.Fprintf(&grants, "%d:%s\n", family, strings.Join(values, ", "))
+		line := fmt.Sprintf("add set inet %s allowed%d { type ipv%d_addr . inet_proto . inet_service; flags timeout; timeout %dms; size 4096; elements = { %s }; }\n", table, 4+family*2, 4+family*2, expires.Sub(now).Milliseconds(), strings.Join(values, ", "))
+		out.WriteString(line)
+		setProgram.WriteString(line)
 	}
 	fmt.Fprintf(&out, "add set inet %s connections { type mark; flags dynamic; size 1; }\n", table)
 	fmt.Fprintf(&out, "add counter inet %s forwarded\nadd counter inet %s bandwidth_denied\n", table, table)
@@ -99,7 +144,9 @@ func CompileFirewall(job string, bindings []Binding, now time.Time) (Firewall, e
 		fmt.Fprintf(&out, "add chain inet %s %s { type filter hook %s priority 0; policy drop; }\n", table, chain, chain)
 	}
 	rule := func(body string, args ...any) {
-		fmt.Fprintf(&out, "add rule inet %s forward %s\n", table, fmt.Sprintf(body, args...))
+		line := fmt.Sprintf("add rule inet %s forward %s\n", table, fmt.Sprintf(body, args...))
+		out.WriteString(line)
+		ruleProgram.WriteString(line)
 	}
 	rule("meta time >= %d counter drop", deadline)
 	rule("ct state invalid,untracked counter drop")
@@ -122,5 +169,6 @@ func CompileFirewall(job string, bindings []Binding, now time.Time) (Firewall, e
 		rule("iifname \"wan0\" oifname \"job0\" ct direction reply ct state established %s daddr %s %s saddr . meta l4proto . th sport @allowed%d counter name forwarded accept", ip, jobAddress, ip, 4+family*2)
 	}
 	rule("counter drop")
-	return Firewall{table: table, install: out.String(), remove: fmt.Sprintf("delete table inet %s\n", table), expires: time.Unix(deadline, 0)}, nil
+	return Firewall{table: table, install: out.String(), remove: fmt.Sprintf("delete table inet %s\n", table), expires: time.Unix(deadline, 0),
+		issued: now, sets: setProgram.String(), rules: ruleProgram.String(), grants: grants.String(), families: families, limits: limits}, nil
 }

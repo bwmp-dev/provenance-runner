@@ -34,6 +34,7 @@ func (resolver) Exchange(_ context.Context, raw []byte) ([]byte, error) {
 func main() {
 	ttl := flag.Duration("ttl", 5*time.Minute, "synthetic binding lifetime")
 	connections := flag.Uint64("connections", 2, "synthetic concurrent flow ceiling")
+	refresh := flag.Bool("refresh", false, "include bounded same-grant renewal fixture")
 	flag.Parse()
 	job := "10000000-0000-4000-8000-000000000001"
 	b, err := networkpolicy.New(networkpolicy.Options{JobID: job, Mode: "allowlist", Permissions: []networkpolicy.Permission{{Hostname: "fixture.example.com", Port: 8080, Protocol: "tcp"}, {Hostname: "fixture.example.com", Port: 8081, Protocol: "udp"}}, Limits: networkpolicy.Limits{Connections: *connections, BytesPerSecond: 65536}, SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: *ttl}, resolver{})
@@ -48,7 +49,29 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"install": rules.Install(), "remove": rules.Remove(), "expires": rules.ExpiresAt().Format(time.RFC3339)}); err != nil {
+	output := map[string]string{"install": rules.Install(), "remove": rules.Remove(), "expires": rules.ExpiresAt().Format(time.RFC3339)}
+	if *refresh {
+		// Advance a real second, not a forged future-issued binding, so nft's
+		// whole-second absolute expiry can demonstrate a genuine renewal.
+		time.Sleep(1100 * time.Millisecond)
+		binding, err = b.Resolve(context.Background(), "fixture.example.com")
+		if err != nil {
+			panic(err)
+		}
+		next, err := networkpolicy.CompileFirewall(job, []networkpolicy.Binding{binding}, time.Now())
+		if err != nil {
+			panic(err)
+		}
+		output["refresh"], err = rules.Refresh(next, time.Now())
+		if err != nil {
+			panic(err)
+		}
+		output["withdraw"], err = next.Withdraw()
+		if err != nil {
+			panic(err)
+		}
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

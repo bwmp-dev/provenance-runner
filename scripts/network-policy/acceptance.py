@@ -101,7 +101,10 @@ FLOOD = r'''
 import socket
 sockets=[]
 for family,address in ((socket.AF_INET,'1.1.1.1'),(socket.AF_INET6,'2606:4700:4700::1111')):
-    s=socket.socket(family,socket.SOCK_DGRAM); s.connect((address,8081)); sockets.append(s)
+    s=socket.socket(family,socket.SOCK_DGRAM)
+    if family==socket.AF_INET6: s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,1)
+    s.bind(('::' if family==socket.AF_INET6 else '0.0.0.0',44000))
+    s.connect((address,8081)); sockets.append(s)
 for _ in range(1000):
     for s in sockets: s.send(b'x'*1000)
 for s in sockets: s.close()
@@ -123,6 +126,32 @@ print(json.dumps(not allowed))
 '''
 
 
+REFRESH_FLOWS = r'''
+import json,socket,sys
+sockets=[]
+for address in ('1.1.1.1','2606:4700:4700::1111'):
+ s=socket.socket(socket.AF_INET6 if ':' in address else socket.AF_INET,socket.SOCK_STREAM)
+ s.settimeout(.5);s.connect((address,8080));s.sendall(b'before');assert s.recv(6)==b'before';sockets.append(s)
+print('ready',flush=True)
+assert sys.stdin.readline().strip()=='refresh'
+for s in sockets:
+ s.sendall(b'after');assert s.recv(5)==b'after'
+third=socket.socket();third.settimeout(.5);blocked=False
+try:
+ third.connect(('1.1.1.1',8080));third.sendall(b'third');blocked=third.recv(5)!=b'third'
+except OSError:blocked=True
+assert blocked
+third.close();print('refreshed-cap-preserved',flush=True)
+assert sys.stdin.readline().strip()=='withdraw'
+for s in sockets:
+ denied=False
+ try:s.sendall(b'denied');denied=s.recv(6)!=b'denied'
+ except OSError:denied=True
+ assert denied;s.close()
+print('withdrawn-established-denied',flush=True)
+'''
+
+
 def inside(sentry_enabled=False):
     if not Path('/.dockerenv').exists() or os.environ.get('PROVENANCE_DISPOSABLE_NETWORK_FIXTURE') != '1':
         raise RuntimeError('disposable container marker required')
@@ -130,6 +159,7 @@ def inside(sentry_enabled=False):
     owned = []
     server = None
     sentry = None
+    flows = None
 
     def run(*args, namespace=None, input=None, timeout=10):
         command = (['ip', 'netns', 'exec', namespace] if namespace else []) + list(args)
@@ -267,6 +297,37 @@ def inside(sentry_enabled=False):
         assert denied['packets'] > 0 and forwarded['bytes'] > 0, (forwarded, denied)
         assert forwarded['bytes'] <= 65536*(1+elapsed), (forwarded, elapsed)
         evidence['aggregateDualStackBidirectionalByteCap'] = {'forwardedBytes': forwarded['bytes'], 'deniedPackets': denied['packets'], 'elapsedSeconds': elapsed}
+        # ONE nft transaction replaces only grant sets/rules. The shared byte
+        # bucket, counters and connection-count object must not be recreated.
+        run('nft', '-f', '-', namespace='filter', input=rules['refresh'])
+        assert counter('forwarded')['bytes'] >= forwarded['bytes'], 'refresh reset accepted-byte accounting'
+        assert counter('bandwidth_denied')['packets'] >= denied['packets'], 'refresh reset denial accounting'
+        run('python3', '-B', '-c', FLOOD, namespace='job')
+        time.sleep(.1)
+        total = counter('forwarded')['bytes']
+        duration = time.monotonic()-start
+        assert total > forwarded['bytes'], 'renewed flood must reach rate limiter on the same two flows'
+        assert total <= 65536*(1+duration), ('refresh replenished bandwidth bucket', total, duration)
+        evidence['atomicRefreshPreservesBudgetAndCounters'] = {'forwardedBytes': total, 'elapsedSeconds': duration}
+        reset()  # No live workload yet; start a separate persistent-flow fixture.
+        flows = subprocess.Popen(['ip', 'netns', 'exec', 'job', 'python3', '-u', '-B', '-c', REFRESH_FLOWS], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert flows.stdout.readline().strip() == 'ready', 'persistent dual-stack flows not established'
+        run('nft', '-f', '-', namespace='filter', input=rules['refresh'])
+        try:
+            run('nft', '-f', '-', namespace='filter', input=rules['refresh']+'add rule inet '+table+' nonexistent accept\n')
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('invalid atomic transaction unexpectedly accepted')
+        flows.stdin.write('refresh\n'); flows.stdin.flush()
+        assert flows.stdout.readline().strip() == 'refreshed-cap-preserved', 'renewal broke flows or reset connection cap'
+        evidence['atomicRefreshAndFailedBatchPreserveLiveFlowsAndCap'] = True
+        run('nft', '-f', '-', namespace='filter', input=rules['withdraw'])
+        output, diagnostics = flows.communicate('withdraw\n', timeout=5)
+        assert flows.returncode == 0 and output.strip() == 'withdrawn-established-denied', diagnostics[:4096]
+        for address in ('1.1.1.1', '2606:4700:4700::1111'):
+            assert not probe(address, 8080, 'tcp') and not probe(address, 8081, 'udp'), 'withdrawal allowed new traffic'
+        evidence['withdrawalClosesExistingAndNewDualStackTraffic'] = True
         run('nft', '-f', '-', namespace='filter', input=rules['remove'])
         run('conntrack', '-F', namespace='filter')
         run('nft', '-f', '-', namespace='filter', input=rules['expiry']['install'])
@@ -289,6 +350,9 @@ def inside(sentry_enabled=False):
         assert not json.loads(run('nft', '-j', 'list', 'tables', namespace='filter'))['nftables'][1:], 'owned tables remain'
         evidence['ownedTablesRemoved'] = True
     finally:
+        if flows is not None and flows.poll() is None:
+            flows.terminate()
+            flows.wait(timeout=5)
         if sentry is not None and sentry.poll() is None:
             sentry.terminate()
             sentry.wait(timeout=5)
@@ -315,9 +379,9 @@ def main():
     if not args.image or not re.fullmatch(r'sha256:[0-9a-f]{64}', args.image):
         parser.error('--image must be an exact locally built sha256 image ID')
     root = Path(__file__).resolve().parents[2]
-    def compile_rules(ttl, connections=2):
-        return json.loads(subprocess.run([args.go, 'run', './scripts/network-policy/fixture-rules', '-ttl', ttl, '-connections', str(connections)], cwd=root, capture_output=True, text=True, check=True, timeout=60).stdout)
-    rules = compile_rules('5m')
+    def compile_rules(ttl, connections=2, refresh=False):
+        return json.loads(subprocess.run([args.go, 'run', './scripts/network-policy/fixture-rules', '-ttl', ttl, '-connections', str(connections), *(['-refresh'] if refresh else [])], cwd=root, capture_output=True, text=True, check=True, timeout=60).stdout)
+    rules = compile_rules('5m', refresh=True)
     if args.sentry:
         rules['sentry'] = compile_rules('5m', 16)
     rules['expiry'] = compile_rules('30s')
