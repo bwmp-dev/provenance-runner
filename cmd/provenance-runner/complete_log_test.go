@@ -443,7 +443,9 @@ func completeLogExportJob(t *testing.T, mode string) []byte {
 	}
 	timeout := int64(5_000)
 	if mode == "timeout" {
-		timeout = 50
+		// Allow a race-instrumented helper to start under concurrent compilation;
+		// this test still requires timeout classification and retained prior output.
+		timeout = 1_000
 	}
 	job, err := json.Marshal(localjob.Job{
 		SchemaVersion:       localjob.SchemaVersion,

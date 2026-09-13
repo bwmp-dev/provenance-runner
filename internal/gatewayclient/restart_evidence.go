@@ -55,6 +55,7 @@ type restartEvidenceMetadata struct {
 	Usage         execution.ResourceUsage `json:"usage"`
 	UsageObserved bool                    `json:"usageObserved"`
 	Failure       string                  `json:"failure,omitempty"`
+	Redacted      bool                    `json:"redacted,omitempty"`
 }
 
 type restartEvidenceCommand struct {
@@ -82,13 +83,15 @@ type restartEvidenceStore struct {
 }
 
 type restartEvidencePending struct {
-	mu            sync.Mutex
-	stdout        []byte
-	stderr        []byte
-	usage         execution.ResourceUsage
-	usageObserved bool
-	scheduled     bool
-	bytes         int64
+	stdoutRedacted bool
+	stderrRedacted bool
+	mu             sync.Mutex
+	stdout         []byte
+	stderr         []byte
+	usage          execution.ResourceUsage
+	usageObserved  bool
+	scheduled      bool
+	bytes          int64
 }
 
 type recoveredRestartEvidence struct {
@@ -301,6 +304,10 @@ func (store *restartEvidenceStore) applyPending() error {
 	store.pending.mu.Lock()
 	stdout := store.pending.stdout
 	stderr := store.pending.stderr
+	stdoutRedacted := store.pending.stdoutRedacted
+	stderrRedacted := store.pending.stderrRedacted
+	store.pending.stdoutRedacted = false
+	store.pending.stderrRedacted = false
 	usage := store.pending.usage
 	usageObserved := store.pending.usageObserved
 	store.pending.stdout = nil
@@ -321,10 +328,10 @@ func (store *restartEvidenceStore) applyPending() error {
 	}
 	var err error
 	if len(stdout) != 0 {
-		err = store.appendLocked("stdout", stdout)
+		err = store.appendLocked("stdout", stdout, stdoutRedacted)
 	}
 	if err == nil && len(stderr) != 0 {
-		err = store.appendLocked("stderr", stderr)
+		err = store.appendLocked("stderr", stderr, stderrRedacted)
 	}
 	if err == nil && usageObserved {
 		if usage.CPUTime < 0 {
@@ -343,7 +350,7 @@ func (store *restartEvidenceStore) applyPending() error {
 	return store.err
 }
 
-func (store *restartEvidenceStore) appendLocked(stream string, data []byte) error {
+func (store *restartEvidenceStore) appendLocked(stream string, data []byte, redacted bool) error {
 	path := store.stdoutPath
 	currentBytes := store.metadata.StdoutBytes
 	if stream == "stderr" {
@@ -376,6 +383,7 @@ func (store *restartEvidenceStore) appendLocked(stream string, data []byte) erro
 		_, _ = store.stderr.Write(data)
 		store.metadata.StderrSHA256 = hex.EncodeToString(store.stderr.Sum(nil))
 	}
+	store.metadata.Redacted = store.metadata.Redacted || redacted
 	return store.persistMetadata()
 }
 
@@ -439,7 +447,7 @@ func (store *restartEvidenceStore) observeLog(entry execution.LiveLogEntry) {
 	if store == nil || (entry.Stream != "stdout" && entry.Stream != "stderr") || len(entry.Data) == 0 {
 		return
 	}
-	store.enqueue(entry.Stream, entry.Data, nil)
+	store.enqueue(entry.Stream, entry.Data, entry.Redacted, nil)
 }
 
 func (store *restartEvidenceStore) observeUsage(usage execution.ResourceUsage) {
@@ -447,10 +455,10 @@ func (store *restartEvidenceStore) observeUsage(usage execution.ResourceUsage) {
 		return
 	}
 	copyUsage := usage
-	store.enqueue("", nil, &copyUsage)
+	store.enqueue("", nil, false, &copyUsage)
 }
 
-func (store *restartEvidenceStore) enqueue(stream string, data []byte, usage *execution.ResourceUsage) {
+func (store *restartEvidenceStore) enqueue(stream string, data []byte, redacted bool, usage *execution.ResourceUsage) {
 	store.closing.RLock()
 	defer store.closing.RUnlock()
 	if store.closed {
@@ -464,8 +472,10 @@ func (store *restartEvidenceStore) enqueue(stream string, data []byte, usage *ex
 		} else {
 			if stream == "stdout" {
 				store.pending.stdout = append(store.pending.stdout, data...)
+				store.pending.stdoutRedacted = store.pending.stdoutRedacted || redacted
 			} else if stream == "stderr" {
 				store.pending.stderr = append(store.pending.stderr, data...)
+				store.pending.stderrRedacted = store.pending.stderrRedacted || redacted
 			} else {
 				store.overflow.Store(true)
 			}
@@ -559,7 +569,8 @@ func (store *restartEvidenceStore) snapshot(ctx context.Context) (recoveredResta
 		return recoveredRestartEvidence{}, fmt.Errorf("rewind restart complete log: %w", err)
 	}
 	completeLog := &execution.CompleteLog{
-		State: "complete", ContentType: completeLogSourceContentType, ContentEncoding: completeLogSourceEncoding,
+		Redacted: store.metadata.Redacted,
+		State:    "complete", ContentType: completeLogSourceContentType, ContentEncoding: completeLogSourceEncoding,
 		SHA256: hex.EncodeToString(digest.Sum(nil)), UncompressedBytes: uncompressed, CompressedBytes: compressed.count, Archive: archive,
 	}
 	return recoveredRestartEvidence{CompleteLog: completeLog, Usage: resourceUsageMessage(store.metadata.Usage), Identity: store.metadata.Identity}, nil

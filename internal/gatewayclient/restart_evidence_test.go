@@ -45,6 +45,9 @@ func TestRestartEvidenceSurvivesProcessReopenWithExactLogAndMonotonicUsage(t *te
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closeCompleteLog(recovered.CompleteLog) })
+	if !recovered.CompleteLog.Redacted {
+		t.Fatal("restart lost durable redaction metadata")
+	}
 	if got := readRestartCompleteLog(t, recovered.CompleteLog); got != "[stdout]\nsafe line\n[stderr]\nsafe error\n" {
 		t.Fatalf("complete log = %q", got)
 	}
@@ -65,6 +68,45 @@ func TestRestartEvidenceSurvivesProcessReopenWithExactLogAndMonotonicUsage(t *te
 	info, err := os.Stat(restartEvidencePath(journalPath))
 	if err != nil || info.Mode().Perm() != restartEvidenceDirectoryMode {
 		t.Fatalf("evidence directory mode = %v, %v", info.Mode(), err)
+	}
+}
+
+func TestRestartRedactionMetadataKeepsLegacyFalseAndBothStreams(t *testing.T) {
+	for _, stream := range []string{"legacy", "stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			journalPath, active, offer := restartEvidenceFixture(t, time.Now().UTC())
+			store, err := createRestartEvidenceStore(journalPath, offer.GetJob().GetLease(), offer.GetJob().GetAttempt())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range []string{"stdout", "stderr"} {
+				store.observeLog(execution.LiveLogEntry{Stream: source, Data: []byte("literal [REDACTED]\n"), Redacted: stream == source})
+			}
+			store.observeUsage(execution.ResourceUsage{CPUTime: time.Millisecond})
+			if err := store.close(); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(filepath.Join(store.directory, "metadata.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stream == "legacy" && bytes.Contains(raw, []byte(`"redacted"`)) {
+				t.Fatal("legacy false must retain absent metadata")
+			}
+			reopened, err := openRestartEvidenceStore(journalPath, active)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.close()
+			got, err := reopened.snapshot(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeCompleteLog(got.CompleteLog)
+			if got.CompleteLog.Redacted != (stream != "legacy") {
+				t.Fatal("recovered flag inferred from marker or lost from stream")
+			}
+		})
 	}
 }
 

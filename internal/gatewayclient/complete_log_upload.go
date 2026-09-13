@@ -338,6 +338,7 @@ func (u *httpCompleteLogUploader) Upload(ctx context.Context, target *completeLo
 				return nil, errors.New("complete log upload did not consume the complete archive")
 			}
 			return &runnerv1.LogObject{
+				Redacted:            completeLog.Redacted,
 				ObjectKey:           target.objectKey,
 				Digest:              &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest},
 				CompressedSizeBytes: uint64(size),

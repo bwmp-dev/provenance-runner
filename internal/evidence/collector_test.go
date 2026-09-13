@@ -110,6 +110,9 @@ func TestCollectorRedactsSecretsAcrossChunks(t *testing.T) {
 	}
 
 	bundle := snapshot(t, collector)
+	if !bundle.CompleteLog.Redacted {
+		t.Fatal("archive lost collector redaction metadata")
+	}
 	want := "first=[REDACTED] second=[REDACTED] third=[REDACTED]\n"
 	if bundle.Stdout != want {
 		t.Fatalf("stdout = %q, want %q", bundle.Stdout, want)
@@ -118,6 +121,16 @@ func TestCollectorRedactsSecretsAcrossChunks(t *testing.T) {
 	for _, secret := range []string{"token", "token-123", "pässword"} {
 		if strings.Contains(complete, secret) {
 			t.Fatalf("complete log contains secret %q: %q", secret, complete)
+		}
+	}
+}
+
+func TestCompleteLogRedactionIsNotInferredFromMarkerOrSecretSelection(t *testing.T) {
+	for _, content := range []string{"plain output\n", "literal [REDACTED]\n"} {
+		collector := newTestCollector(t, Config{Secrets: []string{"never-emitted-secret"}})
+		writeChunks(t, collector, StreamStdout, []byte(content))
+		if snapshot(t, collector).CompleteLog.Redacted {
+			t.Fatal("redaction claimed without a collector match")
 		}
 	}
 }

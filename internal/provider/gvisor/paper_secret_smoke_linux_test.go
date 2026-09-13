@@ -201,7 +201,7 @@ func runPaperSecretCompositionSmoke(t *testing.T, provider *Provider, inputsRoot
 			if !strings.Contains(output.Stdout, "[REDACTED]") || strings.Contains(output.Stdout, "synthetic-paper-composition") || strings.Contains(live.text(), "synthetic-paper-composition") {
 				t.Fatal("composed Paper output not redacted")
 			}
-			if output.CompleteLog == nil || output.CompleteLog.Archive == nil {
+			if output.CompleteLog == nil || output.CompleteLog.Archive == nil || !output.CompleteLog.Redacted {
 				t.Fatal("composed complete log missing")
 			}
 			defer output.CompleteLog.Archive.Close()

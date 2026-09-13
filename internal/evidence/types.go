@@ -131,6 +131,7 @@ type StructuredEvent struct {
 
 type CompleteLog struct {
 	State             string
+	Redacted          bool
 	Truncated         bool
 	Error             string
 	ContentType       string

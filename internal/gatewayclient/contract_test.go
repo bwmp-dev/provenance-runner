@@ -19,6 +19,7 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 		{(&runnerv1.Capabilities{}).ProtoReflect().Descriptor(), "features", 16},
 		{(&runnerv1.DependencyInput{}).ProtoReflect().Descriptor(), "plugin_name", 10},
 		{(&runnerv1.ObjectUpload{}).ProtoReflect().Descriptor(), "object_key", 10},
+		{(&runnerv1.LogObject{}).ProtoReflect().Descriptor(), "redacted", 10},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "target_plugin_name", 20},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "job_correlation", 21},
 		{(&runnerv1.LeaseReconciliation{}).ProtoReflect().Descriptor(), "complete_log_upload", 16},
@@ -55,8 +56,8 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	// Toolkit v0.1.0-alpha.30, released and independently verified from green main.
-	const authority = "v0.0.0-20260913072252-2d4ae24ca251"
+	// Toolkit v0.1.0-alpha.33, released and independently verified from green main.
+	const authority = "v0.0.0-20260913152301-13922769f414"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)
