@@ -357,3 +357,41 @@ an arbitrary namespace. The production namespace helper, mapped-Sentry/provider
 composition, authenticated withdrawal propagation and measured activation remain
 required. Gateway/Paper network-v2 refusal and none-only runtime claims remain
 unchanged; no full WP-11A acceptance is claimed by this library/fixture change.
+
+## Retained child namespace ownership
+
+`RetainMappedChild` is an internal Linux boundary for the trusted controller's
+own direct, living child. It opens a pidfd before procfs access, retains the exact
+network/user namespace descriptors, and verifies kernel namespace types and
+ownership. The network namespace must belong to that child's mapped user
+namespace, whose parent must be the controller's user namespace. Neither may be
+the controller's own namespace. Current parent, all real/effective/saved/fs user
+and group IDs, two exact one-ID mappings, empty supplementary groups and denied
+setgroups are rechecked, along with pidfd liveness, on validation and duplication.
+
+Only an exact matching job handle can duplicate the retained network object;
+mutable namespace names or arbitrary caller paths are not accepted. Closing the
+handle releases references only, not a claim that a workload or route stopped.
+The caller still owns the process and route teardown, and must recheck current
+authority before attaching any route. Trusted mapping/job inputs do not replace
+authenticated policy, child creation, provider handoff or runtime measurement.
+
+The explicit disposable kernel fixture exercises retained-object identity,
+exited-child refusal, wrong job/mapping and supplementary-group refusal, inherited-controller namespace
+refusal, a grandchild with a foreign direct parent, descriptor cleanup after
+repeated refused captures, and close-without-workload-kill. Every case must pass
+three times; skipped kernel tests cannot count as acceptance. Ordinary local
+unit/race runs keep the privileged fixture disabled. CI retains the separate
+`namespace-acceptance.log` from `scripts/network-policy/namespace_acceptance.py`.
+No production namespace API, capability advertisement or network activation is
+introduced by this identity slice.
+
+Both live Sentry fixtures now create their child through the disposable
+`owned-sentry` controller using this same retained-object boundary. The outer
+fixture bind-mounts the retained descriptor and compares its device/inode; it no
+longer adopts the child namespace by a mutable PID pathname. The controller
+rechecks the live child before releasing the start barrier. Its group drop uses
+Go's all-thread syscall wrapper so fork identity cannot depend on the scheduler
+thread. iproute2's namespace mount directory is initialized before the retained
+bind to avoid recursively stacked mounts during later namespace creation.
+These fixtures still have no ambient network, host mounts or production inputs.

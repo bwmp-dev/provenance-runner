@@ -64,7 +64,10 @@ def inside(mode, sentry_enabled=False):
         return next(row['counter']['bytes'] for row in rows if 'counter' in row)
     evidence={}
     try:
-        for name in ('job','filter'):
+        # Let iproute2 initialize its namespace mount directory before binding
+        # the retained job object; otherwise its later recursive bind can stack
+        # a second mount over our job reference and prevent owned cleanup.
+        for name in ('filter','job'):
             if name == 'job' and sentry_enabled:
                 fixture=Path('/fixture');fixture.mkdir(mode=0o755)
                 for directory in ('bundle','state'):
@@ -81,10 +84,13 @@ def inside(mode, sentry_enabled=False):
                 (fixture/'bundle'/'config.json').write_text(json.dumps(spec))
                 for directory in ('bundle','state'):
                     os.chown(fixture/directory,65532,65532)
-                sentry=subprocess.Popen(['/usr/local/bin/network-sentry-fixture','parent'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                sentry=subprocess.Popen(['/owned-sentry'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
                 line=sentry.stdout.readline(4097)
                 assert line.endswith('\n') and len(line)<=4096, 'mapped namespace report missing'
-                pid=json.loads(line)['namespacePID']
+                identity=json.loads(line)
+                pid=identity['namespacePID']
+                reference=identity['networkReference']
+                assert re.fullmatch(r'/proc/[1-9][0-9]*/fd/[0-9]+',reference)
                 assert type(pid) is int and pid>1
                 status=Path(f'/proc/{pid}/status').read_text()
                 for kind in ('Uid','Gid'):
@@ -92,7 +98,12 @@ def inside(mode, sentry_enabled=False):
                 assert re.search(r'^Groups:[ \t]*$',status,re.M)
                 for kind in ('uid','gid'):
                     assert Path(f'/proc/{pid}/{kind}_map').read_text().split()==['0','65532','1','65534','65533','1']
-                run('ip','netns','attach',name,str(pid))
+                Path('/run/netns').mkdir(parents=True,exist_ok=True)
+                target=Path('/run/netns')/name
+                target.touch(mode=0o600,exist_ok=False)
+                run('mount','--bind',reference,str(target))
+                assert os.path.samestat(os.stat(reference),os.stat(target)), 'retained network object changed during attachment'
+                evidence['retainedOwnedChildNamespaceHandoff']=True
                 evidence['callerMappedNetworkNamespace']=True
             else:
                 run('ip','netns','add',name)
@@ -198,12 +209,17 @@ def main():
     with tempfile.TemporaryDirectory(prefix='provenance-dns-fixture-') as temporary:
         binary=Path(temporary)/'dns-fixture'
         subprocess.run([args.go,'build','-o',str(binary),'./scripts/network-policy/dns-fixture'],cwd=root,env=os.environ|{'CGO_ENABLED':'0'},check=True,timeout=180)
+        controller=Path(temporary)/'owned-sentry'
+        if args.sentry:
+            subprocess.run([args.go,'build','-o',str(controller),'./scripts/network-policy/owned-sentry'],cwd=root,env=os.environ|{'CGO_ENABLED':'0'},check=True,timeout=180)
         for mode in (('withdraw',) if args.sentry else ('expiry','withdraw')):
             container='provenance-dns-fixture-'+uuid.uuid4().hex
             try:
                 caps=[item for cap in ('NET_RAW','SETUID','SETGID','CHOWN','SYS_PTRACE') for item in ('--cap-add',cap)] if args.sentry else []
                 subprocess.run(['docker','create','--name',container,'--network','none','--memory','512m' if args.sentry else '128m','--cpus','1','--pids-limit','256' if args.sentry else '128','--cap-drop','ALL','--cap-add','NET_ADMIN','--cap-add','SYS_ADMIN','--cap-add','NET_BIND_SERVICE']+caps+['--security-opt','apparmor=unconfined','--security-opt','seccomp=unconfined','-e','PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1','--entrypoint','sleep',args.image,'180'],check=True,stdout=subprocess.DEVNULL,timeout=15)
                 subprocess.run(['docker','cp',str(binary),container+':/dns-fixture'],check=True,timeout=15)
+                if args.sentry:
+                    subprocess.run(['docker','cp',str(controller),container+':/owned-sentry'],check=True,timeout=15)
                 subprocess.run(['docker','cp',str(Path(__file__).resolve()),container+':/dns_acceptance.py'],check=True,timeout=15)
                 subprocess.run(['docker','start',container],check=True,stdout=subprocess.DEVNULL,timeout=15)
                 subprocess.run(['docker','exec',container,'python3','-B','/dns_acceptance.py','--inside',mode]+(['--sentry'] if args.sentry else []),check=True,timeout=60)
