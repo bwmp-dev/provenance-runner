@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -83,6 +82,7 @@ func (b Binding) ValidAt(now time.Time) bool {
 }
 
 var jobID = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+var numericAddressLabel = regexp.MustCompile(`^(?:[0-9]+|0x[0-9a-f]+)$`)
 
 func New(options Options, resolver Exchange) (*Binder, error) {
 	if !jobID.MatchString(options.JobID) || options.JobID == "00000000-0000-0000-0000-000000000000" || len(options.SensitiveNetworks) == 0 || len(options.SensitiveNetworks) > 256 {
@@ -182,11 +182,7 @@ func hostname(host string) bool {
 		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
-		if _, err := strconv.ParseUint(label, 0, 64); err != nil {
-			if _, err := strconv.ParseUint(label, 10, 64); err != nil {
-				numeric = false
-			}
-		}
+		numeric = numeric && numericAddressLabel.MatchString(label)
 		for _, c := range label {
 			if c >= 'a' && c <= 'z' {
 				letter = true

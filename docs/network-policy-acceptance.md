@@ -224,3 +224,26 @@ is enabled or authorized by this foundation.
 Firewall syntax follows the [nftables manual](https://netfilter.org/projects/nftables/manpage.html).
 The byte bucket semantics were checked against Linux's
 [nft_limit implementation](https://github.com/torvalds/linux/blob/master/net/netfilter/nft_limit.c).
+## Prepared workload DNS responses
+
+`WorkloadDNS` is a bounded responder over one immutable job binding snapshot,
+not a recursive resolver or an installed network service. Its constructor checks
+the same owned snapshot as the firewall compiler. A future actuator must publish
+it only after that exact firewall is installed, withdraw it before cleanup, and
+replace it only after a successful refresh that preserves traffic counters.
+No production caller, listener, namespace or firewall rule is enabled here.
+
+The responder never resolves a name on demand, follows a workload CNAME, accepts
+resolver overrides or grants an unlisted hostname. It answers only one IN A/AAAA
+question using already-bound addresses. All answers expire at the entire
+snapshot's earliest kernel-rounded deadline. Backward time, expiry and permanent
+withdrawal stop answers. Unsupported envelopes are refused; UDP responses are
+bounded to 512 bytes and TCP to 4096, with truncation instead of amplification.
+
+Tests cover both families, case-insensitive DNS questions, exact binding scope,
+kernel deadline rounding, immutable copies, malformed/trailing/oversized queries,
+bounded truncation and concurrent withdrawal. A bounded parser fuzz target is
+included. Numeric-address alternatives now use lexical matching rather than
+machine-width integer conversion, preventing oversized hex labels from evading
+the existing no-IP policy. Socket admission, actual controlled DNS packet paths,
+firewall publication/refresh coupling and mapped-Sentry acceptance remain pending.
