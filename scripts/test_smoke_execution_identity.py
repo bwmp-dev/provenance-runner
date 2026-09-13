@@ -35,6 +35,14 @@ class SmokeIdentityTests(unittest.TestCase):
                 with self.subTest(index=index, invalid=invalid), self.assertRaises(ValueError):
                     allocate(*args)
 
+    def test_measured_artifacts_and_staging_keep_distinct_execution_identity(self):
+        workflow = Path(__file__).resolve().parents[1].joinpath(".github/workflows/ci.yml").read_text()
+        for stem in ("measured-runtime", "runtime-generation", "runtime-generation-work"):
+            self.assertIn(stem + '-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${execution}', workflow)
+        for stem in ("measured-runtime", "runtime-generation"):
+            self.assertIn('name: ' + stem + '-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.PROVENANCE_MEASURED_EXECUTION }}', workflow)
+        self.assertNotIn('overwrite: true', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
