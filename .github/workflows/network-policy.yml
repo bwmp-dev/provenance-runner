@@ -33,6 +33,14 @@ jobs:
           [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
           python3 -B scripts/network-policy/acceptance.py --image "$image" \
             2>&1 | tee "${evidence}/packet-acceptance.log"
+      - name: Exercise controlled DNS packets and firewall lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(< "${PROVENANCE_NETWORK_EVIDENCE}/fixture-image.txt")
+          [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
+          python3 -B scripts/network-policy/dns_acceptance.py --image "$image" \
+            2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/dns-acceptance.log"
       - name: Exercise caller-mapped Sentry through isolated routed policy
         shell: bash
         run: |

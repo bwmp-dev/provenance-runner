@@ -269,3 +269,30 @@ Unprivileged real loopback tests exercise UDP/TCP responses, exact peer refusal,
 oversized TCP framing, a partial frame during cancellation, shared response
 limits and post-cancellation withdrawal. They prove transport behavior only;
 actual namespace/firewall coupling and Sentry workload traffic are not yet proven.
+
+## Disposable controlled DNS packet acceptance
+
+`CompileFirewallWithDNS` is an explicit variant; the original compiler remains
+unchanged. It adds only job0 traffic from 10.0.1.2 to 10.0.1.1:53 over UDP/TCP and
+tracked replies. Workload DNS can return either address family through that
+single controlled endpoint. It opens no arbitrary resolver or management port.
+Input, output and forwarding share the same finite byte and connection objects.
+Refresh replaces all three rule chains atomically while retaining those objects;
+withdrawal empties all three chains and preserves their default-drop policies.
+
+`scripts/network-policy/dns_acceptance.py` runs actual query packets in newly
+created no-network containers, with no host mounts, published ports, Docker socket
+or production access. A fixture-only controller refuses the container's initial
+network namespace, installs the compiled firewall before starting DNS, and
+coordinates refresh/withdrawal. Both A/AAAA answers over UDP/TCP, unknown names,
+unsupported types, a previously reachable non-DNS port and spoofed source are
+tested. The test checks preserved shared counters, answers past the old deadline
+after renewal, denial at the new kernel deadline, all-chain withdrawal, refused
+resume and exact table cleanup. Two fresh containers separate expiry and
+withdrawal scenarios. The pinned existing Alpine fixture image is reused.
+
+Local disposable packet acceptance passed both scenarios on 2026-09-13. CI now
+retains its output alongside the existing routed-packet and mapped-Sentry tests.
+This is actual kernel/DNS fixture evidence, not production actuator integration
+or proof of DNS from inside the Sentry workload. Those remain required before
+advertising or activating workload network support.
