@@ -42,13 +42,13 @@ while True:
 '''
 
 
-def inside(mode):
+def inside(mode, sentry_enabled=False):
     assert Path('/.dockerenv').is_file() and os.environ.get('PROVENANCE_DISPOSABLE_NETWORK_FIXTURE') == '1'
     def run(*args, namespace=None, **kw):
         return subprocess.check_output((['ip','netns','exec',namespace] if namespace else [])+list(args), text=True, timeout=10, **kw)
     assert [link['ifname'] for link in json.loads(run('ip','-j','link'))] == ['lo']
     owned=[]
-    service=echo=None
+    service=echo=sentry=None
     table='pv_10000000000040008000000000000001'
     def probe(kind=1, transport='udp', host='fixture.example.com', source='10.0.1.2', port=53):
         return json.loads(run('python3','-B','-c',CLIENT,str(kind),transport,host,source,str(port),namespace='job'))
@@ -65,7 +65,38 @@ def inside(mode):
     evidence={}
     try:
         for name in ('job','filter'):
-            run('ip','netns','add',name);owned.append(name)
+            if name == 'job' and sentry_enabled:
+                fixture=Path('/fixture');fixture.mkdir(mode=0o755)
+                for directory in ('bundle','state'):
+                    (fixture/directory).mkdir(mode=0o755)
+                spec={
+                    'ociVersion':'1.0.2', 'root':{'path':'/guestroot','readonly':True},
+                    'process':{'terminal':False,'user':{'uid':65532,'gid':65532},
+                        'args':['/smoke','dns-probe'],'env':['PATH=/'],'cwd':'/',
+                        'noNewPrivileges':True,
+                        'capabilities':{key:[] for key in ('bounding','effective','inheritable','permitted','ambient')},
+                        'rlimits':[{'type':'RLIMIT_NOFILE','hard':1024,'soft':1024}]},
+                    'linux':{'namespaces':[{'type':kind} for kind in ('pid','ipc','uts','mount')]+[{'type':'network','path':'/proc/self/ns/net'}]},
+                    'mounts':[]}
+                (fixture/'bundle'/'config.json').write_text(json.dumps(spec))
+                for directory in ('bundle','state'):
+                    os.chown(fixture/directory,65532,65532)
+                sentry=subprocess.Popen(['/usr/local/bin/network-sentry-fixture','parent'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                line=sentry.stdout.readline(4097)
+                assert line.endswith('\n') and len(line)<=4096, 'mapped namespace report missing'
+                pid=json.loads(line)['namespacePID']
+                assert type(pid) is int and pid>1
+                status=Path(f'/proc/{pid}/status').read_text()
+                for kind in ('Uid','Gid'):
+                    assert re.search(r'^'+kind+r':\s+65532\s+65532\s+65532\s+65532$',status,re.M)
+                assert re.search(r'^Groups:[ \t]*$',status,re.M)
+                for kind in ('uid','gid'):
+                    assert Path(f'/proc/{pid}/{kind}_map').read_text().split()==['0','65532','1','65534','65533','1']
+                run('ip','netns','attach',name,str(pid))
+                evidence['callerMappedNetworkNamespace']=True
+            else:
+                run('ip','netns','add',name)
+            owned.append(name)
             run('ip','link','set','lo','up',namespace=name)
         run('ip','link','add','left','type','veth','peer','name','right')
         for ns,old,new,address in (('job','left','eth0','10.0.1.2'),('filter','right','job0','10.0.1.1')):
@@ -80,8 +111,24 @@ def inside(mode):
         echo=subprocess.Popen(['ip','netns','exec','filter','python3','-u','-B','-c',ECHO],stdout=subprocess.PIPE,text=True)
         assert echo.stdout.readline().strip()=='ready'
         assert probe(port=54)['echo'] and probe(source='10.0.1.99',port=54)['echo'], 'unfiltered negative destinations unreachable'
-        service=subprocess.Popen(['ip','netns','exec','filter','/dns-fixture'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        service=subprocess.Popen(['ip','netns','exec','filter','/dns-fixture','-ttl','30s' if sentry_enabled else '8s'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         first=report();assert first['phase']=='ready'
+        if sentry_enabled:
+            output,errors=sentry.communicate('start',timeout=20)
+            assert sentry.returncode==0, errors[:4096]
+            result=json.loads(output)
+            expected={'nonRootGuest','udpip4','udpip6','tcpip4','tcpip6','udpUnlistedDenied','tcpUnlistedDenied'}
+            assert set(result)==expected and all(value is True for value in result.values()), result
+            evidence['nonRootSentryBoundDNSBothFamiliesBothTransports']=True
+            # runsc transfers interface addresses into its userspace netstack.
+            # After its verified exit, restore only this disposable client's
+            # addresses for the independent kernel lifecycle probes below.
+            # The installed filter namespace/rules/counters are unchanged.
+            for address in ('10.0.1.2','10.0.1.99'):
+                run('ip','addr','replace',address+'/24','dev','eth0',namespace='job')
+            run('ip','link','set','eth0','up',namespace='job')
+            mac=json.loads(run('ip','-j','link','show','job0',namespace='filter'))[0]['address']
+            run('ip','neigh','replace','10.0.1.1','lladdr',mac,'nud','permanent','dev','eth0',namespace='job')
         for kind,transport in ((1,'udp'),(28,'udp'),(1,'tcp'),(28,'tcp')):
             got=probe(kind,transport);assert got.get('rcode')==0 and got.get('answers')==1, got
         assert probe(host='unlisted.example.com').get('rcode')==5
@@ -120,34 +167,39 @@ def inside(mode):
         remaining=json.loads(run('nft','-j','list','tables',namespace='filter'))['nftables']
         assert not any('table' in row for row in remaining), 'fixture table not removed'
         evidence['ownedTableRemoved']=True
-        print(json.dumps(evidence,sort_keys=True))
     finally:
-        for process in (service,echo):
+        for process in (sentry,service,echo):
             if process is not None and process.poll() is None:
                 process.kill();process.wait(timeout=5)
         for ns in reversed(owned):
             run('ip','netns','delete',ns)
+    assert not run('ip','netns','list').strip(), 'owned namespace cleanup incomplete'
+    evidence['ownedNamespacesRemoved']=True
+    print(json.dumps(evidence,sort_keys=True))
 
 
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--image');parser.add_argument('--inside',choices=('expiry','withdraw'));parser.add_argument('--go',default='go')
+    parser.add_argument('--sentry',action='store_true')
     args=parser.parse_args()
     if args.inside:
-        inside(args.inside);return
+        assert not args.sentry or args.inside=='withdraw'
+        inside(args.inside,args.sentry);return
     assert args.image and re.fullmatch(r'sha256:[0-9a-f]{64}',args.image), 'pinned local fixture image required'
     root=Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix='provenance-dns-fixture-') as temporary:
         binary=Path(temporary)/'dns-fixture'
         subprocess.run([args.go,'build','-o',str(binary),'./scripts/network-policy/dns-fixture'],cwd=root,env=os.environ|{'CGO_ENABLED':'0'},check=True,timeout=180)
-        for mode in ('expiry','withdraw'):
+        for mode in (('withdraw',) if args.sentry else ('expiry','withdraw')):
             container='provenance-dns-fixture-'+uuid.uuid4().hex
             try:
-                subprocess.run(['docker','create','--name',container,'--network','none','--memory','128m','--cpus','1','--pids-limit','128','--cap-drop','ALL','--cap-add','NET_ADMIN','--cap-add','SYS_ADMIN','--cap-add','NET_BIND_SERVICE','--security-opt','apparmor=unconfined','--security-opt','seccomp=unconfined','-e','PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1','--entrypoint','sleep',args.image,'180'],check=True,stdout=subprocess.DEVNULL,timeout=15)
+                caps=[item for cap in ('NET_RAW','SETUID','SETGID','CHOWN','SYS_PTRACE') for item in ('--cap-add',cap)] if args.sentry else []
+                subprocess.run(['docker','create','--name',container,'--network','none','--memory','512m' if args.sentry else '128m','--cpus','1','--pids-limit','256' if args.sentry else '128','--cap-drop','ALL','--cap-add','NET_ADMIN','--cap-add','SYS_ADMIN','--cap-add','NET_BIND_SERVICE']+caps+['--security-opt','apparmor=unconfined','--security-opt','seccomp=unconfined','-e','PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1','--entrypoint','sleep',args.image,'180'],check=True,stdout=subprocess.DEVNULL,timeout=15)
                 subprocess.run(['docker','cp',str(binary),container+':/dns-fixture'],check=True,timeout=15)
                 subprocess.run(['docker','cp',str(Path(__file__).resolve()),container+':/dns_acceptance.py'],check=True,timeout=15)
                 subprocess.run(['docker','start',container],check=True,stdout=subprocess.DEVNULL,timeout=15)
-                subprocess.run(['docker','exec',container,'python3','-B','/dns_acceptance.py','--inside',mode],check=True,timeout=60)
+                subprocess.run(['docker','exec',container,'python3','-B','/dns_acceptance.py','--inside',mode]+(['--sentry'] if args.sentry else []),check=True,timeout=60)
             finally:
                 subprocess.run(['docker','rm','-f',container],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/netip"
@@ -55,6 +56,11 @@ func main() {
 	}
 }
 func run() (result error) {
+	ttl := flag.Duration("ttl", 8*time.Second, "disposable snapshot lifetime")
+	flag.Parse()
+	if flag.NArg() != 0 || (*ttl != 8*time.Second && *ttl != 30*time.Second) {
+		return errors.New("unsupported fixture lifetime")
+	}
 	if os.Getuid() != 0 || os.Getenv("PROVENANCE_DISPOSABLE_NETWORK_FIXTURE") != "1" {
 		return errors.New("disposable controller required")
 	}
@@ -73,7 +79,7 @@ func run() (result error) {
 		return errors.New("dedicated fixture network namespace required")
 	}
 	job := "10000000-0000-4000-8000-000000000001"
-	binder, err := networkpolicy.New(networkpolicy.Options{JobID: job, Mode: "allowlist", Permissions: []networkpolicy.Permission{{Hostname: "fixture.example.com", Port: 8080, Protocol: "tcp"}}, Limits: networkpolicy.Limits{Connections: 32, BytesPerSecond: 65536}, SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: 8 * time.Second}, fixtureResolver{})
+	binder, err := networkpolicy.New(networkpolicy.Options{JobID: job, Mode: "allowlist", Permissions: []networkpolicy.Permission{{Hostname: "fixture.example.com", Port: 8080, Protocol: "tcp"}}, Limits: networkpolicy.Limits{Connections: 32, BytesPerSecond: 65536}, SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: *ttl}, fixtureResolver{})
 	if err != nil {
 		return err
 	}

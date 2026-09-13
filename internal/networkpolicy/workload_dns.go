@@ -53,7 +53,7 @@ func (d *WorkloadDNS) Answer(raw []byte, tcp bool, now time.Time) ([]byte, error
 		return nil, ErrDNS
 	}
 	var query dnsmessage.Message
-	if query.Unpack(raw) != nil || query.Response || query.OpCode != 0 || query.Truncated || query.RCode != 0 || query.Authoritative || query.RecursionAvailable || query.AuthenticData || len(query.Questions) != 1 || len(query.Answers) != 0 || len(query.Authorities) != 0 || len(query.Additionals) != 0 {
+	if query.Unpack(raw) != nil || query.Response || query.OpCode != 0 || query.Truncated || query.RCode != 0 || query.Authoritative || query.RecursionAvailable || query.AuthenticData || len(query.Questions) != 1 || len(query.Answers) != 0 || len(query.Authorities) != 0 || !emptyEDNS(query.Additionals) {
 		return nil, ErrDNS
 	}
 	question := query.Questions[0]
@@ -98,4 +98,19 @@ func (d *WorkloadDNS) Answer(raw []byte, tcp bool, now time.Time) ([]byte, error
 		return nil, ErrDNS
 	}
 	return encoded, nil
+}
+
+// Standard resolvers advertise UDP capacity with an empty EDNS0 OPT record.
+// Accept that envelope only; options, flags and larger answer budgets remain
+// unsupported. The response keeps the conservative 512-byte UDP limit.
+func emptyEDNS(records []dnsmessage.Resource) bool {
+	if len(records) == 0 {
+		return true
+	}
+	if len(records) != 1 {
+		return false
+	}
+	r := records[0]
+	opt, ok := r.Body.(*dnsmessage.OPTResource)
+	return ok && opt != nil && len(opt.Options) == 0 && r.Header.Name.String() == "." && r.Header.Type == dnsmessage.TypeOPT && r.Header.Class >= 512 && r.Header.Class <= 4096 && r.Header.TTL == 0
 }

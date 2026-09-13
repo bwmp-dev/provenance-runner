@@ -294,5 +294,28 @@ withdrawal scenarios. The pinned existing Alpine fixture image is reused.
 Local disposable packet acceptance passed both scenarios on 2026-09-13. CI now
 retains its output alongside the existing routed-packet and mapped-Sentry tests.
 This is actual kernel/DNS fixture evidence, not production actuator integration
-or proof of DNS from inside the Sentry workload. Those remain required before
-advertising or activating workload network support.
+or proof of DNS from inside the Sentry workload. The following fixture covers
+that separate boundary; production integration remains required before activation.
+
+## Non-root Sentry controlled DNS acceptance
+
+The disposable DNS fixture also runs the pinned Sentry in a verified caller-mapped
+network/user namespace. Its UID/EUID 65532 guest uses Go's standard resolver against
+the owned DNS endpoint and checks exact A and AAAA bindings over UDP and TCP, plus
+denial of unlisted names on both transports. The responder accepts only an empty
+EDNS0 capacity advertisement (512–4096); options, flags, versions, duplicate OPTs,
+and arbitrary additional records remain rejected. UDP answers remain bounded to
+512 bytes regardless of that advertisement.
+
+After Sentry exits successfully, the disposable controller restores only the job
+client interface addresses that runsc transferred into its netstack. Separate
+kernel clients then prove shared-counter-preserving refresh, all-chain withdrawal,
+permanent refresh refusal, table removal and namespace cleanup. These latter
+lifecycle probes are not represented as guest-in-Sentry withdrawal evidence.
+The Sentry case uses a bounded 30-second snapshot; the separate kernel expiry case
+continues to use eight seconds. Neither fixture installs a production actuator,
+advertises runner feature 9, nor enables production networking.
+
+Run `scripts/network-policy/dns_acceptance.py --image <verified-image-sha> --sentry`
+with the image built from `scripts/network-policy/Dockerfile.sentry`. CI retains
+the separate `sentry-dns-acceptance.log` alongside the exact source/image evidence.

@@ -35,6 +35,58 @@ func workloadQuery(t *testing.T, host string, family dnsmessage.Type) []byte {
 	return raw
 }
 
+func TestWorkloadDNSEmptyEDNSOnly(t *testing.T) {
+	view, _, now := workloadDNSFixture(t)
+	for _, test := range []struct {
+		name    string
+		change  func(*dnsmessage.Message)
+		allowed bool
+	}{
+		{"standard1232", func(*dnsmessage.Message) {}, true},
+		{"minimum512", func(m *dnsmessage.Message) { m.Additionals[0].Header.Class = 512 }, true},
+		{"maximum4096", func(m *dnsmessage.Message) { m.Additionals[0].Header.Class = 4096 }, true},
+		{"tooSmall", func(m *dnsmessage.Message) { m.Additionals[0].Header.Class = 511 }, false},
+		{"tooLarge", func(m *dnsmessage.Message) { m.Additionals[0].Header.Class = 4097 }, false},
+		{"flags", func(m *dnsmessage.Message) { m.Additionals[0].Header.TTL = 32768 }, false},
+		{"version", func(m *dnsmessage.Message) { m.Additionals[0].Header.TTL = 65536 }, false},
+		{"extendedCode", func(m *dnsmessage.Message) { m.Additionals[0].Header.TTL = 1 << 24 }, false},
+		{"nonRoot", func(m *dnsmessage.Message) { m.Additionals[0].Header.Name = dnsName("api.example.com") }, false},
+		{"option", func(m *dnsmessage.Message) {
+			m.Additionals[0].Body = &dnsmessage.OPTResource{Options: []dnsmessage.Option{{Code: 8, Data: []byte{1}}}}
+		}, false},
+		{"duplicate", func(m *dnsmessage.Message) { m.Additionals = append(m.Additionals, m.Additionals[0]) }, false},
+		{"address", func(m *dnsmessage.Message) {
+			m.Additionals[0].Header.Type = dnsmessage.TypeA
+			m.Additionals[0].Body = &dnsmessage.AResource{A: [4]byte{1, 1, 1, 1}}
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var query dnsmessage.Message
+			if err := query.Unpack(workloadQuery(t, "api.example.com", dnsmessage.TypeA)); err != nil {
+				t.Fatal(err)
+			}
+			query.Additionals = []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName("."), Type: dnsmessage.TypeOPT, Class: 1232}, Body: &dnsmessage.OPTResource{}}}
+			test.change(&query)
+			raw, err := query.Pack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tcp := range []bool{false, true} {
+				answer, err := view.Answer(raw, tcp, now)
+				if (err == nil) != test.allowed {
+					t.Fatalf("allowed=%v err=%v", test.allowed, err)
+				}
+				if test.allowed {
+					var response dnsmessage.Message
+					if response.Unpack(answer) != nil || len(answer) > 512 || len(response.Answers) != 1 || len(response.Additionals) != 0 {
+						t.Fatal("EDNS expanded response authority")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestWorkloadDNSBoundSnapshotAndWithdrawal(t *testing.T) {
 	view, binding, now := workloadDNSFixture(t)
 	for _, family := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {

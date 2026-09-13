@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,6 +57,39 @@ func main() {
 		}
 		args := []string{"runsc", "--root=/fixture/state", "--rootless=false", "--ignore-cgroups=true", "--network=sandbox", "--platform=systrap", "--overlay2=none", "--directfs=false", "--file-access=exclusive", "--file-access-mounts=exclusive", "--gofer-network-namespace=new", "--net-raw=false", "--host-uds=none", "--host-fifo=none", "--allow-suid=false", "--character-device-policy=emulated-only", "run", "--bundle=/fixture/bundle", "network-fixture"}
 		if err := syscall.Exec("/opt/gvisor/runsc", args, os.Environ()); err != nil {
+			panic(err)
+		}
+	case "dns-probe":
+		if os.Getuid() != 65532 || os.Geteuid() != 65532 {
+			panic("non-root guest required")
+		}
+		result := map[string]bool{"nonRootGuest": true}
+		for _, transport := range []string{"udp", "tcp"} {
+			resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, transport, "10.0.1.1:53")
+			}}
+			for _, family := range []string{"ip4", "ip6"} {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				addresses, err := resolver.LookupIP(ctx, family, "fixture.example.com.")
+				cancel()
+				want := "1.1.1.1"
+				if family == "ip6" {
+					want = "2606:4700:4700::1111"
+				}
+				if err != nil || len(addresses) != 1 || addresses[0].String() != want {
+					panic("Sentry DNS binding failed: " + transport + family)
+				}
+				result[transport+family] = true
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			addresses, err := resolver.LookupIP(ctx, "ip4", "unlisted.example.com.")
+			cancel()
+			if err == nil || len(addresses) != 0 {
+				panic("Sentry DNS unlisted hostname answered")
+			}
+			result[transport+"UnlistedDenied"] = true
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 			panic(err)
 		}
 	case "probe":
