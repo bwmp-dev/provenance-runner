@@ -1,0 +1,16 @@
+# Disposable caller-mapped Sentry acceptance only; never a production runtime image.
+FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS build
+COPY sentry/main.go /src/main.go
+RUN CGO_ENABLED=0 GO111MODULE=off go build -trimpath -o /network-sentry-fixture /src/main.go
+
+FROM python:3.13.7-alpine@sha256:9ba6d8cbebf0fb6546ae71f2a1c14f6ffd2fdab83af7fa5669734ef30ad48844
+RUN apk add --no-cache nftables iproute2 conntrack-tools curl
+RUN curl --fail --location --silent --show-error \
+    https://storage.googleapis.com/gvisor/releases/nightly/2026-08-30/x86_64/gvisor.tar.bz2 \
+    -o /tmp/gvisor.tar.bz2 \
+    && echo 'e8eb6473e5a27316df551cbb40e5626e51df1b602bde2621f77d851c2c53b0387e282c7ebc0ee80ceb07a26e152e67b4af3e17550009e2c486e2f19666570449  /tmp/gvisor.tar.bz2' | sha512sum -c - \
+    && mkdir /opt/gvisor \
+    && tar -xjf /tmp/gvisor.tar.bz2 -C /opt/gvisor
+COPY --from=build /network-sentry-fixture /usr/local/bin/network-sentry-fixture
+COPY --from=build /network-sentry-fixture /guestroot/smoke
+ENTRYPOINT ["python3", "-B"]
