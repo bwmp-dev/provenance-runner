@@ -247,3 +247,25 @@ included. Numeric-address alternatives now use lexical matching rather than
 machine-width integer conversion, preventing oversized hex labels from evading
 the existing no-IP policy. Socket admission, actual controlled DNS packet paths,
 firewall publication/refresh coupling and mapped-Sentry acceptance remain pending.
+
+## Owned DNS transport
+
+The transport follow-on adds `ServeOwnedDNS` over already-open UDP/TCP sockets
+supplied by the trusted actuator. It does not call Listen, enter a namespace or
+infer isolation from an IP address. The actuator remains responsible for exact
+namespace ownership and successful firewall installation before exposure.
+Validation requires matching non-wildcard endpoints and an explicit bounded list
+of exact job peer addresses. Invalid arguments leave socket ownership with the
+caller; successful admission transfers ownership to the server.
+
+UDP/TCP share a finite 64-request/second-window admission budget. TCP additionally
+allows at most eight active connections, one query per connection and a one-second
+read/write deadline. Oversized frames are rejected before payload allocation.
+Cancellation or failure of either socket loop permanently withdraws the DNS view,
+closes both listeners and all active connections, and joins the workers before
+returning. No log or error reflects query contents or upstream credentials.
+
+Unprivileged real loopback tests exercise UDP/TCP responses, exact peer refusal,
+oversized TCP framing, a partial frame during cancellation, shared response
+limits and post-cancellation withdrawal. They prove transport behavior only;
+actual namespace/firewall coupling and Sentry workload traffic are not yet proven.
