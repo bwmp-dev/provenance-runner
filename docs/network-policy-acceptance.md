@@ -395,3 +395,46 @@ Go's all-thread syscall wrapper so fork identity cannot depend on the scheduler
 thread. iproute2's namespace mount directory is initialized before the retained
 bind to avoid recursively stacked mounts during later namespace creation.
 These fixtures still have no ambient network, host mounts or production inputs.
+
+## Retained namespace firewall actuator
+
+`RetainedRoute` operates only on the retained routing-child object, with a
+separate owned workload child and distinct mapped host identities. Admission
+rechecks both children and the routing topology (only loopback and the two live
+veth endpoints `job0`/`wan0`), refuses pre-existing tables, and checks child
+liveness again after installation or renewal. It never enters a namespace on the
+controller thread or looks up a namespace by a mutable process/name pathname.
+
+The internal route interface now binds an exact job ID and accepts only sealed
+compiler/lifecycle changes, not caller-created nft text. A mismatched session is
+refused before actuation or cleanup. Root-owned, non-setuid, non-group-writable
+ELF tools are retained through read-only descriptors and rehashed against trusted
+operator digests before execution. Namespace/tool descriptors are explicitly
+passed to a no-fork subprocess with fixed arguments and no ambient PATH or shell.
+Output and operation time are bounded; raw command diagnostics are discarded.
+
+Withdrawal is irreversible. Cleanup can still disconnect and remove the owned
+table through the retained namespace after its router child exits; an expired
+PID cannot select a replacement namespace. Table removal requires successful
+disconnection. Closing descriptors alone still claims no process or peer-wiring
+teardown. Namespace/helper creation, trusted executable provisioning, current
+gateway authority, complete provider composition and measured activation remain
+separate requirements; no production endpoint or capability is enabled here.
+
+The disposable kernel acceptance installs and renews actual nft rules through
+this backend, then verifies route-down/table removal, including router-child exit
+and replacement of an executable pathname after its original object was retained.
+The controller's firewall must remain unchanged. Wrong job, tool digest, writable
+executable descriptor and zero changes are refused. The ordinary lifecycle race
+tests and live Sentry DNS tests also exercise the sealed-change interface.
+
+The separate `namespace_acceptance.py --sentry` mode drives this same retained
+actuator with a live non-root gVisor guest, not replayed shell-generated batches.
+Three repeated fresh topologies require IPv4/IPv6 TCP/UDP allow/deny checks,
+established flows surviving a real renewal, then existing and new flows denied
+after withdrawal while the endpoint server remains alive. Cleanup checks all
+three retained namespaces for leftover tables. The fixture uses only a fresh
+network-disabled container, mapped children, private proc mount and owned files;
+it exposes no host mounts, credentials, socket or external network. CI retains
+the separate `native-sentry-actuation.log` exact-head report. This remains a
+disposable composition test, not production runtime measurement or activation.

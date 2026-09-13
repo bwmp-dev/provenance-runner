@@ -71,6 +71,8 @@ jobs:
             2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/sentry-acceptance.log"
           python3 -B scripts/network-policy/dns_acceptance.py --image "$image" --sentry \
             2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/sentry-dns-acceptance.log"
+          python3 -B scripts/network-policy/namespace_acceptance.py --image "$image" --sentry \
+            2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/native-sentry-actuation.log"
       - name: Retain exact-head disposable packet evidence
         if: always() && env.PROVENANCE_NETWORK_EVIDENCE != ''
         uses: actions/upload-artifact@v4
