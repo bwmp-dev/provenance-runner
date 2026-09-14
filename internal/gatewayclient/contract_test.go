@@ -23,6 +23,7 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "target_plugin_name", 20},
 		{(&runnerv1.JobSpecification{}).ProtoReflect().Descriptor(), "job_correlation", 21},
 		{(&runnerv1.LeaseReconciliation{}).ProtoReflect().Descriptor(), "complete_log_upload", 16},
+		{(&runnerv1.LeaseReconciliation{}).ProtoReflect().Descriptor(), "network_authority_v2", 17},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "event_acknowledgement", 30},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "heartbeat_acknowledgement", 31},
 		{(&runnerv1.GatewayMessage{}).ProtoReflect().Descriptor(), "credential_rotation", 15},
@@ -53,11 +54,14 @@ func TestProtocolContractFieldNumbersAndFeatures(t *testing.T) {
 	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY.Number() != 5 {
 		t.Fatalf("object upload identity feature = %d, want 5", runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY.Number())
 	}
+	if runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2.Number() != 10 {
+		t.Fatal("current-authority profile number changed")
+	}
 }
 
 func TestExpectedProtocolModuleAuthority(t *testing.T) {
-	// Toolkit v0.1.0-alpha.33, released and independently verified from green main.
-	const authority = "v0.0.0-20260913152301-13922769f414"
+	// Toolkit v0.1.0-alpha.34, released and independently verified from green main.
+	const authority = "v0.0.0-20260914002628-0975f9931a40"
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)
