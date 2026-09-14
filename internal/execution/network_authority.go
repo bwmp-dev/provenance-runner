@@ -52,6 +52,8 @@ func SuperviseNetworkAuthority(ctx context.Context, job *p.JobSpecification, gua
 		select {
 		case <-guard.Done():
 			cancel(ErrNetworkAuthorityLost)
+		case <-ctx.Done():
+			_ = guard.Withdraw()
 		case <-finished:
 		}
 	}()
@@ -63,7 +65,7 @@ func SuperviseNetworkAuthority(ctx context.Context, job *p.JobSpecification, gua
 	lost := errors.Is(context.Cause(worker), ErrNetworkAuthorityLost)
 	select {
 	case <-guard.Done():
-		lost = true
+		lost = lost || ctx.Err() == nil
 	default:
 	}
 	if lost && (result.Cleanup == nil || result.Cleanup.Succeeded) {

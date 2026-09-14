@@ -22,6 +22,7 @@ import (
 const maximumRememberedGatewayMessageIDs = 4096
 
 type clientSession struct {
+	networkFeatures               []runnerv1.ProtocolFeature
 	testSecretsV1                 bool
 	pendingSecret                 *pendingSecretRequest
 	client                        *Client
@@ -333,6 +334,9 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 	if err := validatePendingReconciliation(pending, reconciliation, state); err != nil {
 		return permanent("event acknowledgement: %v", err)
 	}
+	if err := s.consumeNetworkAuthority(reconciliation); err != nil {
+		return err
+	}
 	terminal := terminalLeaseStatus(reconciliation.GetStatus())
 	cancelling := !terminal && reconciliation.GetCancellationId() != ""
 	if cancelling {
@@ -372,6 +376,12 @@ func (s *clientSession) handleEventAcknowledgement(acknowledgement *runnerv1.Run
 		if err := s.applyAuthoritativeReconciliation(reconciliation); err != nil {
 			return err
 		}
+	}
+	if activeMatches && !terminal && s.client.networkAuthorityStopped() && pending.GetCompleted() == nil && pending.GetFailed() == nil && pending.GetCancelled() == nil {
+		if err := s.clearPendingAcknowledged(pending, state.Active); err != nil {
+			return err
+		}
+		return s.advance(now)
 	}
 	if reconciliation.GetDisposition() == runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE {
 		if err := s.clearPendingAcknowledged(pending, state.Active); err != nil {
@@ -566,6 +576,9 @@ func (s *clientSession) handleSettledEventAcknowledgement(settled settledRunnerE
 }
 
 func (s *clientSession) applyLateReconciliation(reconciliation *runnerv1.LeaseReconciliation, now time.Time) error {
+	if err := s.consumeNetworkAuthority(reconciliation); err != nil {
+		return err
+	}
 	state := s.client.journal.snapshot()
 	if state.Active == nil || !activeMatchesIdentity(state.Active, reconciliation.GetLease(), reconciliation.GetAttempt()) {
 		if reconciliation.GetCompleteLogUpload() != nil {
@@ -950,6 +963,15 @@ func (s *clientSession) advance(now time.Time) error {
 	}
 	if len(state.PendingMessage) != 0 {
 		return nil
+	}
+	if s.client.networkAuthorityStopped() {
+		if s.client.isWorkerRunning() {
+			return nil
+		}
+		if s.client.hasDeferredWorkerEvents() {
+			return s.drainDeferred(now)
+		}
+		return s.queueNetworkAuthorityFailure(now)
 	}
 	if (state.Active.Phase == runnerv1.JobPhase_JOB_PHASE_PREPARING || state.Active.Phase == runnerv1.JobPhase_JOB_PHASE_RUNNING) && state.Active.ExpiresAt.Sub(now) <= s.authenticated.GetLeaseDuration().AsDuration()/2 {
 		return s.queueRenewal(now)
@@ -1470,10 +1492,11 @@ func (c *Client) discardQueuedWorkerEvents(reason error) {
 
 func (c *Client) stopWorker(_ error) {
 	c.workerMu.Lock()
-	defer c.workerMu.Unlock()
 	if c.workerCancel != nil {
 		c.workerCancel()
 	}
+	c.workerMu.Unlock()
+	c.stopNetworkAuthority(0)
 }
 
 func (c *Client) markWorkerStopped() {

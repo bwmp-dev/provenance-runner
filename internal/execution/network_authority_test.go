@@ -143,3 +143,30 @@ func TestNetworkAuthorityCleanupFailureCannotClaimCapacity(t *testing.T) {
 		t.Fatal("route cleanup failure lost", result)
 	}
 }
+
+func TestNetworkAuthorityParentCancellationWithdrawsBeforeCleanup(t *testing.T) {
+	job, guard := executionAuthority(t, 30*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered, release := make(chan struct{}), make(chan struct{})
+	result := make(chan Result, 1)
+	go func() {
+		result <- SuperviseNetworkAuthority(ctx, job, guard, func(worker context.Context) Result {
+			close(entered)
+			<-worker.Done()
+			<-release
+			return Result{Status: "failed", Classification: ClassificationCancelled, Cleanup: &CleanupResult{Attempted: true, Succeeded: true}}
+		})
+	}()
+	<-entered
+	cancel()
+	select {
+	case <-guard.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parent cancellation retained forwarding until cleanup")
+	}
+	close(release)
+	if got := <-result; got.Classification != ClassificationCancelled {
+		t.Fatal("parent cancellation became authority loss", got)
+	}
+}
