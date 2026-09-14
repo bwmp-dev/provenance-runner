@@ -238,6 +238,21 @@ func TestAuthorityOrderingAndOldExpiredLeaseReceipt(t *testing.T) {
 	}
 }
 
+func TestAuthorityOlderObservationCannotOutliveNewStreamCredential(t *testing.T) {
+	a, _, receipt, features, credential, now := authorityFixture(t)
+	if err := a.Reconcile(receipt, features, credential, now); err != nil {
+		t.Fatal(err)
+	}
+	receipt.NetworkAuthorityV2.CheckedAt = timestamppb.New(now.Add(-6 * time.Second))
+	receipt.NetworkAuthorityV2.ExpiresAt = timestamppb.New(now.Add(10 * time.Second))
+	if err := a.Reconcile(receipt, features, now.Add(20*time.Second), now); err == nil {
+		t.Fatal("retained authority outlives new credential")
+	}
+	if _, err := a.Deadline(now); err == nil {
+		t.Fatal("invalid retained authority not withdrawn")
+	}
+}
+
 func TestAuthorityWithdrawalExpiryAndNoneAreIrreversible(t *testing.T) {
 	for _, kind := range []string{"explicit", "expiry", "terminal", "cancelling", "none", "offered"} {
 		t.Run(kind, func(t *testing.T) {

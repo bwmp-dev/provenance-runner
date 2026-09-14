@@ -148,6 +148,12 @@ func (a *Authority) Reconcile(reconciliation *p.LeaseReconciliation, features []
 			return reject()
 		}
 		if !checked.After(a.checked) {
+			// Keeping an older observation must not retain permission beyond a
+			// shorter credential on the newly authenticated stream. Refuse,
+			// rather than repair, authority that this stream cannot sustain.
+			if a.expires.After(credentialExpiry) {
+				return reject()
+			}
 			return nil
 		}
 	}
