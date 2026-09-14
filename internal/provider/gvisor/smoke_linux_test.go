@@ -62,6 +62,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == MeasuredChildCommand {
 		os.Exit(RunMeasuredChild(os.Args[2:], os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == MeasuredNetworkChildCommand {
+		os.Exit(RunMeasuredNetworkChild(os.Args[2:], os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == SystemdLauncherCommand {
 		os.Exit(RunSystemdLauncher(os.Args[2:], os.Stderr))
 	}

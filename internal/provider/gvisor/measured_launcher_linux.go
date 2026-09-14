@@ -105,24 +105,30 @@ func namespaceFailureCategory(err error) string {
 // RunMeasuredChild runs only in the fresh mapped namespace. The bind mount dies
 // with this namespace; it never publishes a host mount or changes a rootfs.
 func RunMeasuredChild(arguments []string, stderr io.Writer) int {
+	return runMeasuredChild(arguments, stderr, func() bool {
+		for _, path := range []string{"/proc/self/uid_map", "/proc/self/gid_map"} {
+			data, err := os.ReadFile(path)
+			if err != nil || !singleCallerMapping(data) {
+				return false
+			}
+		}
+		return true
+	}, embeddedOptions)
+}
+
+func runMeasuredChild(arguments []string, stderr io.Writer, mapped func() bool, options func([]string) bool) int {
 	stage := "inputs"
 	fail := func() int {
 		fmt.Fprintln(stderr, "measured mount handoff refused:", stage)
 		return runscFailureExitCode
 	}
-	if len(arguments) < 4 || arguments[2] != "embedded-executable" || arguments[3] != "--" || !filepath.IsAbs(arguments[0]) || filepath.Clean(arguments[0]) != arguments[0] || filepath.Base(arguments[0]) != ".measured-root" || os.Getuid() != 0 || !embeddedOptions(arguments[4:]) {
+	if len(arguments) < 4 || arguments[2] != "embedded-executable" || arguments[3] != "--" || !filepath.IsAbs(arguments[0]) || filepath.Clean(arguments[0]) != arguments[0] || filepath.Base(arguments[0]) != ".measured-root" || os.Getuid() != 0 || !options(arguments[4:]) {
 		return fail()
 	}
-	// Require the exact one-ID mapping established by the trusted parent.
+	// Require the exact mapping established by the selected trusted parent.
 	stage = "mapping"
-	for _, path := range []string{"/proc/self/uid_map", "/proc/self/gid_map"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return fail()
-		}
-		if !singleCallerMapping(data) {
-			return fail()
-		}
+	if !mapped() {
+		return fail()
 	}
 	var source, target unix.Stat_t
 	stage = "source"

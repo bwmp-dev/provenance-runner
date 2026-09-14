@@ -30,6 +30,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == gvisor.MeasuredChildCommand {
 		os.Exit(gvisor.RunMeasuredChild(os.Args[2:], os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == gvisor.MeasuredNetworkChildCommand {
+		os.Exit(gvisor.RunMeasuredNetworkChild(os.Args[2:], os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == gvisor.SystemdLauncherCommand {
 		os.Exit(gvisor.RunSystemdLauncher(os.Args[2:], os.Stderr))
 	}
