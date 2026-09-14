@@ -164,7 +164,9 @@ def inside(mode, sentry_enabled=False):
             service.stdin.write('stop\n');service.stdin.flush()
             assert service.wait(timeout=5)==0
         else:
-            assert command('withdraw')['phase']=='withdrawn'
+            assert command('fail-dns' if sentry_enabled else 'withdraw')['phase']=='withdrawn'
+            if sentry_enabled:
+                evidence['liveDNSSocketFailureWithdrawsRoute']=True
             rules=json.loads(run('nft','-j','list','table','inet',table,namespace='filter'))['nftables']
             assert not any('rule' in row for row in rules), 'withdrawal left packet permissions'
             assert accepted_bytes()>=before

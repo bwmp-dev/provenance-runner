@@ -130,6 +130,7 @@ func run() (result error) {
 	}
 	var cancel context.CancelFunc
 	var done chan error
+	var failDNS func() error
 	stop := func() error {
 		if cancel == nil {
 			return nil
@@ -152,10 +153,6 @@ func run() (result error) {
 		}
 	}()
 	start := func() error {
-		view, err := session.DNS()
-		if err != nil {
-			return err
-		}
 		tcp, err := net.Listen("tcp4", "10.0.1.1:53")
 		if err != nil {
 			return err
@@ -167,9 +164,10 @@ func run() (result error) {
 		}
 		ctx, stopContext := context.WithCancel(context.Background())
 		cancel = stopContext
+		failDNS = udp.Close
 		done = make(chan error, 1)
 		go func() {
-			done <- networkpolicy.ServeOwnedDNS(ctx, view, udp, tcp, []netip.Addr{netip.MustParseAddr("10.0.1.2")})
+			done <- networkpolicy.ServeRouteDNS(ctx, session, udp, tcp, []netip.Addr{netip.MustParseAddr("10.0.1.2")})
 		}()
 		return nil
 	}
@@ -202,13 +200,7 @@ func run() (result error) {
 			if err = session.Refresh(context.Background(), []networkpolicy.Binding{binding}); err != nil {
 				return err
 			}
-			if err = stop(); err != nil {
-				return err
-			}
 			rules = next
-			if err = start(); err != nil {
-				return err
-			}
 			if err = report("refreshed"); err != nil {
 				return err
 			}
@@ -220,6 +212,30 @@ func run() (result error) {
 			if err = stop(); err != nil {
 				return err
 			}
+			if err = report("withdrawn"); err != nil {
+				return err
+			}
+		case "fail-dns":
+			if withdrawn || cancel == nil || failDNS == nil {
+				return errors.New("live fixture DNS required")
+			}
+			if err := failDNS(); err != nil {
+				return err
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, networkpolicy.ErrDNS) {
+					return errors.New("fixture socket failure was not reported")
+				}
+			case <-time.After(10 * time.Second):
+				return errors.New("fixture socket failure did not withdraw route")
+			}
+			cancel()
+			cancel = nil
+			if _, err := session.DNS(); !errors.Is(err, networkpolicy.ErrExpired) {
+				return errors.New("failed DNS left route active")
+			}
+			withdrawn = true
 			if err = report("withdrawn"); err != nil {
 				return err
 			}
