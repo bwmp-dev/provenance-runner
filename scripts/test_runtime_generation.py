@@ -143,16 +143,19 @@ class GenerationTests(unittest.TestCase):
         driver=Path(__file__).with_name('test-runtime-generation-ci.sh').read_text()
         code=driver.split('python3 - "$evidence/fixture.log" <<\'PY\'\n',1)[1].split('\nPY\n',1)[0]
         passes='\n'.join('--- PASS: TestRuntimeMountFixture/'+name for name in ('wrong-image-inode','writable-image','executable-symlink','not-squashfs'))+'\n--- PASS: TestMeasuredPreflightWithProtectedImageFiles\n'
+        passes+='--- PASS: TestMeasuredNetworkRootHandoff/gate-s\n--- PASS: TestMeasuredNetworkRootHandoff/gate-x\n'
         row={'associatedLoops':[],'mounted':False}
         records=[{'failureMatrix':[{'stage':str(i),'injectionReached':True,'postCleanup':row} for i in range(45)]},
                  {'cliTests':['full-cli-install-verify-select-rollback-idempotence','full-cli-journalled-recovery']},
                  {'cleanupObservations':[row],'allOwnedLoopsDetached':True}]
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'fixture.log'
-            def run(values):
-                path.write_text(passes+'\n'.join(json.dumps(x) for x in values))
+            def run(values,markers=passes):
+                path.write_text(markers+'\n'.join(json.dumps(x) for x in values))
                 return subprocess.run([sys.executable,'-',str(path)],input=code,text=True,capture_output=True).returncode
             self.assertEqual(run(records),0)
+            for gate in ('s','x'):
+                self.assertNotEqual(run(records,passes.replace('--- PASS: TestMeasuredNetworkRootHandoff/gate-'+gate+'\n','')),0)
             self.assertNotEqual(run([{'allOwnedLoopsDetached':True}]),0)
             bad=json.loads(json.dumps(records));bad[-1]['cleanupObservations'][0]['associatedLoops']=['/dev/loop999']
             self.assertNotEqual(run(bad),0)
