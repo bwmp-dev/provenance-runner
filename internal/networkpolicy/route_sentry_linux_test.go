@@ -377,6 +377,7 @@ func testRetainedRouteSentryActuation(t *testing.T, authorityMode string) {
 	var session *RouteSession
 	var guard *AuthorityRoute
 	var receipt *runnerv1.LeaseReconciliation
+	var specification *runnerv1.JobSpecification
 	features := []runnerv1.ProtocolFeature{1, 3, 9, 10}
 	credentialExpiry := time.Now().Add(2 * time.Minute)
 	if authorityMode == "" {
@@ -384,7 +385,7 @@ func testRetainedRouteSentryActuation(t *testing.T, authorityMode string) {
 	} else {
 		now := time.Now()
 		digest := sha256.Sum256(raw)
-		specification := &runnerv1.JobSpecification{
+		specification = &runnerv1.JobSpecification{
 			Lease:           &runnerv1.LeaseIdentity{JobId: job, LeaseId: "20000000-0000-4000-8000-000000000001", ExecutionId: "30000000-0000-4000-8000-000000000001", ExpiresAt: timestamppb.New(credentialExpiry)},
 			Attempt:         &runnerv1.AttemptIdentity{AttemptId: "40000000-0000-4000-8000-000000000001", ReleaseCandidateId: "50000000-0000-4000-8000-000000000001", MatrixEntryId: "60000000-0000-4000-8000-000000000001", AttemptNumber: 1},
 			EffectivePolicy: policy, Hashes: &runnerv1.JobHashes{Policy: &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest[:]}},
@@ -429,6 +430,11 @@ func testRetainedRouteSentryActuation(t *testing.T, authorityMode string) {
 	if read(guestOutput)["phase"] != "flows-ready" {
 		t.Fatal("native persistent guest flows unavailable")
 	}
+	if guard != nil {
+		if err := guard.ObserveInstalled(ctx, specification); err != nil {
+			t.Fatal("live Sentry authority/kernel observation failed", err)
+		}
+	}
 	// Renew from a real resolver observation while retaining the same Sentry,
 	// namespace objects, flow tracking, byte bucket and original wire policy.
 	time.Sleep(1100 * time.Millisecond)
@@ -460,6 +466,11 @@ func testRetainedRouteSentryActuation(t *testing.T, authorityMode string) {
 	}
 	if read(guestOutput)["phase"] != "flows-refreshed" {
 		t.Fatal("native renewal broke guest flows")
+	}
+	if guard != nil {
+		if err := guard.ObserveInstalled(ctx, specification); err != nil {
+			t.Fatal("renewed live Sentry authority/kernel observation failed", err)
+		}
 	}
 	if guard == nil {
 		if err := session.Withdraw(); err != nil {
