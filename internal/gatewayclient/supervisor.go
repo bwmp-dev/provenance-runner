@@ -1401,6 +1401,13 @@ func (c *Client) startWorker(ctx context.Context) error {
 		c.workerSecretGeneration = generation
 		c.workerSecretCancel = func() { cancel(errSecretConnectionLost) }
 	}
+	if policy := specification.GetEffectivePolicy().GetNetworkV2(); policy != nil && policy.Mode != runnerv1.NetworkMode_NETWORK_MODE_NONE {
+		guard := c.workerNetworkAuthority
+		selected := execute
+		execute = func(ctx context.Context, job *runnerv1.JobSpecification, started func(context.Context, execution.ExecutionStart) error) execution.Result {
+			return execution.SuperviseNetworkAuthority(ctx, job, guard, func(owned context.Context) execution.Result { return selected(owned, job, started) })
+		}
+	}
 	observer := newLiveExecutionObserver(c, specification)
 	workerContext = execution.WithObserver(workerContext, observer)
 	c.workerRunning = true
