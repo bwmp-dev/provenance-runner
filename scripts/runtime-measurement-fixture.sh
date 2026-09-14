@@ -56,4 +56,5 @@ mount -t squashfs -o ro,nosuid,nodev "$loop" "$fixture/mount"
 setpriv --reuid "$fixture_uid" --regid "$fixture_gid" --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/runtimeidentity.test -test.run '^TestRuntimeMountFixture$' -test.v -test.count=1
 if [[ -f /tmp/gvisor-preflight.test ]]; then
   setpriv --reuid "$fixture_uid" --regid "$fixture_gid" --clear-groups env PROVENANCE_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/gvisor-preflight.test -test.run '^TestMeasuredPreflightWithProtectedImageFiles$' -test.v -test.count=1
+  setpriv --clear-groups env PROVENANCE_NETWORK_MEASUREMENT_FIXTURE_ROOT="$fixture" /tmp/gvisor-preflight.test -test.run '^TestMeasuredNetworkRootHandoff$' -test.v -test.count=1
 fi

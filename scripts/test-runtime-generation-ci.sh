@@ -84,6 +84,8 @@ assert '--- SKIP:' not in t
 for name in ['wrong-image-inode','writable-image','executable-symlink','not-squashfs']:
     assert '--- PASS: TestRuntimeMountFixture/'+name in t
 assert '--- PASS: TestMeasuredPreflightWithProtectedImageFiles' in t
+assert '--- PASS: TestMeasuredNetworkRootHandoff/gate-s' in t
+assert '--- PASS: TestMeasuredNetworkRootHandoff/gate-x' in t
 assert '"allOwnedLoopsDetached": true' in t
 records=[json.loads(line) for line in t.splitlines() if line.startswith('{')]
 matrix=next(row['failureMatrix'] for row in records if 'failureMatrix' in row)

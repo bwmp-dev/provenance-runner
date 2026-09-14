@@ -1,0 +1,41 @@
+# Measured network child handoff
+
+This internal command is a building block, not a network-enabled production
+provider. Existing runtime snapshot validation, network admission and capability
+advertisement fences remain unchanged.
+
+The owning trusted controller must create its direct child with private user,
+network and mount namespaces. Exactly two non-root host identities are mapped:
+namespace root and the overflow identity. Supplementary groups must be empty.
+The child refuses inherited controller network/mount namespaces and accepts no
+caller-selected runsc flags. The fixed Sentry configuration uses sandbox network,
+systrap, no raw sockets, no host Unix sockets/FIFOs, no direct filesystem access
+and a separate gofer network namespace.
+
+Descriptors 3–7 retain the measured root, sandbox executable, runner executable,
+backing SquashFS image and read-only loop device. Descriptors 8–9 retain the
+controller network/mount namespaces solely for the isolation check. Descriptor
+10 is a read-only pipe. Exactly `s` followed by EOF authorizes launch; wrong,
+missing or additional bytes refuse execution, with a 30-second deadline. No
+namespace or evidence descriptors are inherited by the executed runtime.
+
+Before releasing that gate, a production controller must retain/prove ownership
+of the child, install and observe its current authorized route, and place the
+whole workload/runtime/gofer tree in the exact aggregate resource boundary.
+The command ignores runsc-managed cgroups because that outside aggregate boundary
+is the controller's responsibility. The command alone proves none of these
+controller obligations and is not exposed as a privileged service endpoint.
+
+After gate release, the same retained-object mount implementation used by the
+network-disabled launcher revalidates the image hash, backing inode, loop mapping
+and read-only SquashFS mount, clones the retained mount into the private target,
+and executes the retained sandbox descriptor. A read-only empty sidecar directory
+selects embedded execution without changing explicit operator release policy.
+
+Unit tests cover closed arguments, exact two-ID maps and bounded launch framing.
+`TestMeasuredNetworkRootHandoff` runs only in a freshly provisioned disposable
+container with an actual protected image/loop: invalid authorization is rejected,
+and valid authorization executes a non-root synthetic guest through the real
+measured mount handoff. It has no WAN and is not routed-packet, resource-limit,
+hosted Paper or continuous runtime-attestation acceptance. Existing measured
+network-disabled and protected-image negative fixtures still run alongside it.
