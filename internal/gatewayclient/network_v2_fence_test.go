@@ -32,4 +32,8 @@ func TestReleasedNetworkV2CannotActivateOfferOrCapability(t *testing.T) {
 	if validateAdvertisedFeatures(features) == nil {
 		t.Fatal("unimplemented network feature accepted")
 	}
+	features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2)
+	if validateAdvertisedFeatures(features) == nil {
+		t.Fatal("partial authority consumer enabled capability advertisement")
+	}
 }
