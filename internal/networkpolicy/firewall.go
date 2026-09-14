@@ -35,11 +35,17 @@ func (f Firewall) ExpiresAt() time.Time { return f.expires }
 // The trusted actuator must compare-and-swap the currently installed snapshot,
 // execute this whole batch once, and refuse refresh after withdrawal/expiry.
 func (f Firewall) Refresh(next Firewall, now time.Time) (string, error) {
+	return f.refresh(next, now, true)
+}
+
+// Current authority may shorten a still-live grant. Only the owning authority
+// supervisor uses this path; ordinary DNS renewal still requires extension.
+func (f Firewall) refresh(next Firewall, now time.Time, extension bool) (string, error) {
 	if f.table == "" || f.install == "" || next.table != f.table || next.install == "" ||
 		f.grants != next.grants || f.limits != next.limits || f.families != next.families || f.controlledDNS != next.controlledDNS {
 		return "", ErrPolicy
 	}
-	if now.IsZero() || now.Before(f.issued) || now.Before(next.issued) || !now.Before(f.expires) || !next.expires.After(f.expires) {
+	if now.IsZero() || now.Before(f.issued) || now.Before(next.issued) || !now.Before(f.expires) || !now.Before(next.expires) || (extension && !next.expires.After(f.expires)) {
 		return "", ErrExpired
 	}
 	var out strings.Builder

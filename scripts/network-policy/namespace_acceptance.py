@@ -33,7 +33,7 @@ def main():
                 '-e','PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1',*extra,'--entrypoint','sleep',args.image,'180'],check=True,stdout=subprocess.DEVNULL,timeout=15)
             subprocess.run(['docker','cp',str(binary),container+':/namespace.test'],check=True,timeout=15)
             subprocess.run(['docker','start',container],check=True,stdout=subprocess.DEVNULL,timeout=15)
-            selection='^TestRetainedRouteSentryActuation$' if args.sentry else '^Test(MappedChildNamespaceKernelOwnership|RetainedRouteKernelActuation)$'
+            selection='^Test(RetainedRouteSentryActuation|AuthorityRouteSentryWithdrawal|AuthorityRouteSentryExpiry)$' if args.sentry else '^Test(MappedChildNamespaceKernelOwnership|RetainedRouteKernelActuation)$'
             result=subprocess.run(['docker','exec',container,'/namespace.test','-test.v','-test.run='+selection,'-test.count=3','-test.timeout=150s' if args.sentry else '-test.timeout=45s'],capture_output=True,text=True,timeout=160 if args.sentry else 55)
             assert len(result.stdout)<=65536 and len(result.stderr)<=65536, 'bounded namespace report exceeded'
             if result.returncode:
@@ -41,7 +41,9 @@ def main():
             assert '--- SKIP:' not in result.stdout, 'namespace acceptance must not skip'
             if args.sentry:
                 assert result.stdout.count('--- PASS: TestRetainedRouteSentryActuation ')==3, 'required live native actuation case missing'
-                print(json.dumps({'retainedRouteLiveSentry':True,'establishedFlowsSurviveRenewal':True,'establishedAndNewFlowsDeniedAfterWithdrawal':True,'liveEndpointDuringWithdrawal':True,'ownedFirewallRemoved':True,'repetitions':3},sort_keys=True))
+                for case in ('AuthorityRouteSentryWithdrawal','AuthorityRouteSentryExpiry'):
+                    assert result.stdout.count('--- PASS: Test'+case+' ')==3, 'required live authority case missing'
+                print(json.dumps({'retainedRouteLiveSentry':True,'establishedFlowsSurviveRenewal':True,'establishedAndNewFlowsDeniedAfterWithdrawal':True,'liveEndpointDuringWithdrawal':True,'ownedFirewallRemoved':True,'currentAuthorityDeadlineReduction':True,'currentAuthorityWithdrawalAndExpiry':True,'withdrawnAuthorityCannotResume':True,'repetitions':3},sort_keys=True))
                 return
             cases=('retained-job-and-living-child','wrong-mapping','inherited-controller-network','not-direct-child','close-references-only','supplementary-group-refused')
             for case in cases:

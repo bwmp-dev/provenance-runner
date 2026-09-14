@@ -117,6 +117,10 @@ func (s *RouteSession) DNS() (*WorkloadDNS, error) {
 // counters, connection tracking or byte budgets. ANY failed renewal permanently
 // withdraws this session, including invalid input or ambiguous actuator failure.
 func (s *RouteSession) Refresh(ctx context.Context, bindings []Binding) error {
+	return s.refresh(ctx, bindings, true)
+}
+
+func (s *RouteSession) refresh(ctx context.Context, bindings []Binding, extension bool) error {
 	if s == nil {
 		return ErrPolicy
 	}
@@ -141,7 +145,7 @@ func (s *RouteSession) Refresh(ctx context.Context, bindings []Binding) error {
 	if err != nil {
 		return fail(err)
 	}
-	program, err := s.rules.Refresh(next, now)
+	program, err := s.rules.refresh(next, now, extension)
 	if err != nil {
 		return fail(err)
 	}
