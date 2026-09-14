@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestRetainedRouteFixtureHelper(t *testing.T) {
@@ -105,6 +106,19 @@ func TestRetainedRouteFixtureHelper(t *testing.T) {
 }
 
 func TestRetainedRouteSentryActuation(t *testing.T) {
+	testRetainedRouteSentryActuation(t, "")
+}
+
+func TestAuthorityRouteSentryWithdrawal(t *testing.T) {
+	testRetainedRouteSentryActuation(t, "withdrawal")
+}
+
+func TestAuthorityRouteSentryExpiry(t *testing.T) {
+	testRetainedRouteSentryActuation(t, "expiry")
+}
+
+func testRetainedRouteSentryActuation(t *testing.T, authorityMode string) {
+	t.Helper()
 	if os.Getenv("PROVENANCE_DISPOSABLE_SENTRY_FIXTURE") != "1" {
 		t.Skip("explicit disposable Sentry fixture required")
 	}
@@ -360,7 +374,38 @@ func TestRetainedRouteSentryActuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { route.Close() })
-	session, err := StartRoute(ctx, job, []Binding{binding}, route)
+	var session *RouteSession
+	var guard *AuthorityRoute
+	var receipt *runnerv1.LeaseReconciliation
+	features := []runnerv1.ProtocolFeature{1, 3, 9, 10}
+	credentialExpiry := time.Now().Add(2 * time.Minute)
+	if authorityMode == "" {
+		session, err = StartRoute(ctx, job, []Binding{binding}, route)
+	} else {
+		now := time.Now()
+		digest := sha256.Sum256(raw)
+		specification := &runnerv1.JobSpecification{
+			Lease:           &runnerv1.LeaseIdentity{JobId: job, LeaseId: "20000000-0000-4000-8000-000000000001", ExecutionId: "30000000-0000-4000-8000-000000000001", ExpiresAt: timestamppb.New(credentialExpiry)},
+			Attempt:         &runnerv1.AttemptIdentity{AttemptId: "40000000-0000-4000-8000-000000000001", ReleaseCandidateId: "50000000-0000-4000-8000-000000000001", MatrixEntryId: "60000000-0000-4000-8000-000000000001", AttemptNumber: 1},
+			EffectivePolicy: policy, Hashes: &runnerv1.JobHashes{Policy: &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest[:]}},
+		}
+		guard, err = NewAuthorityRoute(ctx, specification)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := guard.Close(); err != nil {
+				t.Error("authority route cleanup failed", err)
+			}
+		})
+		receipt = &runnerv1.LeaseReconciliation{Lease: specification.Lease, Attempt: specification.Attempt, Status: runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE,
+			NetworkAuthorityV2: &runnerv1.NetworkAuthorityV2{Policy: specification.Hashes.Policy, State: runnerv1.NetworkAuthorityStateV2_NETWORK_AUTHORITY_STATE_V2_CURRENT, CheckedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(40 * time.Second))}}
+		if err := guard.Reconcile(ctx, receipt, features, credentialExpiry); err != nil {
+			t.Fatal(err)
+		}
+		err = guard.Start(ctx, []Binding{binding}, route)
+		session = guard.route
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +436,23 @@ func TestRetainedRouteSentryActuation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := session.Refresh(ctx, []Binding{binding}); err != nil {
+	if guard == nil {
+		err = session.Refresh(ctx, []Binding{binding})
+	} else {
+		err = guard.RefreshDNS(ctx, []Binding{binding})
+		if err == nil {
+			// Real installed forwarding/DNS deadlines must shorten without
+			// replenishing accounting or interrupting still-authorized flows.
+			now := time.Now()
+			receipt.NetworkAuthorityV2.CheckedAt = timestamppb.New(now)
+			receipt.NetworkAuthorityV2.ExpiresAt = timestamppb.New(now.Add(20 * time.Second))
+			if authorityMode == "expiry" {
+				receipt.NetworkAuthorityV2.ExpiresAt = timestamppb.New(now.Add(5 * time.Second))
+			}
+			err = guard.Reconcile(ctx, receipt, features, credentialExpiry)
+		}
+	}
+	if err != nil {
 		t.Fatal("native live renewal failed", err)
 	}
 	if _, err := guestInput.Write([]byte("refresh\n")); err != nil {
@@ -400,8 +461,30 @@ func TestRetainedRouteSentryActuation(t *testing.T) {
 	if read(guestOutput)["phase"] != "flows-refreshed" {
 		t.Fatal("native renewal broke guest flows")
 	}
-	if err := session.Withdraw(); err != nil {
-		t.Fatal(err)
+	if guard == nil {
+		if err := session.Withdraw(); err != nil {
+			t.Fatal(err)
+		}
+	} else if authorityMode == "expiry" {
+		select {
+		case <-guard.Done():
+		case <-time.After(8 * time.Second):
+			t.Fatal("authority expiry required acknowledgement polling")
+		}
+	} else {
+		receipt.NetworkAuthorityV2.State = runnerv1.NetworkAuthorityStateV2_NETWORK_AUTHORITY_STATE_V2_WITHDRAWN
+		receipt.NetworkAuthorityV2.ExpiresAt = nil
+		if err := guard.Reconcile(ctx, receipt, features, credentialExpiry); err == nil {
+			t.Fatal("authority withdrawal did not stop owner")
+		}
+	}
+	if guard != nil {
+		receipt.NetworkAuthorityV2.State = runnerv1.NetworkAuthorityStateV2_NETWORK_AUTHORITY_STATE_V2_CURRENT
+		receipt.NetworkAuthorityV2.CheckedAt = timestamppb.New(time.Now())
+		receipt.NetworkAuthorityV2.ExpiresAt = timestamppb.New(time.Now().Add(20 * time.Second))
+		if err := guard.Reconcile(ctx, receipt, features, credentialExpiry); err == nil {
+			t.Fatal("native withdrawn authority resumed")
+		}
 	}
 	if _, err := guestInput.Write([]byte("withdraw\n")); err != nil {
 		t.Fatal(err)
