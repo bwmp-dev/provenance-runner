@@ -36,6 +36,7 @@ type RetainedRoute struct {
 	network                                    *os.File
 	tools                                      RouteTools
 	installed, withdrawn, disconnected, closed bool
+	kernelIdentity                             [32]byte
 }
 
 func (r *RetainedRoute) JobID() string {
@@ -212,6 +213,12 @@ func (r *RetainedRoute) Apply(ctx context.Context, change FirewallChange) error 
 		if err := r.routingTopology(ctx); err != nil {
 			return err
 		}
+		if change.kind == routeRefresh {
+			identity, err := r.readKernelIdentity(ctx)
+			if err != nil || identity != r.kernelIdentity {
+				return ErrActuation
+			}
+		}
 		if change.kind == routeInstall {
 			raw, err := r.execute(ctx, r.tools.NFT, "", "-j", "list", "tables")
 			if err != nil {
@@ -245,8 +252,44 @@ func (r *RetainedRoute) Apply(ctx context.Context, change FirewallChange) error 
 	if change.kind == routeInstall {
 		r.installed = true
 	}
+	if change.kind == routeInstall || change.kind == routeRefresh {
+		identity, err := r.readKernelIdentity(ctx)
+		if err != nil {
+			return ErrActuation
+		}
+		r.kernelIdentity = identity
+	}
 	if (change.kind == routeInstall || change.kind == routeRefresh) && (r.router.Validate(r.job) != nil || r.workload.Validate(r.job) != nil) {
 		return ErrNamespace
+	}
+	return nil
+}
+
+func (r *RetainedRoute) readKernelIdentity(ctx context.Context) ([32]byte, error) {
+	raw, err := r.execute(ctx, r.tools.NFT, "", "-j", "-n", "list", "ruleset")
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return kernelRulesetIdentity(raw, r.job)
+}
+
+// ObserveInstalled proves a current owned kernel snapshot, not caller-supplied
+// labels. It is not by itself a measured Sentry launch or authority observation.
+func (r *RetainedRoute) ObserveInstalled(ctx context.Context, job string) error {
+	if r == nil {
+		return ErrNamespace
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || !r.installed || r.withdrawn || r.disconnected || job != r.job || r.router.Validate(job) != nil || r.workload.Validate(job) != nil {
+		return ErrNamespace
+	}
+	if err := r.routingTopology(ctx); err != nil {
+		return err
+	}
+	identity, err := r.readKernelIdentity(ctx)
+	if err != nil || identity != r.kernelIdentity || r.router.Validate(job) != nil || r.workload.Validate(job) != nil {
+		return ErrActuation
 	}
 	return nil
 }

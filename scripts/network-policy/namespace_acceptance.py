@@ -48,9 +48,9 @@ def main():
             cases=('retained-job-and-living-child','wrong-mapping','inherited-controller-network','not-direct-child','close-references-only','supplementary-group-refused')
             for case in cases:
                 assert result.stdout.count('--- PASS: TestMappedChildNamespaceKernelOwnership/'+case+' ')==3, 'required namespace case missing'
-            for case in ('install-renew-withdraw','cleanup-after-child-exit'):
+            for case in ('install-renew-withdraw','cleanup-after-child-exit','foreign-allow-rule','recreated-budget-objects'):
                 assert result.stdout.count('--- PASS: TestRetainedRouteKernelActuation/'+case+' ')==3, 'required retained actuation case missing'
-            print(json.dumps({'retainedKernelNamespaceIdentity':True,'exitedChildDenied':True,'wrongJobAndMappingDenied':True,'controllerNamespaceDenied':True,'foreignParentDenied':True,'supplementaryGroupDenied':True,'referenceCleanupOnly':True,'refusedCaptureNoDescriptorLeak':True,'retainedRouteInstallRefreshCleanup':True,'cleanupAfterRouterExit':True,'controllerFirewallUnchanged':True,'replacedToolPathNotReopened':True,'repetitions':3},sort_keys=True))
+            print(json.dumps({'retainedKernelNamespaceIdentity':True,'exitedChildDenied':True,'wrongJobAndMappingDenied':True,'controllerNamespaceDenied':True,'foreignParentDenied':True,'supplementaryGroupDenied':True,'referenceCleanupOnly':True,'refusedCaptureNoDescriptorLeak':True,'retainedRouteInstallRefreshCleanup':True,'cleanupAfterRouterExit':True,'controllerFirewallUnchanged':True,'replacedToolPathNotReopened':True,'installedKernelRulesReadBack':True,'foreignRuleAndRecreatedBudgetsDenied':True,'driftWithdrawsBeforeRenewal':True,'repetitions':3},sort_keys=True))
         finally:
             subprocess.run(['docker','rm','-f',container],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
 

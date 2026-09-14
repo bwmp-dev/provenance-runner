@@ -309,3 +309,18 @@ func TestAuthorityRouteInstallFailureRetainsCleanupAndContextOwnership(t *testin
 		})
 	}
 }
+
+func TestAuthorityRouteObservationRefusesSimulatedActuator(t *testing.T) {
+	s, r, f, c, b, route := authorityRouteFixture(t)
+	startAuthorityRoute(t, s, r, f, c, b, route)
+	_, job, _, _, _, _ := authorityFixture(t)
+	job.Lease = proto.Clone(r.Lease).(*p.LeaseIdentity)
+	if err := s.ObserveInstalled(context.Background(), job); err == nil {
+		t.Fatal("simulated actuator claimed kernel observation")
+	}
+	select {
+	case <-s.Done():
+	default:
+		t.Fatal("failed observation did not withdraw")
+	}
+}

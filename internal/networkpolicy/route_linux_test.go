@@ -148,8 +148,8 @@ func TestRetainedRouteKernelActuation(t *testing.T) {
 		t.Cleanup(func() { namespace.Close() })
 		return identity, cmd, namespace
 	}
-	for _, childExit := range []bool{false, true} {
-		t.Run(map[bool]string{false: "install-renew-withdraw", true: "cleanup-after-child-exit"}[childExit], func(t *testing.T) {
+	for _, mode := range []string{"install-renew-withdraw", "cleanup-after-child-exit", "foreign-allow-rule", "recreated-budget-objects"} {
+		t.Run(mode, func(t *testing.T) {
 			router, routerProcess, routerFD := holder(t, 65530)
 			workload, workloadProcess, _ := holder(t, 65532)
 			selected := tools
@@ -225,6 +225,12 @@ func TestRetainedRouteKernelActuation(t *testing.T) {
 			if _, err := session.DNS(); err != nil {
 				t.Fatal("installed snapshot unavailable")
 			}
+			if err := route.ObserveInstalled(context.Background(), job); err != nil {
+				t.Fatal("owned installed state not observed", err)
+			}
+			if err := route.ObserveInstalled(context.Background(), "20000000-0000-4000-8000-000000000001"); err == nil {
+				t.Fatal("foreign observation accepted")
+			}
 			var tables struct {
 				Items []map[string]json.RawMessage `json:"nftables"`
 			}
@@ -251,10 +257,35 @@ func TestRetainedRouteKernelActuation(t *testing.T) {
 				t.Fatal("controller namespace was modified")
 			}
 			binding.expires = binding.expires.Add(time.Second)
-			if err := session.Refresh(context.Background(), []Binding{binding}); err != nil {
-				t.Fatal("owned renewal failed", err)
+			drift := mode == "foreign-allow-rule" || mode == "recreated-budget-objects"
+			if drift {
+				program := "insert rule inet " + session.rules.table + " forward accept\n"
+				if mode == "recreated-budget-objects" {
+					program = session.rules.Remove() + session.rules.Install()
+				}
+				// Deliberate corruption only in this fresh owned disposable
+				// namespace; no workload or controller network is connected.
+				if _, err := route.execute(context.Background(), route.tools.NFT, program, "-f", "-"); err != nil {
+					t.Fatal("owned drift fixture failed", err)
+				}
+				if err := route.ObserveInstalled(context.Background(), job); err == nil {
+					t.Fatal("kernel drift was claimed as measured")
+				}
+				if err := session.Refresh(context.Background(), []Binding{binding}); err == nil {
+					t.Fatal("renewal silently repaired drift")
+				}
+				if _, err := session.DNS(); err == nil {
+					t.Fatal("drift did not withdraw route/DNS")
+				}
+			} else {
+				if err := session.Refresh(context.Background(), []Binding{binding}); err != nil {
+					t.Fatal("owned renewal failed", err)
+				}
+				if err := route.ObserveInstalled(context.Background(), job); err != nil {
+					t.Fatal("renewed kernel state not observed", err)
+				}
 			}
-			if childExit {
+			if mode == "cleanup-after-child-exit" {
 				if routerProcess.Process.Kill() != nil || routerProcess.Wait() == nil {
 					t.Fatal("owned router child did not exit")
 				}
@@ -264,6 +295,9 @@ func TestRetainedRouteKernelActuation(t *testing.T) {
 			}
 			if err := session.Close(); err != nil {
 				t.Fatal("owned cleanup failed", err)
+			}
+			if err := route.ObserveInstalled(context.Background(), job); err == nil {
+				t.Fatal("cleaned route still measured")
 			}
 			raw, err = route.execute(context.Background(), route.tools.IP, "", "-j", "link", "show", "job0")
 			if err != nil || strings.Contains(string(raw), `"UP"`) {
