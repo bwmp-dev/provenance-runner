@@ -97,15 +97,17 @@ type Client struct {
 	workerCancel  context.CancelFunc
 	// Never reconstructed from journaled acknowledgements. Stream reconciliation
 	// must supply fresh authority before any enabled network worker can start.
-	workerNetworkAuthority *networkpolicy.AuthorityRoute
-	workerSecretCancel     context.CancelFunc
-	workerSecretGeneration uint64
-	workerWG               sync.WaitGroup
-	startResponse          chan error
-	workerEvents           chan workerEvent
-	recovering             bool
-	sessionGeneration      atomic.Uint64
-	ephemeralSequence      atomic.Uint64
+	workerNetworkAuthority  *networkpolicy.AuthorityRoute
+	workerNetworkJob        *runnerv1.JobSpecification
+	workerNetworkGeneration uint64
+	workerSecretCancel      context.CancelFunc
+	workerSecretGeneration  uint64
+	workerWG                sync.WaitGroup
+	startResponse           chan error
+	workerEvents            chan workerEvent
+	recovering              bool
+	sessionGeneration       atomic.Uint64
+	ephemeralSequence       atomic.Uint64
 
 	uploadMu     sync.Mutex
 	activeUpload *activeCompleteLogUpload
@@ -380,8 +382,10 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		cancelSession:         cancel,
 		generation:            generation,
 		testSecretsV1:         advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1),
+		networkFeatures:       append([]runnerv1.ProtocolFeature(nil), capabilities.GetCapabilities().GetFeatures()...),
 	}
 	defer func() { c.stopSecretWorker(generation); session.abandonSecretRequest() }()
+	defer c.stopNetworkAuthority(generation)
 	if err := session.rememberGatewayMessage(first); err != nil {
 		return true, err
 	}

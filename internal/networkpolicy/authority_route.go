@@ -28,6 +28,10 @@ type AuthorityRoute struct {
 	cleanupErr          error
 }
 
+// ErrAuthorityWithdrawn reports a valid observation for an irreversibly stopped
+// attempt. Cleanup acknowledgements may still proceed; this is not permission.
+var ErrAuthorityWithdrawn = errors.New("network_authority_withdrawn")
+
 // NewAuthorityRoute grants nothing and installs nothing. The stream owner must
 // supply a fresh authenticated reconciliation before Start can install a route.
 func NewAuthorityRoute(ctx context.Context, job *p.JobSpecification) (*AuthorityRoute, error) {
@@ -104,7 +108,10 @@ func (s *AuthorityRoute) Reconcile(ctx context.Context, value *p.LeaseReconcilia
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.withdrawn {
-		return errors.Join(ErrAuthority, s.cleanupErr)
+		if err := s.authority.Reconcile(value, features, credentialExpiry, time.Now()); err != nil {
+			return errors.Join(err, s.cleanupErr)
+		}
+		return errors.Join(ErrAuthorityWithdrawn, s.cleanupErr)
 	}
 	if ctx == nil || ctx.Err() != nil || s.ctx.Err() != nil {
 		return s.withdrawLocked(ErrAuthority)
@@ -114,7 +121,7 @@ func (s *AuthorityRoute) Reconcile(ctx context.Context, value *p.LeaseReconcilia
 		return s.withdrawLocked(err)
 	}
 	if _, err := s.authority.Deadline(now); err != nil {
-		return s.withdrawLocked(err)
+		return s.withdrawLocked(ErrAuthorityWithdrawn)
 	}
 	if s.route != nil {
 		if err := s.refreshLocked(ctx, s.bindings, false); err != nil {
