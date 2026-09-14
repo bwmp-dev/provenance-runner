@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
+	"github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -91,9 +92,12 @@ type Client struct {
 
 	draining atomic.Bool
 
-	workerMu               sync.Mutex
-	workerRunning          bool
-	workerCancel           context.CancelFunc
+	workerMu      sync.Mutex
+	workerRunning bool
+	workerCancel  context.CancelFunc
+	// Never reconstructed from journaled acknowledgements. Stream reconciliation
+	// must supply fresh authority before any enabled network worker can start.
+	workerNetworkAuthority *networkpolicy.AuthorityRoute
 	workerSecretCancel     context.CancelFunc
 	workerSecretGeneration uint64
 	workerWG               sync.WaitGroup

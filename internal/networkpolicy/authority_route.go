@@ -9,6 +9,7 @@ import (
 	"time"
 
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // AuthorityRoute owns one attempt's authority and route together. Neither is
@@ -47,6 +48,32 @@ func NewAuthorityRoute(ctx context.Context, job *p.JobSpecification) (*Authority
 }
 
 func (s *AuthorityRoute) Done() <-chan struct{} { return s.done }
+
+// CheckJob checks the immutable owner and current deadline without installing
+// protection. The provider must still Start the route before exposing a job.
+func (s *AuthorityRoute) CheckJob(job *p.JobSpecification) error {
+	if s == nil {
+		return ErrAuthority
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	other, err := NewAuthority(job)
+	if err != nil || s.withdrawn || s.ctx.Err() != nil {
+		return s.withdrawLocked(ErrAuthority)
+	}
+	if other.digest != s.authority.digest || other.lease.JobId != s.authority.lease.JobId || other.lease.LeaseId != s.authority.lease.LeaseId || other.lease.ExecutionId != s.authority.lease.ExecutionId || !proto.Equal(other.attempt, s.authority.attempt) {
+		return s.withdrawLocked(ErrAuthority)
+	}
+	if _, err := s.authority.Deadline(time.Now()); err != nil {
+		return s.withdrawLocked(err)
+	}
+	if s.route != nil {
+		if _, err := s.route.DNS(); err != nil {
+			return s.withdrawLocked(err)
+		}
+	}
+	return nil
+}
 
 func (s *AuthorityRoute) signal() {
 	select {
