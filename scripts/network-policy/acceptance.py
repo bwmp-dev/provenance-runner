@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -358,7 +359,14 @@ def inside(sentry_enabled=False):
             run('nft', '-f', '-', namespace='filter', input=rules['sentry']['install'])
             def guest_report():
                 line=sentry.stdout.readline(4097)
-                assert line.endswith('\n') and len(line)<=4096, 'bounded live Sentry packet report missing'
+                if not line.endswith('\n') or len(line)>4096:
+                    # Keep the failed packet assertion, but retain bounded
+                    # disposable-child diagnostics instead of hiding its cause.
+                    # Nonblocking read cannot hang on an inherited stderr FD.
+                    diagnostic=b''
+                    if select.select([sentry.stderr],[],[],0)[0]:
+                        diagnostic=os.read(sentry.stderr.fileno(),4096)
+                    raise AssertionError('bounded live Sentry packet report missing: '+json.dumps({'exit':sentry.poll(),'stderr':diagnostic.decode(errors='replace')}))
                 return json.loads(line)
             sentry.stdin.write('s');sentry.stdin.flush()
             result = guest_report()
