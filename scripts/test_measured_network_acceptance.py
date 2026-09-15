@@ -11,6 +11,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
     def test_all_repeated_real_cases_and_cleanup_are_mandatory(self):
         rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry', 'ChildMismatch') for _ in range(3)]
         rows += ['{"measuredRoutedOwnedLoopDetached": true}']
+        rows += ['{"exclusiveMeasuredJobScopesRemoved": true}']
         report = '\n'.join(rows)
         driver.validate_report(report, '', 0)
         for index in range(len(rows)):

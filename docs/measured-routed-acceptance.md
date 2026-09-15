@@ -20,6 +20,16 @@ the actual installed kernel policy bound to that exact retained child owner
 launch pipe. The resulting Sentry executes the non-root guest from the retained
 read-only root mount, not the old pathname-only fixture root.
 
+The fixture provisions a private cgroup namespace with the controller and
+synthetic endpoints outside the job parent. The actual measured Sentry child is
+born into a fresh `JobCgroup` leaf with its original finite CPU, memory, swap and
+process limits. Retained resource observation checks that exact leaf before and
+during execution. Whole-scope cleanup must succeed before removing the owned
+bundle; afterward the job cannot obtain a new launch descriptor and the external
+endpoint must still be alive. The container driver requires all job leaves to
+be gone before reporting exclusive-scope cleanup. This is disposable composition,
+not production provisioning, crash recovery or disk-quota acceptance.
+
 Each withdrawal, independent-expiry, and wrong-child observation case is repeated
 three times. The wrong-child case presents the living router owner with the same
 job identity; it must withdraw the route, and presenting the correct workload
@@ -33,7 +43,7 @@ retained measured objects, reject authority reuse, inspect all owned namespaces
 for leftover nftables tables, and detach the exact owned image loop.
 
 The CI driver requires all nine real test results, no skipped or failed cases and
-the explicit successful loop-detach observation. Checker unit tests require
+the explicit successful loop-detach and exclusive-scope cleanup observations. Checker unit tests require
 missing cases or cleanup evidence to fail. Evidence includes the exact source,
 fixture image, builder hash, root image hash, test binary hash and captured test
 results. There are no production credentials or external test endpoints.

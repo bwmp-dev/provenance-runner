@@ -18,6 +18,7 @@ def validate_report(stdout, stderr, status):
     assert len(stdout) <= 65536 and len(stderr) <= 65536
     assert status == 0, stderr[-4096:]
     assert '{"measuredRoutedOwnedLoopDetached": true}' in stdout
+    assert '{"exclusiveMeasuredJobScopesRemoved": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
     for case in ('Withdrawal', 'Expiry', 'ChildMismatch'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
@@ -61,6 +62,7 @@ def main():
             subprocess.run(['docker', 'start', '--attach', build_name], check=True, timeout=60)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', build_name], text=True).strip() == '0'
             command = ['docker', 'create', '--name', runtime_name, '--privileged', '--network', 'none',
+                       '--cgroupns', 'private',
                        '--read-only', '--memory', '1g', '--memory-swap', '1g', '--cpus', '2', '--pids-limit', '273',
                        '--tmpfs', '/tmp:rw,exec,nosuid,size=768m',
                        '--mount', f'type=bind,src={repo},dst=/repo,readonly',
@@ -77,6 +79,7 @@ def main():
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]
             print(json.dumps({'measuredRoutedSentry': True, 'preLaunchKernelPolicyObserved': True,
                               'exactChildObservationAndMismatchWithdrawal': True,
+                              'exclusiveMeasuredJobScopeCleanup': True,
                               'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,
