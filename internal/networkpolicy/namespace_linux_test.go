@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -142,6 +143,25 @@ func TestMappedChildNamespaceKernelOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s.Close()
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		tid := unix.Gettid()
+		stopSignals := make(chan struct{})
+		signalsStopped := make(chan struct{})
+		defer func() { close(stopSignals); <-signalsStopped }()
+		go func() {
+			defer close(signalsStopped)
+			ticker := time.NewTicker(100 * time.Microsecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopSignals:
+					return
+				case <-ticker.C:
+					_ = unix.Tgkill(os.Getpid(), tid, unix.SIGURG)
+				}
+			}
+		}()
 		for observation := 0; observation < 256; observation++ {
 			if err := s.Validate(job); err != nil {
 				t.Fatalf("living child observation %d: %v", observation, err)

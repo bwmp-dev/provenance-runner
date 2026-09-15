@@ -54,6 +54,15 @@ Thirty additional gated-startup subcases exercise early resource observation
 and whole-scope cleanup without ever permitting guest execution. Resource
 refusals report only fixed observation-stage labels, never procfs contents.
 
+Namespace liveness uses the retained pidfd before and after identity checks.
+An interrupted nonblocking poll supplies no observation, so it is completed with
+at most eight calls against that same descriptor. Exit events and all other
+errors refuse immediately; a signal flood also refuses after the bound. The
+disposable namespace fixture sends SIGURG to the observing thread during 256
+checks of a living child, exercising the runtime-signal interruption that can
+otherwise falsely refuse startup or renewal. This does not retry an observed
+identity change, adopt another process, or revive withdrawn authority.
+
 Production activation remains blocked on trusted OCI construction/provisioning,
 durable controller recovery, provider/result integration and hosted acceptance.
 The credentialed runner must not be elevated to root to call this API. No public
