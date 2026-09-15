@@ -781,15 +781,21 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	// Renew from a real resolver observation while retaining the same Sentry,
 	// namespace objects, flow tracking, byte bucket and original wire policy.
 	time.Sleep(1100 * time.Millisecond)
-	binding, err = binder.Resolve(ctx, "fixture.example.com")
-	if err != nil {
-		t.Fatal(err)
+	renewals := 1
+	if authorityMode == "owned-launch" {
+		renewals = 32
 	}
-	{
+	for i := 0; i < renewals; i++ {
+		binding, err = binder.Resolve(ctx, "fixture.example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
 		err = guard.RefreshDNS(ctx, []np.Binding{binding})
 		if err != nil {
-			t.Fatal("native DNS renewal failed", err)
+			t.Fatal("native DNS renewal failed", i, err)
 		}
+	}
+	{
 		if err == nil {
 			// Real installed forwarding/DNS deadlines must shorten without
 			// replenishing accounting or interrupting still-authorized flows.
