@@ -21,6 +21,10 @@ import (
 )
 
 func measuredRootObservationFixture(t *testing.T, job *p.JobSpecification, observation *runtimeidentity.NetworkObservation) {
+	measuredRootTransferFixture(t, job, observation, nil, nil)
+}
+
+func measuredRootTransferFixture(t *testing.T, job *p.JobSpecification, observation *runtimeidentity.NetworkObservation, result, completion []byte) {
 	t.Helper()
 	if os.Getuid() != 0 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		t.Fatal("disposable root observation required")
@@ -77,7 +81,11 @@ func measuredRootObservationFixture(t *testing.T, job *p.JobSpecification, obser
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"valid", "malformed", "wrong-kind"} {
+	modes := []string{"valid", "malformed", "wrong-kind"}
+	if completion != nil {
+		modes = []string{"result"}
+	}
+	for _, mode := range modes {
 		file, err := os.CreateTemp(root, "job-")
 		if err != nil {
 			t.Fatal(err)
@@ -120,6 +128,18 @@ func measuredRootObservationFixture(t *testing.T, job *p.JobSpecification, obser
 			kind = controlchannel.Result
 		}
 		sendErr := peer.Send(controlchannel.Packet{Kind: kind, Sequence: 1, Payload: payload}, time.Now().Add(3*time.Second))
+		if sendErr == nil && mode == "result" {
+			sequence := uint64(2)
+			for offset := 0; offset < len(result) && sendErr == nil; {
+				end := min(offset+controlchannel.MaximumPayload, len(result))
+				sendErr = peer.Send(controlchannel.Packet{Kind: controlchannel.Result, Sequence: sequence, Payload: result[offset:end]}, time.Now().Add(3*time.Second))
+				sequence++
+				offset = end
+			}
+			if sendErr == nil {
+				sendErr = peer.Send(controlchannel.Packet{Kind: controlchannel.Completion, Sequence: sequence, Payload: completion}, time.Now().Add(3*time.Second))
+			}
+		}
 		peer.Close()
 		childErr := <-done
 		cancel()

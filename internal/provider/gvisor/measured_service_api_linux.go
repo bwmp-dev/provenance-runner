@@ -42,3 +42,10 @@ func (c *measuredController) Start(ctx context.Context, job *p.JobSpecification,
 	return c.start(ctx, job, command, inputs, authority, stdin, stdout, stderr)
 }
 func (j *measuredControllerJob) CompletedProcessExit() (int, error) { return j.completedProcessExit() }
+
+// CompletedProcessOutcome separates actual process exit from infrastructure
+// loss, only after retirement. Provider-reserved exits (Paper helper 125) and
+// malformed guest output still require provider-specific failure handling.
+func (j *measuredControllerJob) CompletedProcessOutcome() (int, bool, error) {
+	return j.completedProcessOutcome()
+}

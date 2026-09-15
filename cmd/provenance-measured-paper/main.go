@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/bwmp-dev/provenance-runner/internal/guestoutput"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 )
 
@@ -16,6 +17,9 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if guestoutput.WriteStartup(os.Stdout) != nil {
+		os.Exit(125)
+	}
 	raw, err := io.ReadAll(io.LimitReader(os.Stdin, (64<<10)+1))
 	if err != nil || len(raw) > 64<<10 {
 		os.Exit(125)
