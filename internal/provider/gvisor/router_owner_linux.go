@@ -103,13 +103,14 @@ func StartRouterOwner(ctx context.Context, job *p.JobSpecification, journal *np.
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(mapping.UID), Size: 1}, {ContainerID: 65534, HostID: int(mapping.OverflowUID), Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(mapping.GID), Size: 1}, {ContainerID: 65534, HostID: int(mapping.OverflowGID), Size: 1}},
 		GidMappingsEnableSetgroups: false, Credential: &syscall.Credential{Uid: 0, Gid: 0, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL, UseCgroupFD: true, CgroupFD: int(scope.Fd())}
-	if cmd.Start() != nil {
+	commandDone, err := startOwnedMeasuredCommand(cmd)
+	if err != nil {
 		return fail()
 	}
 	s.cmd, s.started = cmd, true
 	dnsChild.Close()
 	readyWriter.Close()
-	go func() { _ = cmd.Wait(); close(s.done) }()
+	go func() { <-commandDone; close(s.done) }()
 	stop := context.AfterFunc(ctx, func() { ready.Close() })
 	ok := awaitMeasuredNetworkToken(ready, time.Now().Add(5*time.Second), 'r')
 	stop()

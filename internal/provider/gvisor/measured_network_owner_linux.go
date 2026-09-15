@@ -135,13 +135,14 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(m.UID), Size: 1}, {ContainerID: 65534, HostID: int(m.OverflowUID), Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(m.GID), Size: 1}, {ContainerID: 65534, HostID: int(m.OverflowGID), Size: 1}},
 		GidMappingsEnableSetgroups: false, Credential: &syscall.Credential{Uid: 0, Gid: 0, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL, UseCgroupFD: true, CgroupFD: int(scope.Fd())}
-	if err := cmd.Start(); err != nil {
+	commandDone, err := startOwnedMeasuredCommand(cmd)
+	if err != nil {
 		return fail(err)
 	}
 	_ = readyWriter.Close()
 	s.cmd = cmd
 	s.started = true
-	go func() { s.exitErr = cmd.Wait(); close(s.done) }()
+	go func() { s.exitErr = <-commandDone; close(s.done) }()
 	s.child, err = np.RetainMappedChild(job.Lease.JobId, cmd.Process, m)
 	if err != nil {
 		return fail(err)

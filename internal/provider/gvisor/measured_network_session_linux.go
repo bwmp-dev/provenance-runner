@@ -30,7 +30,7 @@ type measuredSessionConfig struct {
 }
 
 // measuredNetworkSession coordinates the complete per-job network lifetime.
-// It does not own global reservations, DNS services, or the measured root mount.
+// It owns job DNS, but not global reservations or the measured root mount.
 type measuredNetworkSession struct {
 	mu               sync.Mutex
 	process          *MeasuredNetworkProcess

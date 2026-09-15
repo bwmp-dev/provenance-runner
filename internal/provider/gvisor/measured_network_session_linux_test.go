@@ -11,11 +11,14 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -92,7 +95,41 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	if mode == "session-startup-refusal" {
 		c.Tools.IP = np.ProtectedRouteTool{}
 	}
-	session, err := startMeasuredSession(ctx, c)
+	var session *measuredNetworkSession
+	if mode == "session-normal" {
+		// Retire the calling OS thread, not the controller process. Owned
+		// children must remain alive until their own lifetime is ended.
+		finished := make(chan struct{})
+		var caller *os.File
+		go func() {
+			runtime.LockOSThread() // Deliberately no Unlock: exiting retires it.
+			defer close(finished)
+			caller, err = os.Open("/proc/self/task/" + strconv.Itoa(unix.Gettid()))
+			if err == nil {
+				session, err = startMeasuredSession(ctx, c)
+			}
+		}()
+		<-finished
+		if caller != nil {
+			defer caller.Close()
+			deadline := time.Now().Add(time.Second)
+			for {
+				fd, probeErr := unix.Openat(int(caller.Fd()), "status", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+				if probeErr == unix.ENOENT || probeErr == unix.ESRCH {
+					break
+				}
+				if fd >= 0 {
+					unix.Close(fd)
+				}
+				if probeErr != nil || time.Now().After(deadline) {
+					t.Fatal("session caller thread did not retire")
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+	} else {
+		session, err = startMeasuredSession(ctx, c)
+	}
 	if session != nil {
 		t.Cleanup(func() {
 			if session.Close(context.Background()) != nil {
