@@ -92,6 +92,9 @@ def main():
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceEventRefusalKernel ') == 3
+        for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement ') == 3
+            assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal ') == 3
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
                                  '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredControlListener|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal|DNSLoss|DNSRefreshFailure|PreparationTimeout|ExecutionTimeout|ControllerResourceLoss|PaperGuest|PaperGuestRefusal))$',
                                  '-test.count=3', '-test.timeout=410s'],

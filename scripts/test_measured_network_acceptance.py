@@ -32,6 +32,8 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['--- PASS: TestMeasuredPaperServiceWithdrawalKernel (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperServiceEventRefusalKernel (1s)' for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredInputDownloadFixture (1s)' for _ in range(3)]
         for case in ('TestMeasuredNetworkSessionPaperGuest', 'TestMeasuredNetworkSessionPaperGuestRefusal'):
             rows += [f'--- PASS: {case}/root-result-transfer (1s)' for _ in range(3)]

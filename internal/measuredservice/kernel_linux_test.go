@@ -97,6 +97,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if syscall.Setgroups([]int{}) != nil {
 		t.Fatal("empty supplementary groups")
 	}
+	t.Run("root-idle-response-refusal", idleRefusalFixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	root, err := os.MkdirTemp("/tmp", "measured-service-")
@@ -316,6 +317,25 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if (serveErr != nil) != (mode != "complete" && mode != "reject-events") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
 	}
+	t.Run("root-idle-barrier-after-retirement", func(t *testing.T) {
+		probe := exec.CommandContext(ctx, clientPath, "service-idle", filepath.Join(root, cc.SocketName))
+		probe.Env = command.Env
+		probe.SysProcAttr = command.SysProcAttr
+		var output bytes.Buffer
+		probe.Stderr = &output
+		done := make(chan error, 1)
+		go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); done <- probe.Run() }()
+		channel, err := listener.Accept(time.Now().Add(5 * time.Second))
+		if err != nil {
+			cancel()
+			<-done
+			t.Fatal("idle probe admission", err)
+		}
+		serveErr := server.Serve(ctx, channel)
+		if clientErr := <-done; serveErr != nil || clientErr != nil {
+			t.Fatal("authenticated idle barrier", serveErr, clientErr, output.String())
+		}
+	})
 	if server.Close(ctx) != nil || listener.Close() != nil {
 		t.Fatal("service retirement")
 	}

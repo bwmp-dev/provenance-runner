@@ -49,3 +49,18 @@ func (j *measuredControllerJob) CompletedProcessExit() (int, error) { return j.c
 func (j *measuredControllerJob) CompletedProcessOutcome() (int, bool, error) {
 	return j.completedProcessOutcome()
 }
+
+// CheckIdle is a momentary admission barrier, not execution evidence. The
+// controller clears active only after every owned object and journal retires.
+// An unavailable controller cannot advertise capacity merely because it is idle.
+func (c *measuredController) CheckIdle() error {
+	if c == nil {
+		return errMeasuredSession
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.ready || c.stopping || c.closed || c.active != nil || c.resources == nil || !c.resourcesReady() {
+		return errMeasuredSession
+	}
+	return nil
+}

@@ -34,6 +34,25 @@ func TestMain(m *testing.M) {
 		case "service-client":
 			serviceFixtureClient()
 			return
+		case "service-idle":
+			if len(os.Args) != 3 || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
+				panic("disposable idle client required")
+			}
+			conn, err := net.DialTimeout("unixpacket", os.Args[2], time.Second)
+			if err != nil {
+				panic(err)
+			}
+			channel, err := cc.New(conn.(*net.UnixConn), 0)
+			if err != nil {
+				conn.Close()
+				panic(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if measuredclient.CheckIdle(ctx, channel) != nil {
+				panic("root idle barrier refused after cleanup")
+			}
+			return
 		}
 		if strings.HasPrefix(os.Args[1], "-Xms") {
 			// Synthetic Java stand-in only, inside the explicitly prepared
