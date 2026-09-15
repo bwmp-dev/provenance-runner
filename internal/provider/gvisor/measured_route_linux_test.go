@@ -1085,6 +1085,15 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if _, err := terminalevidence.BuildObservedNetwork(foreignContext, "runner-fixture", nil, observation); err == nil {
 		t.Fatal("observed runtime reassigned to another attempt")
 	}
+	changedTargetJob := proto.Clone(specification).(*runnerv1.JobSpecification)
+	changedTargetJob.TargetPluginName = "OtherFixture"
+	changedTargetContext, err := terminalevidence.NewContextV2(changedTargetJob)
+	if err != nil {
+		t.Fatal("changed target context fixture", err)
+	}
+	if _, err := terminalevidence.BuildObservedNetwork(changedTargetContext, "runner-fixture", nil, observation); err == nil {
+		t.Fatal("same lease and hashes reassigned measured runtime to a different target")
+	}
 	if guard != nil {
 		if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 			t.Fatal("live Sentry authority/kernel observation failed", err)

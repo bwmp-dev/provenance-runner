@@ -322,8 +322,12 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		if controlled != nil {
 			observe = controlled.ObserveRuntime
 		}
-		if observation, err := observe(ctx); observation == nil || err != nil {
+		observation, err := observe(ctx)
+		if observation == nil || err != nil {
 			t.Fatal("session runtime observation", err)
+		}
+		if mode == "session-router-loss" {
+			t.Run("root-observation-transfer", func(t *testing.T) { measuredRootObservationFixture(t, c.Launch.Job, observation) })
 		}
 		if mode == "session-router-loss" && session.router.Close(ctx) != nil {
 			t.Fatal("session router-loss fixture")
