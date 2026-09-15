@@ -112,9 +112,13 @@ func TestMeasuredInputDownloadFixture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	for iteration := 0; iteration < 2; iteration++ {
+		preparationStarted := time.Now()
 		owned, err := provider.PrepareMeasuredInputs(ctx, job)
 		if err != nil {
 			t.Fatal("full worker preparation", err)
+		}
+		if !owned.PreparationDeadline().After(preparationStarted) || owned.PreparationDeadline().After(preparationStarted.Add(job.EffectivePolicy.PreparationTimeout.AsDuration()+time.Second)) {
+			t.Fatal("preparation deadline was not retained")
 		}
 		request := owned.Request()
 		projected, _, decodeErr := DecodeMeasuredRequest(request)

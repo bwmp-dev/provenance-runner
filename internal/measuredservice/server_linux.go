@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cc "github.com/bwmp-dev/provenance-runner/internal/controlchannel"
@@ -169,10 +170,25 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 		return ErrService
 	}
 	controlDone := make(chan struct{})
+	released := make(chan struct{})
+	var releaseAllowed, releaseUsed atomic.Bool
 	go func() {
 		defer close(controlDone)
 		for i := 0; i < 8192; i++ {
-			if err := receiveAuthority(jobCtx, channel, authority); err != nil {
+			packet, err := receiveServicePacket(jobCtx, channel)
+			if err != nil {
+				cancel(err)
+				return
+			}
+			if packet.Kind == cc.Release {
+				if len(packet.Payload) != 0 || !releaseAllowed.Load() || !releaseUsed.CompareAndSwap(false, true) {
+					cancel(ErrService)
+					return
+				}
+				close(released)
+				continue
+			}
+			if err := applyAuthorityPacket(jobCtx, packet, authority); err != nil {
 				cancel(err)
 				return
 			}
@@ -252,7 +268,21 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 		return ErrService
 	}
 	raw, err := runtimeidentity.EncodeRootObservation(job, observation)
-	if err != nil || send.observation(raw) != nil {
+	if err != nil {
+		return ErrService
+	}
+	// The live observation is sealed before release can be accepted. Send
+	// it before supplying any configuration that lets the helper run Java.
+	releaseAllowed.Store(true)
+	if send.observation(raw) != nil {
+		return ErrService
+	}
+	select {
+	case <-jobCtx.Done():
+		return ErrService
+	case <-released:
+	}
+	if jobCtx.Err() != nil {
 		return ErrService
 	}
 	bootstrap := plan.GuestConfiguration()
@@ -332,8 +362,16 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 }
 
 func receiveAuthority(ctx context.Context, channel *cc.Channel, authority *np.AuthorityRoute) error {
+	packet, err := receiveServicePacket(ctx, channel)
+	if err != nil {
+		return err
+	}
+	return applyAuthorityPacket(ctx, packet, authority)
+}
+
+func receiveServicePacket(ctx context.Context, channel *cc.Channel) (cc.Packet, error) {
 	if ctx.Err() != nil {
-		return ErrService
+		return cc.Packet{}, ErrService
 	}
 	deadline := time.Now().Add(25 * time.Second)
 	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
@@ -341,14 +379,21 @@ func receiveAuthority(ctx context.Context, channel *cc.Channel, authority *np.Au
 	}
 	packet, err := channel.Receive(deadline)
 	if err != nil {
-		return ErrService
+		return cc.Packet{}, ErrService
 	}
 	defer func() {
 		for _, file := range packet.Files {
 			_ = file.Close()
 		}
 	}()
-	if len(packet.Files) != 0 || packet.Kind != cc.Reconcile {
+	if len(packet.Files) != 0 {
+		return cc.Packet{}, ErrService
+	}
+	return packet, nil
+}
+
+func applyAuthorityPacket(ctx context.Context, packet cc.Packet, authority *np.AuthorityRoute) error {
+	if packet.Kind != cc.Reconcile {
 		return ErrService
 	}
 	update, err := np.DecodeAuthorityUpdate(packet.Payload)

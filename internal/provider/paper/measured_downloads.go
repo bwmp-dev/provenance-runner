@@ -16,8 +16,18 @@ import (
 // request. It grants no launch authority. Files are borrowed until Close;
 // callers must serialize access and keep them open through SendStart.
 type MeasuredInputs struct {
-	request []byte
-	files   []*os.File
+	request             []byte
+	files               []*os.File
+	preparationDeadline time.Time
+}
+
+// PreparationDeadline is frozen before manifest and artifact downloads. Passing
+// it to the root-session client prevents restarting the worker preparation budget.
+func (m *MeasuredInputs) PreparationDeadline() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	return m.preparationDeadline
 }
 
 type measuredDownload struct {
@@ -50,6 +60,7 @@ func (m *MeasuredInputs) Close() error {
 		}
 	}
 	m.files, m.request = nil, nil
+	m.preparationDeadline = time.Time{}
 	return result
 }
 
@@ -155,6 +166,7 @@ func acquireMeasuredDownloads(ctx context.Context, raw []byte, identities []Meas
 		return nil, ErrMeasuredInputPlan
 	}
 	owned := &MeasuredInputs{request: bytes.Clone(raw)}
+	owned.preparationDeadline, _ = ctx.Deadline()
 	defer func() {
 		if result != nil {
 			_ = owned.Close()

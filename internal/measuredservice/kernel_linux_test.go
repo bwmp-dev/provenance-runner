@@ -69,14 +69,18 @@ func fixtureArchive(t *testing.T, name string, raw []byte, mode int64) []byte {
 }
 
 func TestMeasuredPaperServiceKernel(t *testing.T) {
-	measuredPaperServiceKernel(t, false)
+	measuredPaperServiceKernel(t, "complete")
 }
 
 func TestMeasuredPaperServiceWithdrawalKernel(t *testing.T) {
-	measuredPaperServiceKernel(t, true)
+	measuredPaperServiceKernel(t, "withdraw")
 }
 
-func measuredPaperServiceKernel(t *testing.T, withdraw bool) {
+func TestMeasuredPaperServiceReleaseRefusalKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "reject-release")
+}
+
+func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		t.Skip("explicit disposable service fixture required")
 	}
@@ -289,10 +293,6 @@ func measuredPaperServiceKernel(t *testing.T, withdraw bool) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	mode := "complete"
-	if withdraw {
-		mode = "withdraw"
-	}
 	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), mode)
 	command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1"}
 	command.ExtraFiles = files
@@ -309,7 +309,7 @@ func measuredPaperServiceKernel(t *testing.T, withdraw bool) {
 	}
 	serveErr := server.Serve(ctx, channel)
 	clientErr := <-clientDone
-	if (serveErr != nil) != withdraw || clientErr != nil {
+	if (serveErr != nil) != (mode != "complete") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
 	}
 	if server.Close(ctx) != nil || listener.Close() != nil {
