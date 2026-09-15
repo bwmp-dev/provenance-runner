@@ -25,6 +25,7 @@ type Collector struct {
 	eventsTruncated      bool
 	structuredEventError string
 	closed               bool
+	guestConsumed        bool
 	snapshot             *Bundle
 	snapshotErr          error
 	liveSink             func(LiveEntry)
