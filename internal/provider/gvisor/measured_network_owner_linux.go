@@ -206,6 +206,29 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context) error {
 	return nil
 }
 
+// ObserveRuntime captures a historical observation only while this released
+// owner is alive. Failure withdraws authority and triggers owned scope cleanup.
+// A past observation is never permission to resume or report guest success.
+func (s *MeasuredNetworkProcess) ObserveRuntime(ctx context.Context) (*runtimeidentity.NetworkObservation, error) {
+	if s == nil {
+		return nil, ErrMeasuredNetworkLaunch
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	refuse := func() (*runtimeidentity.NetworkObservation, error) {
+		s.stopping = true
+		return nil, errors.Join(ErrMeasuredNetworkLaunch, s.authority.Withdraw())
+	}
+	if ctx == nil || ctx.Err() != nil || !s.started || !s.released || s.stopping || s.closed || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil {
+		return refuse()
+	}
+	observation, err := s.measurement.ObserveNetwork(ctx, s.job, s.child, s.privateRoot, s.resources, s.authority)
+	if err != nil {
+		return refuse()
+	}
+	return observation, nil
+}
+
 // Close permanently stops admission and reaps the main process only after the
 // owned cgroup is removed. Failure retains descriptors for an explicit retry.
 func (s *MeasuredNetworkProcess) Close(ctx context.Context) error {

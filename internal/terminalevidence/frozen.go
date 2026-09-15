@@ -114,13 +114,26 @@ func validateFrozen(proof *runnerv1.ExecutionEvidence, job *runnerv1.JobSpecific
 			return ErrInvalid
 		}
 		measured = new(runtimeidentity.Snapshot)
-		if json.Unmarshal(encoded, measured) != nil || !measured.Valid() {
+		if json.Unmarshal(encoded, measured) != nil || !validHistoricalRuntime(c, *measured) {
 			return ErrInvalid
 		}
 	}
-	expected, err := Build(c, binding.RunnerID, observations, measured)
+	expected, err := build(c, binding.RunnerID, observations, nil, true, measured)
 	if err != nil || !bytes.Equal(expected.GetCanonicalJson(), proof.GetCanonicalJson()) {
 		return ErrInvalid
 	}
 	return nil
+}
+
+// This checks historical representation only. Authenticity remains the owned
+// journal/delivery boundary's responsibility; no new observation is minted.
+func validHistoricalRuntime(c *Context, snapshot runtimeidentity.Snapshot) bool {
+	if snapshot.Valid() {
+		return true
+	}
+	if c == nil || !c.v2 || snapshot.NetworkMode != c.networkMode || (snapshot.NetworkMode != "restricted" && snapshot.NetworkMode != "allowlist") {
+		return false
+	}
+	snapshot.NetworkMode = "none"
+	return snapshot.Valid()
 }

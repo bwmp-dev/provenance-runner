@@ -53,11 +53,14 @@ type planned struct {
 
 // Context has no exported mutable fields. It contains no URLs or credentials.
 type Context struct {
-	binding     Binding
-	requested   map[string]any
-	planned     map[string]planned
-	v2          bool
-	networkMode string // original validated grant, never a measured runtime claim
+	binding            Binding
+	requested          map[string]any
+	planned            map[string]planned
+	v2                 bool
+	networkMode        string // original validated grant, never a measured runtime claim
+	measurementLease   *runnerv1.LeaseIdentity
+	measurementAttempt *runnerv1.AttemptIdentity
+	measurementHashes  *runnerv1.JobHashes
 }
 
 func (c *Context) Matches(lease *runnerv1.LeaseIdentity, attempt *runnerv1.AttemptIdentity) bool {
@@ -67,6 +70,21 @@ func (c *Context) Matches(lease *runnerv1.LeaseIdentity, attempt *runnerv1.Attem
 // Build freezes exact canonical bytes once. Legacy directory trees remain
 // null/partial; only an execution-bound measurement may populate runtime.
 func Build(c *Context, runnerID string, observations []Observation, measured ...*runtimeidentity.Snapshot) (*runnerv1.ExecutionEvidence, error) {
+	return build(c, runnerID, observations, nil, false, measured...)
+}
+
+// BuildObservedNetwork accepts only a sealed observation of this context's
+// original execution binding. Requested network labels remain insufficient.
+func BuildObservedNetwork(c *Context, runnerID string, observations []Observation, measured *runtimeidentity.NetworkObservation) (*runnerv1.ExecutionEvidence, error) {
+	if measured == nil || c == nil || !c.v2 || (c.networkMode != "restricted" && c.networkMode != "allowlist") {
+		return nil, ErrInvalid
+	}
+	return build(c, runnerID, observations, measured, false)
+}
+
+// historical is reserved for byte-for-byte frozen journal validation. It never
+// reconstructs a sealed observation or exposes a producer entry point.
+func build(c *Context, runnerID string, observations []Observation, observed *runtimeidentity.NetworkObservation, historical bool, measured ...*runtimeidentity.Snapshot) (*runnerv1.ExecutionEvidence, error) {
 	if c == nil || !identifier.MatchString(runnerID) {
 		return nil, ErrInvalid
 	}
@@ -116,12 +134,23 @@ func Build(c *Context, runnerID string, observations []Observation, measured ...
 	})
 	var runtime any
 	completeness := "partial"
-	if len(measured) > 1 {
+	if len(measured) > 1 || (observed != nil && len(measured) != 0) {
 		return nil, ErrInvalid
+	}
+	if observed != nil {
+		snapshot, err := observed.SnapshotFor(c.measurementLease, c.measurementAttempt, c.measurementHashes)
+		if err != nil || snapshot.NetworkMode != c.networkMode {
+			return nil, ErrInvalid
+		}
+		measured = []*runtimeidentity.Snapshot{&snapshot}
 	}
 	if len(measured) == 1 && measured[0] != nil {
 		copy := *measured[0]
-		if !copy.Valid() || (c.networkMode != "" && copy.NetworkMode != c.networkMode) {
+		valid := copy.Valid()
+		if historical {
+			valid = validHistoricalRuntime(c, copy)
+		}
+		if (observed == nil && !valid) || (c.networkMode != "" && copy.NetworkMode != c.networkMode) {
 			return nil, ErrInvalid
 		}
 		encoded, _ := json.Marshal(copy)
