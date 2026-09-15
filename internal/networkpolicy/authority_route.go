@@ -26,6 +26,11 @@ type AuthorityRoute struct {
 	wake, done, watched chan struct{}
 	withdrawn           bool
 	cleanupErr          error
+	controlUpdates      []authorityControlUpdate
+	controlSequence     uint64
+	controlChanged      chan struct{}
+	controlChecked      time.Time
+	controlUnavailable  bool
 }
 
 // ErrAuthorityWithdrawn reports a valid observation for an irreversibly stopped
@@ -46,7 +51,7 @@ func NewAuthorityRoute(ctx context.Context, job *p.JobSpecification) (*Authority
 		return nil, ErrAuthority
 	}
 	ctx, stop := context.WithCancel(ctx)
-	s := &AuthorityRoute{authority: a, ctx: ctx, stop: stop, wake: make(chan struct{}, 1), done: make(chan struct{}), watched: make(chan struct{})}
+	s := &AuthorityRoute{authority: a, ctx: ctx, stop: stop, wake: make(chan struct{}, 1), done: make(chan struct{}), watched: make(chan struct{}), controlChanged: make(chan struct{})}
 	go s.watch()
 	return s, nil
 }
@@ -89,6 +94,7 @@ func (s *AuthorityRoute) signal() {
 func (s *AuthorityRoute) withdrawLocked(reason error) error {
 	if !s.withdrawn {
 		s.withdrawn = true
+		s.controlUpdates = nil
 		s.authority.Withdraw()
 		close(s.done)
 		s.stop()
@@ -128,6 +134,7 @@ func (s *AuthorityRoute) Reconcile(ctx context.Context, value *p.LeaseReconcilia
 			return err
 		}
 	}
+	s.recordControlUpdateLocked(value, features, credentialExpiry)
 	s.signal()
 	return nil
 }

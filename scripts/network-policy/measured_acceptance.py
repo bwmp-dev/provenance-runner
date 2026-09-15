@@ -42,6 +42,7 @@ def validate_report(stdout, stderr, status):
     assert stdout.count('--- PASS: TestMeasuredControlListener ') == 3
     assert stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperServiceKernel ') == 3
+    assert stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredInputDownloadFixture ') == 3
     for case in ('TestMeasuredNetworkSessionPaperGuest', 'TestMeasuredNetworkSessionPaperGuestRefusal'):
         assert stdout.count(f'--- PASS: {case}/root-result-transfer ') == 3

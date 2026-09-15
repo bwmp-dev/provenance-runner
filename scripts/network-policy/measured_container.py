@@ -78,7 +78,7 @@ def main():
         # Exercise the new composed service before the longer regression suite
         # so provisioning failures surface promptly. Both remain mandatory.
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',
-                                  '-test.run=^TestMeasuredPaperServiceKernel$',
+                                  '-test.run=^TestMeasuredPaperService(Withdrawal)?Kernel$',
                                   '-test.count=3', '-test.timeout=90s'],
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                       'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
@@ -89,6 +89,7 @@ def main():
             raise RuntimeError('measured root service fixture failed: '+service.stderr[-4096:])
         assert '--- SKIP:' not in service.stdout
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceKernel ') == 3
+        assert service.stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
                                  '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredControlListener|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal|DNSLoss|DNSRefreshFailure|PreparationTimeout|ExecutionTimeout|ControllerResourceLoss|PaperGuest|PaperGuestRefusal))$',
                                  '-test.count=3', '-test.timeout=410s'],
