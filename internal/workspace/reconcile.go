@@ -61,7 +61,15 @@ func (m *Manager) reconcile(ctx context.Context, now time.Time, removeFresh bool
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("inspect workspace %q: %w", entry.Name(), err))
 			continue
 		}
-		if marker.Version != workspaceMarkerVersion || marker.JobID == "" || len(marker.JobID) > 128 || marker.CreatedAt.IsZero() || marker.CreatedAt.After(now) {
+		// Another manager may create a workspace after this sweep captured its
+		// expiration cutoff. That is fresh, not a future-dated invalid marker.
+		// Keep expiration based on the original cutoff, but validate timestamps
+		// against at least the time at which this marker was actually observed.
+		observedAt := time.Now().UTC()
+		if observedAt.Before(now) {
+			observedAt = now
+		}
+		if marker.Version != workspaceMarkerVersion || marker.JobID == "" || len(marker.JobID) > 128 || marker.CreatedAt.IsZero() || marker.CreatedAt.After(observedAt) {
 			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("inspect workspace %q: invalid ownership marker", entry.Name()))
 			continue
 		}

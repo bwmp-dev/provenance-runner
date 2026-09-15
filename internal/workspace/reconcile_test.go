@@ -123,3 +123,45 @@ func TestReconcileOwnedAttemptsFailsClosedOnAmbiguousMarker(t *testing.T) {
 		t.Fatalf("ambiguous workspace was removed: %v", statErr)
 	}
 }
+
+func TestReconcilePreservesWorkspaceCreatedAfterSweepCutoff(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UTC().Add(-time.Second)
+	owned, err := manager.Create(context.Background(), "concurrent-new-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Cleanup(context.Background())
+	if err := manager.Reconcile(context.Background(), cutoff); err != nil {
+		t.Fatalf("fresh workspace created during sweep refused: %v", err)
+	}
+	if _, err := os.Stat(owned.Root()); err != nil {
+		t.Fatal("fresh workspace removed")
+	}
+}
+
+func TestReconcileStillRefusesFutureDatedOwnership(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(manager.root, "provenance-job-future")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWorkspaceMarker(root, "future", time.Now().UTC().Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Reconcile(context.Background(), time.Now().UTC()); err == nil {
+		t.Fatal("future ownership accepted")
+	}
+	if err := manager.ReconcileOwnedAttempts(context.Background()); err == nil {
+		t.Fatal("future ownership accepted for deletion")
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatal("ambiguous ownership removed")
+	}
+}

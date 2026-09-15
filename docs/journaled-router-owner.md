@@ -10,7 +10,8 @@ The closed helper accepts five identity arguments and four fixed descriptors:
 lifetime pipe, readiness pipe, retained runner and parent network namespace. It
 accepts no command, environment override, host path, job artifact or PID. It
 provisions no links, routes or DNS sockets. After checking its mapping and fresh
-network namespace, it drops capabilities/bounding sets and enables no-new-
+network namespace, it configures [fixed private forwarding controls](router-owned-forwarding.md),
+then drops capabilities/bounding sets and enables no-new-
 privileges on **every Go runtime thread**, not just the calling thread. This
 requires a non-cgo runner; unsupported all-thread operations refuse startup.
 Core/file writes and real-time priority are disabled, and open files are bounded.
