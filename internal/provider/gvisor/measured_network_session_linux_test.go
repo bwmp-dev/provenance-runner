@@ -79,9 +79,36 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	}
 	t.Cleanup(func() { stderr.Close() })
 	c.Launch.Stdin, c.Launch.Stdout, c.Launch.Stderr = in, out, stderr
-	c.DNSBoundary = np.LocalV2Boundary{Maximum: proto.Clone(c.Launch.Job.EffectivePolicy.NetworkV2).(*runnerv1.NetworkPolicyV2), SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: 4 * time.Second}
+	c.Boundary, err = newMeasuredLocalBoundary(proto.Clone(c.Launch.Job.EffectivePolicy).(*runnerv1.EffectivePolicy), c.Launch.Mapping, c.RouterMapping, []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, 4*time.Second)
+	if err != nil {
+		t.Fatal("session local boundary")
+	}
 	resolver := &sessionDNSResolverFixture{}
 	c.Resolver = resolver
+	if mode == "session-normal" {
+		for _, name := range []string{"local-maximum-refusal", "local-identity-refusal"} {
+			t.Run(name, func(t *testing.T) {
+				bad := c
+				if name == "local-maximum-refusal" {
+					maximum := proto.Clone(c.Launch.Job.EffectivePolicy).(*runnerv1.EffectivePolicy)
+					maximum.Resources.MemoryBytes--
+					bad.Boundary, err = newMeasuredLocalBoundary(maximum, c.Launch.Mapping, c.RouterMapping, c.Boundary.dns.SensitiveNetworks, 4*time.Second)
+					if err != nil {
+						t.Fatal("negative local maximum")
+					}
+				} else {
+					bad.RouterMapping = c.Launch.Mapping
+				}
+				refused, err := startMeasuredSession(ctx, bad)
+				if refused != nil {
+					_ = refused.Close(context.Background())
+				}
+				if refused != nil || err == nil || c.Launch.Bundle.checkPrepared(c.Launch.Mapping) != nil || c.Launch.Journal.CheckScope(c.Launch.Scope) != nil {
+					t.Fatal("local boundary refusal mutated prepared ownership")
+				}
+			})
+		}
+	}
 	if mode == "session-startup-refusal" {
 		c.Tools.IP = np.ProtectedRouteTool{}
 	}

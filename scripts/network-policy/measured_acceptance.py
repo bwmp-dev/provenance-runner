@@ -41,6 +41,8 @@ def validate_report(stdout, stderr, status):
     assert stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
     for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure'):
         assert stdout.count('--- PASS: TestMeasuredNetworkSession'+case+' ') == 3
+    for case in ('local-maximum-refusal', 'local-identity-refusal'):
+        assert stdout.count('--- PASS: TestMeasuredNetworkSessionNormal/'+case+' ') == 3
     for case in ('uplink-alias-refusal', 'uplink-journal-refusal', 'uplink-prefix-refusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentryOwnedLaunch/'+case+' ') == 3
     for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal'):

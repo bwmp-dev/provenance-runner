@@ -26,7 +26,7 @@ type measuredSessionConfig struct {
 	RouterMapping np.MappedIdentity
 	Uplinks       *np.HostUplinkJournal
 	Tools         np.RouteTools
-	DNSBoundary   np.LocalV2Boundary
+	Boundary      *measuredLocalBoundary
 	Resolver      np.Exchange
 }
 
@@ -60,6 +60,9 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 		return nil, errMeasuredSession
 	}
 	l.Job = proto.Clone(l.Job).(*p.JobSpecification)
+	if c.Boundary.check(l.Job, l.Mapping, c.RouterMapping) != nil {
+		return nil, errMeasuredSession
+	}
 	// No router/workload mapped identity may overlap within either namespace.
 	for _, a := range []uint32{l.Mapping.UID, l.Mapping.OverflowUID} {
 		if a == c.RouterMapping.UID || a == c.RouterMapping.OverflowUID {
@@ -79,7 +82,7 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 		s.reason, s.outcomeSet = errors.Join(errMeasuredSession, err), true
 		return s, errors.Join(errMeasuredSession, err, s.Close(context.Background()))
 	}
-	s.dns, err = newMeasuredSessionDNS(l.Job, c.DNSBoundary, c.Resolver)
+	s.dns, err = newMeasuredSessionDNS(l.Job, c.Boundary.dns, c.Resolver)
 	if err != nil {
 		return fail(err)
 	}
