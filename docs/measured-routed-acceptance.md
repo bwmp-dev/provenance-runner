@@ -42,7 +42,12 @@ New positive authority cannot revive the stopped owner. Final checks validate
 retained measured objects, reject authority reuse, inspect all owned namespaces
 for leftover nftables tables, and detach the exact owned image loop.
 
-The CI driver requires all nine real test results, no skipped or failed cases and
+The controller-owned launch and normal-exit cases also repeat three times. The
+launch case checks actual whole-scope termination after authority withdrawal;
+the normal case checks successful process exit, cleanup and no self-induced
+authority withdrawal. The original packet-level withdrawal cases remain intact.
+
+The CI driver requires all fifteen real test results, no skipped or failed cases and
 the explicit successful loop-detach and exclusive-scope cleanup observations. Checker unit tests require
 missing cases or cleanup evidence to fail. Evidence includes the exact source,
 fixture image, builder hash, root image hash, test binary hash and captured test
