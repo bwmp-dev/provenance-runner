@@ -210,7 +210,8 @@ func serviceFixtureClient() {
 		return
 	}
 	if err != nil || result == nil || !released || !sawStart || result.Observation() == nil {
-		panic(fmt.Sprintf("session result/startup mismatch: %v", err))
+		code, infrastructure, outcomeErr := result.Outcome()
+		panic(fmt.Sprintf("session result/startup mismatch: sessionError=%v result=%t released=%t startup=%t observation=%t exit=%d infrastructure=%t outcomeError=%v", err, result != nil, released, sawStart, result.Observation() != nil, code, infrastructure, outcomeErr))
 	}
 	bundle, err := collector.Snapshot(ctx)
 	if err != nil {
