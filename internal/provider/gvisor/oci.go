@@ -90,6 +90,7 @@ type ociDevice struct {
 
 type ociNamespace struct {
 	Type string `json:"type"`
+	Path string `json:"path,omitempty"`
 }
 
 type ociResources struct {

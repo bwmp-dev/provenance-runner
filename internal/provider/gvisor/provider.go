@@ -470,6 +470,17 @@ func invalidEnvironment(err error) error {
 }
 
 func validateConfiguration(config configuration, maxOutputBytes int64) error {
+	if err := validateGuestConfiguration(config); err != nil {
+		return err
+	}
+	return evidence.ValidateConfig(evidence.Config{
+		MaxLineBytes:  config.MaxLineBytes,
+		MaxTotalBytes: maxOutputBytes,
+		Secrets:       config.RedactSecrets,
+	})
+}
+
+func validateGuestConfiguration(config configuration) error {
 	if strings.TrimSpace(config.Command) == "" || !strings.HasPrefix(config.Command, "/") || strings.ContainsRune(config.Command, '\x00') {
 		return errors.New("command must be an absolute container path")
 	}
@@ -501,11 +512,7 @@ func validateConfiguration(config configuration, maxOutputBytes int64) error {
 	if config.DiskBytes < 1<<20 || config.DiskBytes > 64<<30 {
 		return errors.New("diskBytes must be between 1048576 and 68719476736")
 	}
-	return evidence.ValidateConfig(evidence.Config{
-		MaxLineBytes:  config.MaxLineBytes,
-		MaxTotalBytes: maxOutputBytes,
-		Secrets:       config.RedactSecrets,
-	})
+	return nil
 }
 
 func (p *Provider) jobInputs(jobID string) (string, error) {

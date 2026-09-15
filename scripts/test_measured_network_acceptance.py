@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('measured_network_acceptance', Path(__file__).parent/'network-policy/measured_acceptance.py')
 driver = importlib.util.module_from_spec(spec)
@@ -8,6 +9,15 @@ spec.loader.exec_module(driver)
 
 
 class MeasuredAcceptanceTests(unittest.TestCase):
+    def test_protected_failure_evidence_is_not_chmodded(self):
+        with mock.patch.object(driver.tempfile, 'mkdtemp', return_value='/tmp/owned-fixture') as create, mock.patch.object(driver.shutil, 'rmtree') as remove:
+            with self.assertRaisesRegex(RuntimeError, 'original refusal'):
+                with driver.fixture_workspace() as path:
+                    self.assertEqual(path, '/tmp/owned-fixture')
+                    raise RuntimeError('original refusal')
+            create.assert_called_once_with(prefix='provenance-measured-route-', dir='/var/tmp')
+            remove.assert_called_once_with('/tmp/owned-fixture', ignore_errors=True)
+
     def test_all_repeated_real_cases_and_cleanup_are_mandatory(self):
         rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal') for _ in range(3)]
         rows += ['{"measuredRoutedOwnedLoopDetached": true}']
