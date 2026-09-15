@@ -121,6 +121,12 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 	defer stream.Close()
 	transcript, err := collector.ConsumeGuest(resultCtx, stream, options.MaximumLogBytes)
 	if err != nil || transcript == nil {
+		// Event validation can fail after the authenticated stream has already
+		// reached root completion. Preserve only that historical cleanup fact,
+		// never turn a refused transcript into a successful session result.
+		if receipt, receiptErr := stream.Receipt(); receiptErr == nil {
+			return nil, &SessionFailure{observation: observation, completion: receipt}
+		}
 		return nil, ErrSession
 	}
 	completion, err := stream.Receipt()
@@ -130,7 +136,7 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 	exit, infrastructure, err := completion.Outcome()
 	claimedExit, claimedInfrastructure := transcript.ClaimedExit()
 	if err != nil || exit != claimedExit || (claimedInfrastructure && !infrastructure) || resultCtx.Err() != nil {
-		return nil, ErrSession
+		return nil, &SessionFailure{observation: observation, completion: completion}
 	}
 	return &SessionResult{observation: observation, completion: completion}, nil
 }

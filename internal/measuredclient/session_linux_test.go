@@ -5,9 +5,22 @@ package measuredclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
+
+func TestSessionFailureJSONCannotProveRetirement(t *testing.T) {
+	var failure SessionFailure
+	if err := json.Unmarshal([]byte(`{"observation":{},"completion":{"authenticated":true}}`), &failure); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []*SessionFailure{nil, &failure} {
+		if value.RetiredFor(nil) || !errors.Is(value, ErrSession) {
+			t.Fatal("failure manufactured retirement or lost failure classification")
+		}
+	}
+}
 
 func TestSessionResultCannotBeConstructedFromJSON(t *testing.T) {
 	var result SessionResult
