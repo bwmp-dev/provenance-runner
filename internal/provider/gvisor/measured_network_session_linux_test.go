@@ -5,7 +5,6 @@ package gvisor
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/netip"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
+	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
@@ -79,19 +79,9 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	}
 	t.Cleanup(func() { stderr.Close() })
 	c.Launch.Stdin, c.Launch.Stdout, c.Launch.Stderr = in, out, stderr
-	raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(c.Launch.Job.EffectivePolicy)
-	if err != nil {
-		t.Fatal("session policy encoding")
-	}
-	binder, err := np.NewV2Binder(c.Launch.Job.Lease.JobId, raw, sha256.Sum256(raw), np.LocalV2Boundary{Maximum: c.Launch.Job.EffectivePolicy.NetworkV2, SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: time.Minute}, measuredResolver{})
-	if err != nil {
-		t.Fatal("session DNS binder")
-	}
-	binding, err := binder.Resolve(ctx, "fixture.example.com")
-	if err != nil {
-		t.Fatal("session DNS binding")
-	}
-	c.Bindings = []np.Binding{binding}
+	c.DNSBoundary = np.LocalV2Boundary{Maximum: proto.Clone(c.Launch.Job.EffectivePolicy.NetworkV2).(*runnerv1.NetworkPolicyV2), SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: 4 * time.Second}
+	resolver := &sessionDNSResolverFixture{}
+	c.Resolver = resolver
 	if mode == "session-startup-refusal" {
 		c.Tools.IP = np.ProtectedRouteTool{}
 	}
@@ -234,7 +224,7 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			t.Fatal("owned DNS check failed")
 		}
 	}
-	if mode == "session-router-loss" || mode == "session-dns-loss" {
+	if mode == "session-router-loss" || mode == "session-dns-loss" || mode == "session-dns-refresh-failure" {
 		if read(reader)["phase"] != "flows-ready" {
 			t.Fatal("session flows unavailable")
 		}
@@ -247,11 +237,17 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		if mode == "session-dns-loss" && session.router.dns.udp.Close() != nil {
 			t.Fatal("session DNS-loss fixture")
 		}
+		if mode == "session-dns-refresh-failure" {
+			resolver.fail.Store(true)
+		}
 		if session.Wait(ctx) == nil || ctx.Err() != nil {
 			t.Fatal("router loss not propagated")
 		}
 	} else if session.Wait(ctx) != nil {
 		t.Fatal("normal session completion")
+	}
+	if session.dns.refreshes.Load() == 0 || session.dnsRefreshDone != nil {
+		t.Fatal("session DNS renewal or retirement missing")
 	}
 	if !c.Launch.Bundle.retired || session.Close(ctx) != nil || session.Release(ctx) == nil {
 		t.Fatal("session retirement or no-resume")
