@@ -4,6 +4,7 @@ package measuredservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,8 @@ import (
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/gvisor"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
+	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -58,7 +61,7 @@ func TestMain(m *testing.M) {
 }
 
 func serviceFixtureClient() {
-	if len(os.Args) != 4 || (os.Args[3] != "complete" && os.Args[3] != "withdraw" && os.Args[3] != "reject-release") || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
+	if len(os.Args) != 4 || (os.Args[3] != "complete" && os.Args[3] != "withdraw" && os.Args[3] != "reject-release" && os.Args[3] != "reject-events") || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		panic("disposable service client required")
 	}
 	read := func(fd uintptr, maximum int64) []byte {
@@ -124,7 +127,11 @@ func serviceFixtureClient() {
 		}
 	}()
 	defer func() { cancel(); <-renewed; guard.Close() }()
-	collector, err := evidence.NewCollector(evidence.Config{Secrets: []string{"synthetic-session-secret"}, MaxTotalBytes: 1 << 20})
+	collectorConfig := evidence.Config{Secrets: []string{"synthetic-session-secret"}, MaxTotalBytes: 1 << 20}
+	if os.Args[3] == "reject-events" {
+		collectorConfig.MaxEventBytes = 8
+	}
+	collector, err := evidence.NewCollector(collectorConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -165,6 +172,18 @@ func serviceFixtureClient() {
 		}
 		return nil
 	}}, collector)
+	if os.Args[3] == "reject-events" {
+		var failure *measuredclient.SessionFailure
+		if result != nil || !errors.Is(err, measuredclient.ErrSession) || !errors.As(err, &failure) || !failure.RetiredFor(job) || !released || !sawStart {
+			panic("event refusal lost authenticated retirement or became success")
+		}
+		changed := proto.Clone(job).(*p.JobSpecification)
+		changed.NormalizedConfigurationJson = []byte(`{"changed":true}`)
+		if failure.RetiredFor(changed) || failure.RetiredFor(nil) {
+			panic("failed retirement escaped exact execution binding")
+		}
+		return
+	}
 	if os.Args[3] != "complete" {
 		if err == nil || result != nil || !released || sawStart != (os.Args[3] == "withdraw") {
 			panic("refused session crossed its execution or completion boundary")

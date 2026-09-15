@@ -80,6 +80,10 @@ func TestMeasuredPaperServiceReleaseRefusalKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "reject-release")
 }
 
+func TestMeasuredPaperServiceEventRefusalKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "reject-events")
+}
+
 func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		t.Skip("explicit disposable service fixture required")
@@ -309,7 +313,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	serveErr := server.Serve(ctx, channel)
 	clientErr := <-clientDone
-	if (serveErr != nil) != (mode != "complete") || clientErr != nil {
+	if (serveErr != nil) != (mode != "complete" && mode != "reject-events") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
 	}
 	if server.Close(ctx) != nil || listener.Close() != nil {
