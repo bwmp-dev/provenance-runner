@@ -4,6 +4,8 @@ Network runtime claims use a separate sealed path. `Lease.ObserveNetwork`
 requires the exact retained workload's resource proof, current native route
 authority, and actual live executable/read-only SquashFS root measurement. It
 checks resource enforcement and route authority again after object measurement.
+Route observation also requires the actual owned private veth pair for the exact
+router and workload, with identity rechecked around native policy observation.
 The result retains immutable lease, attempt and hash bindings, never credentials
 or URLs. Its private fields cannot be populated by decoding JSON.
 

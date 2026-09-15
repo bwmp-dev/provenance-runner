@@ -35,7 +35,7 @@ def validate_report(stdout, stderr, status):
     assert '{"measuredJobJournalRetired": true}' in stdout
     assert '{"measuredBundleJournalRetired": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
     for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' ') == 3
@@ -92,7 +92,7 @@ def main():
             subprocess.run(command, check=True, capture_output=True, timeout=30)
             created.append(runtime_name)
             result = subprocess.run(['docker', 'start', '--attach', runtime_name],
-                                    capture_output=True, text=True, timeout=230)
+                                    capture_output=True, text=True, timeout=270)
             assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
             print(result.stdout, end='')
             validate_report(result.stdout, result.stderr, result.returncode)
@@ -108,6 +108,7 @@ def main():
                               'closedControllerBundlePreparation': True,
                               'journaledIndependentRouterOwner': True,
                               'allRouterThreadsUnprivileged': True,
+                              'ownedPrivateLinkRequiredForLaunchAndEvidence': True,
                               'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,
@@ -119,7 +120,7 @@ def main():
             # On interruption, allow the fixture's bounded process to finish its
             # owned loop cleanup instead of force-killing it mid-mount.
             for name in reversed(created):
-                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=230)
+                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=270)
                 subprocess.run(['docker', 'rm', name], capture_output=True, check=True, timeout=15)
 
 

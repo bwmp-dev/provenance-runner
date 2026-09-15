@@ -51,6 +51,7 @@ type MeasuredNetworkProcess struct {
 	authority                           *np.AuthorityRoute
 	child                               *np.ChildNamespaces
 	resources                           *np.RetainedResources
+	link                                *np.PrivateJobLink
 	gate                                *os.File
 	cmd                                 *exec.Cmd
 	done                                chan struct{}
@@ -177,7 +178,7 @@ func (s *MeasuredNetworkProcess) Child() *np.ChildNamespaces {
 
 // Release validates actual measurement, resource membership and the exact
 // child's authorized kernel route immediately before opening the launch gate.
-func (s *MeasuredNetworkProcess) Release(ctx context.Context) error {
+func (s *MeasuredNetworkProcess) Release(ctx context.Context, link *np.PrivateJobLink) error {
 	if s == nil {
 		return ErrMeasuredNetworkLaunch
 	}
@@ -193,7 +194,7 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context) error {
 	if ctx == nil || ctx.Err() != nil || !s.started || s.stopping || s.closed || s.released || s.gate == nil || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil || !s.bundle.matchesPrivateRoot(s.privateRoot) || s.bundle.checkPrepared(s.mapping) != nil || s.measurement.Validate() != nil || s.resources.ValidateForChild(s.job, s.child) != nil {
 		return refuse()
 	}
-	if s.authority.ObserveInstalledForChild(ctx, s.job, s.child) != nil {
+	if s.authority.ObserveInstalledForLink(ctx, s.job, s.child, link) != nil {
 		return refuse()
 	}
 	if n, err := s.gate.Write([]byte("s")); err != nil || n != 1 {
@@ -203,6 +204,7 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context) error {
 		return refuse()
 	}
 	s.released = true
+	s.link = link
 	return nil
 }
 
@@ -222,7 +224,7 @@ func (s *MeasuredNetworkProcess) ObserveRuntime(ctx context.Context) (*runtimeid
 	if ctx == nil || ctx.Err() != nil || !s.started || !s.released || s.stopping || s.closed || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil {
 		return refuse()
 	}
-	observation, err := s.measurement.ObserveNetwork(ctx, s.job, s.child, s.privateRoot, s.resources, s.authority)
+	observation, err := s.measurement.ObserveNetwork(ctx, s.job, s.child, s.privateRoot, s.resources, s.authority, s.link)
 	if err != nil {
 		return refuse()
 	}

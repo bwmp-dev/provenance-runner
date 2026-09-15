@@ -19,7 +19,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
             remove.assert_called_once_with('/tmp/owned-fixture', ignore_errors=True)
 
     def test_all_repeated_real_cases_and_cleanup_are_mandatory(self):
-        rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal') for _ in range(3)]
+        rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal') for _ in range(3)]
         rows += ['{"measuredRoutedOwnedLoopDetached": true}']
         rows += ['{"exclusiveMeasuredJobScopesRemoved": true}']
         rows += ['{"measuredJobJournalRetired": true}']

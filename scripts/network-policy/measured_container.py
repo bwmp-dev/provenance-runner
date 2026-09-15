@@ -75,18 +75,18 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal)|MeasuredBundleJournalKernelRecovery)$',
-                                 '-test.count=3', '-test.timeout=200s'],
+                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal)|MeasuredBundleJournalKernelRecovery)$',
+                                 '-test.count=3', '-test.timeout=240s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
                                      'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
-                                capture_output=True, text=True, timeout=210)
+                                capture_output=True, text=True, timeout=250)
         assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
         print(result.stdout, end='')
         if result.returncode:
             raise RuntimeError('measured routed fixture failed: '+result.stderr[-4096:])
         assert '--- SKIP:' not in result.stdout
-        for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal'):
+        for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal'):
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery ') == 3
         assert not [p for p in jobs.iterdir() if p.is_dir()]

@@ -14,7 +14,7 @@ import (
 // Failure withdraws the owning route. This is an installation/authority check,
 // not proof of a measured rootfs, a Sentry launch, or completed cleanup.
 func (s *AuthorityRoute) ObserveInstalled(ctx context.Context, job *p.JobSpecification) error {
-	return s.observeInstalled(ctx, job, nil, false)
+	return s.observeInstalled(ctx, job, nil, false, nil, false)
 }
 
 // ObserveInstalledForChild additionally binds the observation to the exact
@@ -23,10 +23,16 @@ func (s *AuthorityRoute) ObserveInstalled(ctx context.Context, job *p.JobSpecifi
 // permanently withdraws this authority, including a nil or foreign owner.
 // This Linux-only launch check does not grant cleanup or resource authority.
 func (s *AuthorityRoute) ObserveInstalledForChild(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces) error {
-	return s.observeInstalled(ctx, job, child, true)
+	return s.observeInstalled(ctx, job, child, true, nil, false)
 }
 
-func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, requireChild bool) error {
+// ObserveInstalledForLink also verifies the actual owned veth pair belongs to
+// this native route's exact router and workload, not merely matching labels.
+func (s *AuthorityRoute) ObserveInstalledForLink(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, link *PrivateJobLink) error {
+	return s.observeInstalled(ctx, job, child, true, link, true)
+}
+
+func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, requireChild bool, link *PrivateJobLink, requireLink bool) error {
 	if err := s.CheckJob(job); err != nil {
 		return err
 	}
@@ -37,6 +43,9 @@ func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecifi
 	}
 	native, ok := s.route.route.(*RetainedRoute)
 	if !ok {
+		return s.withdrawLocked(ErrNamespace)
+	}
+	if requireLink && (link == nil || link.carrier == nil || link.carrier.router != native.router || link.carrier.workload != native.workload || link.Validate(ctx) != nil) {
 		return s.withdrawLocked(ErrNamespace)
 	}
 	// Serialize readback with DNS refresh/expiry. No independent route caller
@@ -54,6 +63,9 @@ func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecifi
 		}
 		if !time.Now().Before(s.route.rules.ExpiresAt()) {
 			return ErrExpired
+		}
+		if requireLink && link.Validate(ctx) != nil {
+			return ErrNamespace
 		}
 		return nil
 	}()

@@ -15,7 +15,7 @@ func TestMeasuredNetworkOwnerRefusesMissingInputs(t *testing.T) {
 		}
 	}
 	var absent *MeasuredNetworkProcess
-	if absent.Child() != nil || absent.Close(context.Background()) != nil || absent.Release(context.Background()) == nil || absent.Wait(context.Background()) == nil {
+	if absent.Child() != nil || absent.Close(context.Background()) != nil || absent.Release(context.Background(), nil) == nil || absent.Wait(context.Background()) == nil {
 		t.Fatal("nil owner semantics")
 	}
 	owner := &MeasuredNetworkProcess{}
@@ -25,7 +25,7 @@ func TestMeasuredNetworkOwnerRefusesMissingInputs(t *testing.T) {
 		go func() {
 			defer group.Done()
 			for n := 0; n < 10; n++ {
-				if owner.Release(context.Background()) == nil {
+				if owner.Release(context.Background(), nil) == nil {
 					t.Error("zero owner released")
 				}
 				if owner.Wait(context.Background()) == nil {

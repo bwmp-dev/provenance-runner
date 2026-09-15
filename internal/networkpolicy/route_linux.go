@@ -136,7 +136,14 @@ func (b *routeOutput) Write(p []byte) (int, error) {
 }
 
 func (r *RetainedRoute) execute(ctx context.Context, tool ProtectedRouteTool, input string, args ...string) ([]byte, error) {
-	if ctx == nil || r.closed || !validRouteTool(r.tools.NSenter) || !validRouteTool(tool) {
+	if ctx == nil || r.closed {
+		return nil, ErrActuation
+	}
+	return executeRetainedTool(ctx, r.network, r.tools.NSenter, tool, nil, input, args...)
+}
+
+func executeRetainedTool(ctx context.Context, network *os.File, nsenter, tool ProtectedRouteTool, extra []*os.File, input string, args ...string) ([]byte, error) {
+	if ctx == nil || network == nil || !validRouteTool(nsenter) || !validRouteTool(tool) {
 		return nil, ErrActuation
 	}
 	ctx, cancel := context.WithTimeout(ctx, routeOperationTimeout)
@@ -146,7 +153,7 @@ func (r *RetainedRoute) execute(ctx context.Context, tool ProtectedRouteTool, in
 	// process. No PID pathname, namespace name, shell or ambient PATH is used.
 	cmd := exec.CommandContext(ctx, "/proc/self/fd/4")
 	cmd.Args = append([]string{"nsenter", "-F", "--preserve-credentials", "-n/proc/self/fd/3", "--", "/proc/self/fd/5"}, args...)
-	cmd.ExtraFiles = []*os.File{r.network, r.tools.NSenter.File, tool.File}
+	cmd.ExtraFiles = append([]*os.File{network, nsenter.File, tool.File}, extra...)
 	cmd.Env = []string{"LANG=C", "LC_ALL=C"}
 	cmd.Stdin = bytes.NewBufferString(input)
 	var output routeOutput
