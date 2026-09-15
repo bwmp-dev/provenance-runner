@@ -60,11 +60,27 @@ func TestResourceBoundaryRejectsOrdinaryFilesAndEmptyOwners(t *testing.T) {
 		t.Fatal("missing owned child accepted")
 	}
 	var empty *RetainedResources
+	if empty.ValidateForChild(nil, nil) != ErrResources {
+		t.Fatal("nil resource proof accepted an exact child")
+	}
 	if empty.Validate(nil) != ErrResources || empty.Close() != nil {
 		t.Fatal("nil boundary granted proof")
 	}
 	empty = &RetainedResources{}
 	if empty.Validate(nil) != ErrResources || !empty.invalid || empty.Close() != nil || empty.Close() != nil {
 		t.Fatal("zero boundary granted proof or broke idempotent close")
+	}
+}
+
+func TestResourceExactChildMismatchPermanentlyInvalidatesProof(t *testing.T) {
+	for _, foreign := range []*ChildNamespaces{nil, {}} {
+		owned := &ChildNamespaces{}
+		r := &RetainedResources{child: owned}
+		if r.ValidateForChild(nil, foreign) != ErrResources || !r.invalid {
+			t.Fatal("foreign child did not invalidate resource proof")
+		}
+		if owned.closed {
+			t.Fatal("resource refusal invalidated independently retained child")
+		}
 	}
 }
