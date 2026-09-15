@@ -3,8 +3,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"github.com/bwmp-dev/provenance-runner/internal/controlchannel"
+	"github.com/bwmp-dev/provenance-runner/internal/guestoutput"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
@@ -25,7 +27,7 @@ func init() {
 }
 
 func controlObservationFixture(path, mode string) {
-	if os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_NETWORK_FIXTURE") != "1" || (mode != "valid" && mode != "malformed" && mode != "wrong-kind") {
+	if os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_NETWORK_FIXTURE") != "1" || (mode != "valid" && mode != "malformed" && mode != "wrong-kind" && mode != "result") {
 		panic("disposable observation client required")
 	}
 	file := os.NewFile(3, "synthetic observation job")
@@ -86,5 +88,27 @@ func controlObservationFixture(path, mode string) {
 	payload[0] ^= 1
 	if _, err := runtimeidentity.ImportRootObservation(job, packet); err != nil {
 		panic("mutable receipt escaped")
+	}
+	if mode == "result" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stream, err := controlchannel.NewResultStream(ctx, channel)
+		if err != nil {
+			panic(err)
+		}
+		defer stream.Close()
+		transcript, err := guestoutput.ReadStream(ctx, stream, 1<<20, func(guestoutput.Kind, []byte) error { return nil })
+		if err != nil {
+			panic(err)
+		}
+		receipt, err := stream.Receipt()
+		if err != nil {
+			panic(err)
+		}
+		exit, infra, err := receipt.Outcome()
+		claimedExit, claimedInfra := transcript.ClaimedExit()
+		if err != nil || exit != claimedExit || infra != claimedInfra {
+			panic("root and guest outcome mismatch")
+		}
 	}
 }

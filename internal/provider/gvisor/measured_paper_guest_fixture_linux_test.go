@@ -9,10 +9,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/bwmp-dev/provenance-runner/internal/controlchannel"
 	"github.com/bwmp-dev/provenance-runner/internal/guestoutput"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 )
@@ -107,10 +109,6 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if err != nil || len(raw) > 4096 {
 		t.Fatal("fixture bootstrap bounds")
 	}
-	if _, err = input.Write(raw); err != nil {
-		t.Fatal(err)
-	}
-	input.Close()
 	owned, err := controller.Start(ctx, c.Launch.Job, MeasuredGuestCommand{Command: "/provenance-measured-paper"}, inputs, c.Launch.Authority, c.Launch.Stdin, c.Launch.Stdout, c.Launch.Stderr)
 	if owned != nil {
 		t.Cleanup(func() {
@@ -135,8 +133,21 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if output.SetReadDeadline(deadline) != nil {
 		t.Fatal("fixture output deadline")
 	}
-	var stdout, stderr bytes.Buffer
-	transcript, err := guestoutput.ReadStream(ctx, output, 1<<20, func(kind guestoutput.Kind, data []byte) error {
+	if guestoutput.ReadStartup(output) != nil {
+		t.Fatal("measured helper startup synchronization")
+	}
+	observation, err := owned.ObserveRuntime(ctx)
+	if err != nil || observation == nil {
+		t.Fatal("live Paper helper kernel observation", err)
+	}
+	// Bootstrap is supplied only after the helper is running and its retained
+	// runtime objects have been observed; readiness alone is not evidence.
+	if _, err = input.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	input.Close()
+	var stdout, stderr, wire bytes.Buffer
+	transcript, err := guestoutput.ReadStream(ctx, io.TeeReader(output, &wire), 1<<20, func(kind guestoutput.Kind, data []byte) error {
 		if kind == guestoutput.Stdout {
 			_, err := stdout.Write(data)
 			return err
@@ -153,6 +164,9 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if exitErr != nil || actualExit != claimedExit {
 		t.Fatal("Paper guest claim differs from retired owned process exit", exitErr)
 	}
+	if code, infrastructure, err := owned.CompletedProcessOutcome(); err != nil || code != actualExit || infrastructure {
+		t.Fatal("normal owned process exit misclassified as infrastructure", err)
+	}
 	if ctx.Err() != nil {
 		t.Fatal("Paper completion missing")
 	}
@@ -168,4 +182,11 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if !owned.bundle.retired || owned.Release(ctx) == nil || controller.Close(ctx) != nil || c.Uplinks.Recover(ctx) != nil {
 		t.Fatal("Paper owned retirement")
 	}
+	completion, err := controlchannel.EncodeCompletion(actualExit, actualExit == 125)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("root-result-transfer", func(t *testing.T) {
+		measuredRootTransferFixture(t, c.Launch.Job, observation, wire.Bytes(), completion)
+	})
 }

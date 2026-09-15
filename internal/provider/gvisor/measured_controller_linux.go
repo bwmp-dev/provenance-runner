@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -359,29 +360,44 @@ func (j *measuredControllerJob) ObserveRuntime(ctx context.Context) (*runtimeide
 // authority or infrastructure failure: exit zero alone is not a successful job.
 // In particular, no code supplied in a guest outcome frame is consulted here.
 func (j *measuredControllerJob) completedProcessExit() (int, error) {
+	code, _, err := j.completedProcessOutcome()
+	return code, err
+}
+
+// Preserve infrastructure errors without classifying an ordinary nonzero guest
+// exit as infrastructure failure. Only the exact owned command's ExitError can
+// be treated as a process outcome; joined or substituted errors remain failures.
+func (j *measuredControllerJob) completedProcessOutcome() (int, bool, error) {
 	if j == nil || j.controller == nil {
-		return 0, errMeasuredSession
+		return 0, true, errMeasuredSession
 	}
 	c := j.controller
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !j.retired || j.session == nil || j.session.process == nil {
-		return 0, errMeasuredSession
+		return 0, true, errMeasuredSession
 	}
 	process := j.session.process
 	select {
 	case <-process.done:
 	default:
-		return 0, errMeasuredSession
+		return 0, true, errMeasuredSession
 	}
 	if process.cmd == nil || process.cmd.ProcessState == nil {
-		return 0, errMeasuredSession
+		return 0, true, errMeasuredSession
 	}
 	code := process.cmd.ProcessState.ExitCode()
 	if code < 0 || code > 255 {
-		return 0, errMeasuredSession
+		return 0, true, errMeasuredSession
 	}
-	return code, nil
+	infrastructure := j.reason != nil
+	if reason, ok := j.reason.(*exec.ExitError); ok {
+		actual, sameType := process.exitErr.(*exec.ExitError)
+		if sameType && reason == actual && reason.ProcessState == process.cmd.ProcessState {
+			infrastructure = false
+		}
+	}
+	return code, infrastructure, nil
 }
 
 // Called with the controller mutex held. Cleanup retries do not turn an
