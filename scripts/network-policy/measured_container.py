@@ -75,7 +75,7 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal))$',
+                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal|DNSLoss))$',
                                  '-test.count=3', '-test.timeout=300s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
@@ -90,7 +90,7 @@ def main():
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
-        for case in ('Normal', 'RouterLoss', 'StartupRefusal'):
+        for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss'):
             assert result.stdout.count('--- PASS: TestMeasuredNetworkSession'+case+' ') == 3
         uplink_state = Path('/state-input/uplink-journal')
         assert [p.name for p in uplink_state.iterdir()] == ['.lock']

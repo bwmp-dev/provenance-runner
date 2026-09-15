@@ -5,8 +5,10 @@ package gvisor
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"sync"
+	"time"
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
@@ -39,6 +41,7 @@ type measuredNetworkSession struct {
 	authority        *np.AuthorityRoute
 	bundle           *measuredBundle
 	done             chan struct{}
+	dnsDone          chan struct{}
 	reason           error
 	outcomeSet       bool
 	stopping, closed bool
@@ -98,6 +101,15 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 	if err = s.authority.ObserveInstalledForUplink(ctx, l.Job, s.process.Child(), s.link, s.uplink); err != nil {
 		return fail(err)
 	}
+	if s.router.dns.validate() != nil {
+		return fail(ErrRouterOwner)
+	}
+	s.dnsDone = make(chan struct{})
+	dns, authority := s.router.dns, s.authority
+	go func() {
+		defer close(s.dnsDone)
+		_ = authority.ServeDNS(ctx, dns.udp, dns.tcp, []netip.Addr{netip.MustParseAddr("10.0.1.2")})
+	}()
 	routerDone, authorityDone, processDone := s.router.Done(), s.authority.Done(), s.process.done
 	go func() {
 		var reason error
@@ -148,6 +160,9 @@ func (s *measuredNetworkSession) Release(ctx context.Context) error {
 	if s.stopping || s.closed || s.process == nil || s.router == nil {
 		return errMeasuredSession
 	}
+	if s.router.dns.validate() != nil {
+		return errMeasuredSession
+	}
 	select {
 	case <-s.router.Done():
 		return errMeasuredSession
@@ -162,7 +177,7 @@ func (s *measuredNetworkSession) ObserveRuntime(ctx context.Context) (*runtimeid
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.stopping || s.closed || s.process == nil {
+	if s.stopping || s.closed || s.process == nil || s.router == nil || s.router.dns.validate() != nil {
 		return nil, errMeasuredSession
 	}
 	return s.process.ObserveRuntime(ctx)
@@ -194,6 +209,21 @@ func (s *measuredNetworkSession) Close(ctx context.Context) error {
 		} else {
 			s.authority = nil
 		}
+	}
+	if s.dnsDone != nil {
+		if s.router != nil {
+			result = errors.Join(result, s.router.dns.Close())
+		}
+		timer := time.NewTimer(3 * time.Second)
+		select {
+		case <-s.dnsDone:
+			s.dnsDone = nil
+		case <-ctx.Done():
+			result = errors.Join(result, ctx.Err())
+		case <-timer.C:
+			result = errors.Join(result, errMeasuredSession)
+		}
+		timer.Stop()
 	}
 	processClean := s.process == nil
 	if s.process != nil {

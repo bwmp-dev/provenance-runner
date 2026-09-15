@@ -147,12 +147,12 @@ func main() {
 		}
 		probe(false)
 		report("withdrawn")
-	case "probe", "probe-lifecycle", "probe-confined", "probe-confined-lifecycle":
+	case "probe", "probe-lifecycle", "probe-confined", "probe-confined-lifecycle", "probe-confined-dns", "probe-confined-dns-lifecycle":
 		if os.Getuid() != 65532 || os.Geteuid() != 65532 {
 			panic("non-root guest required")
 		}
 		result := map[string]bool{"nonRootGuest": true}
-		if os.Args[1] == "probe-confined" || os.Args[1] == "probe-confined-lifecycle" {
+		if strings.HasPrefix(os.Args[1], "probe-confined") {
 			probeStorage(result)
 		}
 		for _, test := range []struct {
@@ -191,11 +191,46 @@ func main() {
 		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 			panic(err)
 		}
-		if os.Args[1] == "probe-lifecycle" || os.Args[1] == "probe-confined-lifecycle" {
+		if strings.Contains(os.Args[1], "-dns") {
+			probeOwnedDNS()
+		}
+		if strings.HasSuffix(os.Args[1], "-lifecycle") {
 			packetLifecycle()
 		}
 	default:
 		panic("unknown fixture mode")
+	}
+}
+
+func probeOwnedDNS() {
+	result := map[string]bool{}
+	for _, transport := range []string{"udp", "tcp"} {
+		resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, transport, "10.0.1.1:53")
+		}}
+		for _, family := range []string{"ip4", "ip6"} {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			addresses, err := resolver.LookupIP(ctx, family, "fixture.example.com.")
+			cancel()
+			want := "1.1.1.1"
+			if family == "ip6" {
+				want = "2606:4700:4700::1111"
+			}
+			if err != nil || len(addresses) != 1 || addresses[0].String() != want {
+				panic("owned DNS binding failed")
+			}
+			result[transport+family] = true
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		addresses, err := resolver.LookupIP(ctx, "ip4", "unlisted.example.com.")
+		cancel()
+		if err == nil || len(addresses) != 0 {
+			panic("owned DNS unlisted name answered")
+		}
+		result[transport+"UnlistedDenied"] = true
+	}
+	if json.NewEncoder(os.Stdout).Encode(result) != nil {
+		panic("owned DNS report failed")
 	}
 }
 

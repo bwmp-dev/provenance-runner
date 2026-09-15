@@ -22,7 +22,7 @@ import (
 var ErrRouterOwner = errors.New("router_owner_unavailable")
 
 // RouterOwner owns one credential-free direct child in a separately journaled
-// cgroup. It provisions no links, routes, DNS sockets or public RPC endpoint.
+// cgroup. It creates only the fixed private DNS sockets, no links or public RPC.
 // Process cleanup does not prove all external namespace references are closed.
 type RouterOwner struct {
 	mu              sync.Mutex
@@ -32,6 +32,7 @@ type RouterOwner struct {
 	measurement     *runtimeidentity.Lease
 	child           *np.ChildNamespaces
 	resources       *np.RetainedResources
+	dns             *routerDNS
 	lifetime        *os.File
 	cmd             *exec.Cmd
 	done            chan struct{}
@@ -88,9 +89,16 @@ func StartRouterOwner(ctx context.Context, job *p.JobSpecification, journal *np.
 		return fail()
 	}
 	defer parentNet.Close()
+	dnsPair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, 0)
+	if err != nil {
+		return fail()
+	}
+	dnsParent, dnsChild := os.NewFile(uintptr(dnsPair[0]), "router-dns-receive"), os.NewFile(uintptr(dnsPair[1]), "router-dns-send")
+	defer dnsParent.Close()
+	defer dnsChild.Close()
 	cmd := exec.Command("/proc/self/fd/5", append([]string{RouterChildCommand}, args...)...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	cmd.ExtraFiles = []*os.File{reader, readyWriter, runner, parentNet}
+	cmd.ExtraFiles = []*os.File{reader, readyWriter, runner, parentNet, dnsChild}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWUSER | unix.CLONE_NEWNET | unix.CLONE_NEWNS,
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(mapping.UID), Size: 1}, {ContainerID: 65534, HostID: int(mapping.OverflowUID), Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(mapping.GID), Size: 1}, {ContainerID: 65534, HostID: int(mapping.OverflowGID), Size: 1}},
@@ -99,6 +107,7 @@ func StartRouterOwner(ctx context.Context, job *p.JobSpecification, journal *np.
 		return fail()
 	}
 	s.cmd, s.started = cmd, true
+	dnsChild.Close()
 	readyWriter.Close()
 	go func() { _ = cmd.Wait(); close(s.done) }()
 	stop := context.AfterFunc(ctx, func() { ready.Close() })
@@ -113,6 +122,10 @@ func StartRouterOwner(ctx context.Context, job *p.JobSpecification, journal *np.
 	}
 	s.resources, err = np.RetainResources(job, s.child, scope)
 	if err != nil || journal.CheckScope(s.scope) != nil || ctx.Err() != nil {
+		return fail()
+	}
+	s.dns, err = receiveRouterDNS(int(dnsParent.Fd()), s.child, job.Lease.JobId)
+	if err != nil {
 		return fail()
 	}
 	go func() {
@@ -158,6 +171,10 @@ func (s *RouterOwner) Close(ctx context.Context) error {
 	if s.lifetime != nil {
 		_ = s.lifetime.Close()
 	}
+	var dnsErr error
+	if s.dns != nil {
+		dnsErr = s.dns.Close()
+	}
 	if ctx == nil {
 		return ErrRouterOwner
 	}
@@ -165,7 +182,7 @@ func (s *RouterOwner) Close(ctx context.Context) error {
 	defer cancel()
 	if s.scope != nil {
 		if err := s.journal.Cleanup(ctx, s.scope); err != nil {
-			return errors.Join(ErrRouterOwner, err)
+			return errors.Join(ErrRouterOwner, err, dnsErr)
 		}
 	}
 	if s.started {
@@ -175,7 +192,7 @@ func (s *RouterOwner) Close(ctx context.Context) error {
 			return ErrRouterOwner
 		}
 	}
-	var errs []error
+	errs := []error{dnsErr}
 	if s.resources != nil {
 		errs = append(errs, s.resources.Close())
 	}

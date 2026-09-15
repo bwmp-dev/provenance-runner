@@ -111,6 +111,7 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	if err != nil {
 		t.Fatal("session construction", err)
 	}
+	assertRouterThreadsUnprivileged(t, session.router)
 	host, err := os.Open("/proc/self/ns/net")
 	if err != nil {
 		t.Fatal("session host namespace")
@@ -173,15 +174,27 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			t.Fatal("session packet or confinement check failed")
 		}
 	}
-	if mode == "session-router-loss" {
+	dnsChecks := read(reader)
+	if len(dnsChecks) != 6 {
+		t.Fatal("owned DNS checks missing")
+	}
+	for _, name := range []string{"udpip4", "udpip6", "tcpip4", "tcpip6", "udpUnlistedDenied", "tcpUnlistedDenied"} {
+		if dnsChecks[name] != true {
+			t.Fatal("owned DNS check failed")
+		}
+	}
+	if mode == "session-router-loss" || mode == "session-dns-loss" {
 		if read(reader)["phase"] != "flows-ready" {
 			t.Fatal("session flows unavailable")
 		}
 		if observation, err := session.ObserveRuntime(ctx); observation == nil || err != nil {
 			t.Fatal("session runtime observation", err)
 		}
-		if session.router.Close(ctx) != nil {
+		if mode == "session-router-loss" && session.router.Close(ctx) != nil {
 			t.Fatal("session router-loss fixture")
+		}
+		if mode == "session-dns-loss" && session.router.dns.udp.Close() != nil {
+			t.Fatal("session DNS-loss fixture")
 		}
 		if session.Wait(ctx) == nil || ctx.Err() != nil {
 			t.Fatal("router loss not propagated")
