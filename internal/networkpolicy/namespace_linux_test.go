@@ -142,8 +142,10 @@ func TestMappedChildNamespaceKernelOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s.Close()
-		if err := s.Validate(job); err != nil {
-			t.Fatal(err)
+		for observation := 0; observation < 256; observation++ {
+			if err := s.Validate(job); err != nil {
+				t.Fatalf("living child observation %d: %v", observation, err)
+			}
 		}
 		f, err := s.NetworkForJob(job)
 		if err != nil {
