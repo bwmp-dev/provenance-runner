@@ -19,6 +19,8 @@ type measuredSessionBudget struct {
 	timer            *time.Timer
 	deadline         time.Time
 	execution        time.Duration
+	preparation      time.Duration
+	claimed          bool
 	released, closed bool
 }
 
@@ -27,9 +29,22 @@ func newMeasuredSessionBudget(parent context.Context, preparation, execution tim
 		return nil, errMeasuredSession
 	}
 	ctx, cancel := context.WithCancelCause(parent)
-	b := &measuredSessionBudget{ctx: ctx, cancel: cancel, deadline: time.Now().Add(preparation), execution: execution}
+	b := &measuredSessionBudget{ctx: ctx, cancel: cancel, deadline: time.Now().Add(preparation), execution: execution, preparation: preparation}
 	b.timer = time.AfterFunc(preparation, func() { cancel(context.DeadlineExceeded) })
 	return b, nil
+}
+
+func (b *measuredSessionBudget) claim(preparation, execution time.Duration) error {
+	if b == nil {
+		return errMeasuredSession
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ctx == nil || b.claimed || b.closed || b.released || b.ctx.Err() != nil || !time.Now().Before(b.deadline) || b.preparation != preparation || b.execution != execution {
+		return errMeasuredSession
+	}
+	b.claimed = true
+	return nil
 }
 
 // beginExecution is one-shot and precedes opening the workload gate. It cannot

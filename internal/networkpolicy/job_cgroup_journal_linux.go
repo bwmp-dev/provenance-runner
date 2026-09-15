@@ -30,6 +30,7 @@ type JobCgroupJournal struct {
 	parentDev, parentIno uint64
 	active               map[string]*JobCgroup
 	records              map[string]journalScopeRecord
+	controllerResources  *ControllerResources
 	ready, closed        bool
 }
 
@@ -243,12 +244,19 @@ func (j *JobCgroupJournal) removeRecords(token string) error {
 // identity before handing out a launchable object. Partial failures stop new
 // admissions and preserve records; no failed journal write grants execution.
 func (j *JobCgroupJournal) Create(job *p.JobSpecification) (*JobCgroup, error) {
+	return j.CreateForController(job, nil)
+}
+
+func (j *JobCgroupJournal) CreateForController(job *p.JobSpecification, resources *ControllerResources) (*JobCgroup, error) {
 	if j == nil {
+		return nil, ErrResources
+	}
+	if resources != nil && resources.Validate() != nil {
 		return nil, ErrResources
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.closed || !j.ready || len(j.active) >= maxJournalScopes {
+	if j.closed || !j.ready || j.controllerResources != resources || len(j.active) >= maxJournalScopes {
 		return nil, ErrResources
 	}
 	owner, err := NewAuthority(job)
@@ -534,7 +542,7 @@ func (j *JobCgroupJournal) Close() error {
 	if j.closed {
 		return nil
 	}
-	if len(j.active) != 0 {
+	if len(j.active) != 0 || j.controllerResources != nil {
 		return ErrResources
 	}
 	j.closed = true

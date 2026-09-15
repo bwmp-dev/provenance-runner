@@ -43,6 +43,10 @@ type RouterOwner struct {
 // StartRouterOwner accepts trusted controller configuration only. Every non-nil
 // result owns its newly journaled scope, even on error, until Close succeeds.
 func StartRouterOwner(ctx context.Context, job *p.JobSpecification, journal *np.JobCgroupJournal, measurement *runtimeidentity.Lease, mapping np.MappedIdentity) (*RouterOwner, error) {
+	return startRouterOwnerWithResources(ctx, job, journal, measurement, mapping, nil)
+}
+
+func startRouterOwnerWithResources(ctx context.Context, job *p.JobSpecification, journal *np.JobCgroupJournal, measurement *runtimeidentity.Lease, mapping np.MappedIdentity, resources *np.ControllerResources) (*RouterOwner, error) {
 	groups, err := os.Getgroups()
 	if ctx == nil || ctx.Err() != nil || job == nil || journal == nil || measurement == nil || os.Getuid() != 0 || os.Geteuid() != 0 || err != nil || len(groups) != 0 {
 		return nil, ErrRouterOwner
@@ -58,7 +62,7 @@ func StartRouterOwner(ctx context.Context, job *p.JobSpecification, journal *np.
 	}
 	s := &RouterOwner{job: job, journal: journal, measurement: retained, done: make(chan struct{})}
 	fail := func() (*RouterOwner, error) { return s, errors.Join(ErrRouterOwner, s.Close(context.Background())) }
-	s.scope, err = journal.Create(job)
+	s.scope, err = journal.CreateForController(job, resources)
 	if err != nil {
 		return fail()
 	}

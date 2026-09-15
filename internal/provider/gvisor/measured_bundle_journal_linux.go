@@ -45,6 +45,7 @@ type measuredBundleJournal struct {
 	cgroups              *np.JobCgroupJournal
 	parentDev, parentIno uint64
 	active               map[string]*measuredBundle
+	controller           *measuredController
 	ready, closed        bool
 }
 
@@ -214,6 +215,10 @@ func (j *measuredBundleJournal) retire(r measuredBundleRecord) error {
 }
 
 func (j *measuredBundleJournal) create(job *p.JobSpecification) (*measuredBundle, error) {
+	return j.createForController(job, nil)
+}
+
+func (j *measuredBundleJournal) createForController(job *p.JobSpecification, controller *measuredController) (*measuredBundle, error) {
 	if j == nil || job == nil {
 		return nil, errMeasuredBundle
 	}
@@ -223,7 +228,7 @@ func (j *measuredBundleJournal) create(job *p.JobSpecification) (*measuredBundle
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.closed || !j.ready || len(j.active) >= 128 {
+	if j.closed || !j.ready || j.controller != controller || len(j.active) >= 128 {
 		return nil, errMeasuredBundle
 	}
 	r := measuredBundleRecord{Version: 1, Job: job.Lease.JobId, Lease: job.Lease.LeaseId, Execution: job.Lease.ExecutionId, Attempt: job.Attempt.AttemptId,
@@ -258,7 +263,11 @@ func (j *measuredBundleJournal) create(job *p.JobSpecification) (*measuredBundle
 	}
 	b := &measuredBundle{owner: j, record: r, directory: dir}
 	j.active[r.Job] = b
-	b.scope, err = j.cgroups.Create(job)
+	if controller != nil {
+		b.scope, err = j.cgroups.CreateForController(job, controller.resources)
+	} else {
+		b.scope, err = j.cgroups.Create(job)
+	}
 	if err != nil {
 		return b, errMeasuredBundle
 	}
@@ -384,12 +393,16 @@ func (j *measuredBundleJournal) removeDirectory(ctx context.Context, r measuredB
 }
 
 func (j *measuredBundleJournal) recover(ctx context.Context) error {
+	return j.recoverForController(ctx, nil)
+}
+
+func (j *measuredBundleJournal) recoverForController(ctx context.Context, controller *measuredController) error {
 	if j == nil || ctx == nil || ctx.Err() != nil {
 		return errMeasuredBundle
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.closed || len(j.active) != 0 {
+	if j.closed || j.controller != controller || len(j.active) != 0 {
 		return errMeasuredBundle
 	}
 	j.ready = false
@@ -476,7 +489,7 @@ func (j *measuredBundleJournal) close() error {
 	if j.closed {
 		return nil
 	}
-	if len(j.active) != 0 {
+	if len(j.active) != 0 || j.controller != nil {
 		return errMeasuredBundle
 	}
 	j.closed = true

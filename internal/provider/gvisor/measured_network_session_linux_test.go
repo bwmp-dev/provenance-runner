@@ -116,6 +116,12 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		c.Tools.IP = np.ProtectedRouteTool{}
 	}
 	var session *measuredNetworkSession
+	var controller *measuredController
+	var controlled *measuredControllerJob
+	var controllerInput measuredInput
+	if mode == "session-normal" || mode == "session-controller-resource-loss" {
+		controller, controllerInput = measuredControllerSessionFixture(t, ctx, c)
+	}
 	retainCleanup := func() {
 		if session != nil {
 			t.Cleanup(func() {
@@ -144,7 +150,14 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			defer close(finished)
 			caller, err = os.Open("/proc/self/task/" + strconv.Itoa(unix.Gettid()))
 			if err == nil {
-				session, err = startMeasuredSession(ctx, c)
+				controlled, err = controller.start(ctx, c.Launch.Job, measuredGuestCommand{Command: "/smoke", Arguments: []string{"probe-confined-dns"}}, []measuredInput{controllerInput}, c.Launch.Authority, in, out, stderr)
+				if controlled != nil {
+					session = controlled.session
+					c.Launch.Bundle = controlled.bundle
+					if controlled.bundle != nil {
+						c.Launch.Scope = controlled.bundle.scope
+					}
+				}
 			}
 		}
 		go start()
@@ -168,7 +181,18 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			}
 		}
 	} else {
-		session, err = startMeasuredSession(ctx, c)
+		if controller != nil {
+			controlled, err = controller.start(ctx, c.Launch.Job, measuredGuestCommand{Command: "/smoke", Arguments: []string{"probe-confined-dns-lifecycle"}}, []measuredInput{controllerInput}, c.Launch.Authority, in, out, stderr)
+			if controlled != nil {
+				session = controlled.session
+				c.Launch.Bundle = controlled.bundle
+				if controlled.bundle != nil {
+					c.Launch.Scope = controlled.bundle.scope
+				}
+			}
+		} else {
+			session, err = startMeasuredSession(ctx, c)
+		}
 		retainCleanup()
 	}
 	in.Close()
@@ -184,6 +208,16 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	}
 	if err != nil {
 		t.Fatal("session construction", err)
+	}
+	if controlled != nil {
+		t.Run("controller-busy-refusal", func(t *testing.T) {
+			if second, err := controller.start(ctx, c.Launch.Job, measuredGuestCommand{Command: "/smoke"}, []measuredInput{controllerInput}, c.Launch.Authority, in, out, stderr); second != nil || err == nil {
+				t.Fatal("busy controller admitted another job")
+			}
+			if controller.resources.Close() == nil || controller.resources.Validate() != nil {
+				t.Fatal("active aggregate handle released")
+			}
+		})
 	}
 	assertRouterThreadsUnprivileged(t, session.router)
 	host, err := os.Open("/proc/self/ns/net")
@@ -234,8 +268,27 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	if read(bufio.NewReaderSize(serverOutput, 4096))["serverReady"] != true {
 		t.Fatal("session server readiness")
 	}
-	if session.Release(ctx) != nil {
+	release := session.Release
+	if controlled != nil {
+		release = controlled.Release
+	}
+	if release(ctx) != nil {
 		t.Fatal("session release")
+	}
+	const cleanupRefusal = "/state-input/uplink-journal/controller-cleanup-refusal"
+	if controlled != nil && mode == "session-normal" {
+		foreign, err := os.OpenFile(cleanupRefusal, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			t.Fatal("controller cleanup refusal fixture")
+		}
+		if foreign.Close() != nil {
+			t.Fatal("controller cleanup fixture close")
+		}
+		t.Cleanup(func() {
+			if err := os.Remove(cleanupRefusal); err != nil && !os.IsNotExist(err) {
+				t.Error("controller cleanup fixture retirement")
+			}
+		})
 	}
 	output.SetReadDeadline(time.Now().Add(15 * time.Second))
 	reader := bufio.NewReaderSize(output, 4096)
@@ -257,11 +310,15 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			t.Fatal("owned DNS check failed")
 		}
 	}
-	if mode == "session-router-loss" || mode == "session-dns-loss" || mode == "session-dns-refresh-failure" || mode == "session-execution-timeout" {
+	if mode == "session-router-loss" || mode == "session-dns-loss" || mode == "session-dns-refresh-failure" || mode == "session-execution-timeout" || mode == "session-controller-resource-loss" {
 		if read(reader)["phase"] != "flows-ready" {
 			t.Fatal("session flows unavailable")
 		}
-		if observation, err := session.ObserveRuntime(ctx); observation == nil || err != nil {
+		observe := session.ObserveRuntime
+		if controlled != nil {
+			observe = controlled.ObserveRuntime
+		}
+		if observation, err := observe(ctx); observation == nil || err != nil {
 			t.Fatal("session runtime observation", err)
 		}
 		if mode == "session-router-loss" && session.router.Close(ctx) != nil {
@@ -273,15 +330,65 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		if mode == "session-dns-refresh-failure" {
 			resolver.fail.Store(true)
 		}
-		waitErr := session.Wait(ctx)
+		if mode == "session-controller-resource-loss" {
+			limit := strconv.FormatUint(2*c.Boundary.maximum.Resources.MemoryBytes, 10)
+			if os.WriteFile(controllerResourceFixturePath+"memory.max", []byte(strconv.FormatUint(2*c.Boundary.maximum.Resources.MemoryBytes+4096, 10)), 0600) != nil {
+				t.Fatal("aggregate drift fixture")
+			}
+			t.Cleanup(func() { os.WriteFile(controllerResourceFixturePath+"memory.max", []byte(limit), 0600) })
+		}
+		wait := session.Wait
+		if controlled != nil {
+			wait = controlled.Wait
+		}
+		waitErr := wait(ctx)
 		if waitErr == nil || ctx.Err() != nil {
 			t.Fatal("router loss not propagated")
 		}
 		if mode == "session-execution-timeout" && !errors.Is(waitErr, context.DeadlineExceeded) {
 			t.Fatal("execution timeout cause lost")
 		}
-	} else if session.Wait(ctx) != nil {
-		t.Fatal("normal session completion")
+		if mode == "session-controller-resource-loss" {
+			if !errors.Is(waitErr, np.ErrResources) {
+				t.Fatal("aggregate loss cause missing", waitErr)
+			}
+			if os.WriteFile(controllerResourceFixturePath+"memory.max", []byte(strconv.FormatUint(2*c.Boundary.maximum.Resources.MemoryBytes, 10)), 0600) != nil {
+				t.Fatal("restore aggregate fixture")
+			}
+			if controller.resources.Validate() == nil {
+				t.Fatal("restored aggregate drift resumed")
+			}
+		}
+	} else {
+		wait := session.Wait
+		if controlled != nil {
+			if session.Wait(ctx) != nil {
+				t.Fatal("controller session completion")
+			}
+			t.Run("controller-cleanup-refusal", func(t *testing.T) {
+				short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+				if controlled.Wait(short) == nil {
+					t.Fatal("unverified cleanup released controller job")
+				}
+				controller.mu.Lock()
+				held := controller.active == controlled && !controlled.retired
+				controller.mu.Unlock()
+				if !held {
+					t.Fatal("failed cleanup released controller slot")
+				}
+				if err := os.Remove(cleanupRefusal); err != nil {
+					t.Fatal("exact controller fixture retirement", err)
+				}
+				if controlled.Close(ctx) != nil {
+					t.Fatal("controller cleanup retry")
+				}
+			})
+			wait = controlled.Wait
+		}
+		if wait(ctx) != nil {
+			t.Fatal("normal session completion")
+		}
 	}
 	if session.dns.refreshes.Load() == 0 || session.dnsRefreshDone != nil {
 		t.Fatal("session DNS renewal or retirement missing")
@@ -291,6 +398,23 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	}
 	if observation, err := session.ObserveRuntime(ctx); observation != nil || err == nil {
 		t.Fatal("retired session observation")
+	}
+	if controlled != nil {
+		t.Run("controller-slot-retirement", func(t *testing.T) {
+			controller.mu.Lock()
+			active := controller.active
+			controller.mu.Unlock()
+			if active != nil || controlled.Release(ctx) == nil || controller.Close(ctx) != nil {
+				t.Fatal("controller slot or old handle survived")
+			}
+			reopened, err := newMeasuredController(ctx, controller.config)
+			if err != nil || reopened == nil {
+				t.Fatal("retired controller claim was not reusable", err)
+			}
+			if reopened.Close(ctx) != nil {
+				t.Fatal("reopened controller cleanup")
+			}
+		})
 	}
 	if c.Uplinks.Recover(ctx) != nil {
 		t.Fatal("session host peer survived")
