@@ -45,6 +45,8 @@ def validate_report(stdout, stderr, status):
     assert stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperServiceEventRefusalKernel ') == 3
+    for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
+        assert stdout.count('--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' ') == 3
     for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal'):
         assert stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement ') == 3
         assert stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal ') == 3

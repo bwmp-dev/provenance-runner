@@ -49,6 +49,9 @@ func run(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func runContext(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(arguments) == 2 && arguments[0] == "measured-service" {
+		return runMeasuredService(ctx, arguments[1], stderr)
+	}
 	if len(arguments) == 2 && arguments[0] == "validate-paper-catalogs" {
 		return runValidatePaperCatalogs(arguments[1], stdout, stderr)
 	}
@@ -189,6 +192,7 @@ func writeUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "       provenance-runner connect <connect.json> [--disable-object-upload-identity] [--enable-terminal-evidence-v2] [--enable-test-secrets]")
 	fmt.Fprintln(writer, "       provenance-runner enroll <enrollment.json>")
 	fmt.Fprintln(writer, "       provenance-runner validate-paper-catalogs <catalogs.json>")
+	fmt.Fprintln(writer, "       provenance-runner measured-service <root-owned-config.json>")
 }
 
 func readJob(path string, stdin io.Reader) ([]byte, error) {
