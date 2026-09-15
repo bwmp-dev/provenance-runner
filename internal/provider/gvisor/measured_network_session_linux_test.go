@@ -88,6 +88,10 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		resolver.blocked.Store(true)
 	}
 	c.Resolver = resolver
+	if mode == "session-paper-guest" || mode == "session-paper-guest-refusal" {
+		measuredPaperGuestFixture(t, ctx, mode, c, input, out, output)
+		return
+	}
 	if mode == "session-normal" {
 		for _, name := range []string{"local-maximum-refusal", "local-identity-refusal"} {
 			t.Run(name, func(t *testing.T) {

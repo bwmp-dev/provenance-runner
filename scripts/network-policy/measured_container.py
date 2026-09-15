@@ -75,12 +75,12 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal|DNSLoss|DNSRefreshFailure|PreparationTimeout|ExecutionTimeout|ControllerResourceLoss))$',
-                                 '-test.count=3', '-test.timeout=380s'],
+                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal|DNSLoss|DNSRefreshFailure|PreparationTimeout|ExecutionTimeout|ControllerResourceLoss|PaperGuest|PaperGuestRefusal))$',
+                                 '-test.count=3', '-test.timeout=410s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
                                      'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
-                                capture_output=True, text=True, timeout=390)
+                                capture_output=True, text=True, timeout=420)
         assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
         print(result.stdout, end='')
         if result.returncode:
@@ -90,7 +90,7 @@ def main():
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
-        for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss'):
+        for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss', 'PaperGuest', 'PaperGuestRefusal'):
             assert result.stdout.count('--- PASS: TestMeasuredNetworkSession'+case+' ') == 3
         for case in ('local-maximum-refusal', 'local-identity-refusal'):
             assert result.stdout.count('--- PASS: TestMeasuredNetworkSessionNormal/'+case+' ') == 3

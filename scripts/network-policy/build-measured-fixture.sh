@@ -5,6 +5,8 @@ set -euo pipefail
 [[ ! -e /tmp/measured-route-source && ! -e "$3/image.squashfs" ]]
 mkdir -m 0755 /tmp/measured-route-source
 cp "$1" /tmp/measured-route-source/smoke
+cp "$3/paper-helper" /tmp/measured-route-source/provenance-measured-paper
+chmod 0555 /tmp/measured-route-source/provenance-measured-paper
 chmod 0555 /tmp/measured-route-source/smoke
 chown 65532:65532 /tmp/measured-route-source
 mkdir -p /tmp/measured-route-source/{proc,dev/pts,workspace,tmp,inputs,etc}

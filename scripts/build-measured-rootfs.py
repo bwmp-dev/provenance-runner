@@ -5,6 +5,7 @@ Does not install, mount, replace, activate, or infer a production image pin.
 """
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -200,7 +202,41 @@ def tree_digest(root):
     return result.digest()
 
 
+def install_paper_guest(helper, expected, root, uid, gid):
+    if digest(helper) != expected:
+        raise Invalid("Paper guest identity mismatch")
+    header = helper.read(64)
+    if len(header) != 64 or header[:7] != b"\x7fELF\x02\x01\x01":
+        raise Invalid("Paper guest must be a Linux amd64 ELF")
+    kind, machine = struct.unpack_from("<HH", header, 16)
+    offset = struct.unpack_from("<Q", header, 32)[0]
+    entry_size, count = struct.unpack_from("<HH", header, 54)
+    if kind not in (2, 3) or machine != 62 or offset < 64 or entry_size != 56 or not 1 <= count <= 128 or offset + entry_size * count > os.fstat(helper.fileno()).st_size:
+        raise Invalid("Paper guest ELF profile invalid")
+    helper.seek(offset)
+    for _ in range(count):
+        program = helper.read(entry_size)
+        if len(program) != entry_size:
+            raise Invalid("Paper guest ELF changed")
+        if struct.unpack_from("<I", program)[0] == 3:
+            raise Invalid("Paper guest must not need a dynamic interpreter")
+    helper.seek(0)
+    target = root / "provenance-measured-paper"
+    with open(target, "xb") as destination:
+        shutil.copyfileobj(helper, destination, 1 << 16)
+        destination.flush()
+        os.fsync(destination.fileno())
+    with open(target, "rb") as copied:
+        if hashlib.file_digest(copied, "sha256").hexdigest() != expected:
+            raise Invalid("Paper guest copy changed")
+    os.chown(target, uid, gid)
+    os.chmod(target, 0o555)
+
+
 def build(args):
+    guest_path, guest_sha = getattr(args, "paper_guest", None), getattr(args, "paper_guest_sha256", None)
+    if bool(guest_path) != bool(guest_sha) or (guest_sha is not None and not re.fullmatch(r"[a-f0-9]{64}", guest_sha)):
+        raise Invalid("Paper guest and exact SHA256 must be supplied together")
     for value in (args.source_sha256, args.builder_sha256):
         if not re.fullmatch(r"[a-f0-9]{64}", value):
             raise Invalid("pin must be SHA256")
@@ -210,7 +246,7 @@ def build(args):
     if not output.is_absolute() or output.is_symlink() or str(output.resolve()) != str(output):
         raise Invalid("output must be canonical directory")
     output.mkdir(mode=0o700, exist_ok=True)
-    with bounded_file(args.source, MAX_SOURCE) as source, bounded_file(args.builder, MAX_SOURCE) as builder:
+    with bounded_file(args.source, MAX_SOURCE) as source, bounded_file(args.builder, MAX_SOURCE) as builder, (bounded_file(guest_path, 32 << 20) if guest_path else nullcontext()) as guest:
         if digest(source) != args.source_sha256 or digest(builder) != args.builder_sha256:
             raise Invalid("source/builder identity mismatch")
         images = []
@@ -221,6 +257,8 @@ def build(args):
                 root.mkdir(mode=0o700)
                 source.seek(0)
                 extract(source, root, args.uid, args.gid)
+                if guest is not None:
+                    install_paper_guest(guest, guest_sha, root, args.uid, args.gid)
                 before = tree_digest(root)
                 image = staging / f"image-{index}.squashfs"
                 # Linux FD execution binds the pinned builder object, not a
@@ -230,6 +268,8 @@ def build(args):
                                stderr=subprocess.DEVNULL, timeout=120, check=True)
                 if tree_digest(root) != before or digest(source) != args.source_sha256 or digest(builder) != args.builder_sha256:
                     raise Invalid("source/builder/staging changed")
+                if guest is not None and digest(guest) != guest_sha:
+                    raise Invalid("Paper guest input changed")
                 with bounded_file(image, MAX_EXPANDED) as file:
                     images.append((image, digest(file)))
             if images[0][1] != images[1][1]:
@@ -253,7 +293,8 @@ def build(args):
             return {"format": "squashfs-image-sha256/v1", "sha256": identity,
                     "sizeBytes": destination.stat().st_size, "sourceSha256": args.source_sha256,
                     "builderSha256": args.builder_sha256, "builderOptions": OPTIONS,
-                    "runnerUid": args.uid, "runnerGid": args.gid, "reproducibleBuilds": 2}
+                    "runnerUid": args.uid, "runnerGid": args.gid, "reproducibleBuilds": 2,
+                    **({"paperGuestSha256": guest_sha} if guest is not None else {})}
 
 
 if __name__ == "__main__":
@@ -262,6 +303,8 @@ if __name__ == "__main__":
         parser.add_argument("--" + option, required=True)
     parser.add_argument("--uid", type=int, required=True)
     parser.add_argument("--gid", type=int, required=True)
+    parser.add_argument("--paper-guest")
+    parser.add_argument("--paper-guest-sha256")
     try:
         print(json.dumps(build(parser.parse_args()), sort_keys=True, separators=(",", ":")))
     except (Invalid, OSError, tarfile.TarError, subprocess.SubprocessError):
