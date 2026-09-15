@@ -58,7 +58,7 @@ jobs:
         run: test "$(git -C _plan03-fixtures-source rev-parse HEAD)" = "${PLAN03_TOOLKIT_SHA}"
 
       - name: Set up fixture Node runtime
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: _plan03-fixtures-source/.node-version
 
