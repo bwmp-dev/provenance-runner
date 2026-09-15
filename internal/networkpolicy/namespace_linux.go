@@ -68,8 +68,8 @@ func RetainMappedChild(job string, child *os.Process, mapping MappedIdentity) (r
 	if e != nil {
 		return nil, ErrNamespace
 	}
-	if s.validateLocked(job) != nil {
-		return nil, ErrNamespace
+	if err := s.validateLocked(job); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -132,6 +132,9 @@ func (s *ChildNamespaces) validateLocked(job string) error {
 	}
 	poll := []unix.PollFd{{Fd: int32(s.pidfd.Fd()), Events: unix.POLLIN}}
 	if n, err := unix.Poll(poll, 0); err != nil || n != 0 || poll[0].Revents != 0 {
+		if err == unix.EINTR {
+			return fmt.Errorf("%w: initial liveness interrupted", ErrNamespace)
+		}
 		return ErrNamespace
 	}
 	status, err := s.read("status")
@@ -212,6 +215,9 @@ func (s *ChildNamespaces) validateLocked(job string) error {
 	}
 	// Recheck liveness after all procfs reads and namespace ownership ioctls.
 	if n, err := unix.Poll(poll, 0); err != nil || n != 0 || poll[0].Revents != 0 {
+		if err == unix.EINTR {
+			return fmt.Errorf("%w: final liveness interrupted", ErrNamespace)
+		}
 		return ErrNamespace
 	}
 	return nil
