@@ -106,6 +106,8 @@ def main():
                               'durableMeasuredJobScopeRetirement': True,
                               'durableMeasuredBundleRecoveryAndRetirement': True,
                               'closedControllerBundlePreparation': True,
+                              'journaledIndependentRouterOwner': True,
+                              'allRouterThreadsUnprivileged': True,
                               'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,
