@@ -36,6 +36,8 @@ type PrivateJobLink struct {
 	routerIdentity, peerIdentity privateLinkIdentity
 	created, ready, closed       bool
 	closeErr                     error
+	layout                       [32]byte
+	layoutParts                  [8][32]byte
 }
 
 func (l *PrivateJobLink) execute(ctx context.Context, namespace *os.File, args ...string) ([]byte, error) {
@@ -141,11 +143,28 @@ func CreatePrivateJobLink(ctx context.Context, job string, router, workload *Chi
 	if router.Validate(job) != nil || workload.Validate(job) != nil || l.routerIdentity.Peer != l.peerIdentity.Index || l.peerIdentity.Peer != l.routerIdentity.Index {
 		return l, ErrNamespace
 	}
+	if err := l.configureLayout(ctx); err != nil {
+		return l, err
+	}
+	l.layout, err = l.observeLayout(ctx)
+	if err != nil {
+		return l, err
+	}
 	l.ready = true
 	return l, nil
 }
 
 func (l *PrivateJobLink) Validate(ctx context.Context) error {
+	return l.validate(ctx, false)
+}
+
+// ValidatePrepared verifies the full host layout before the Sentry launch gate.
+// Runtime link identity validation is separate from this pre-exec observation.
+func (l *PrivateJobLink) ValidatePrepared(ctx context.Context) error {
+	return l.validate(ctx, true)
+}
+
+func (l *PrivateJobLink) validate(ctx context.Context, prepared bool) error {
 	if l == nil {
 		return ErrNamespace
 	}
@@ -159,6 +178,16 @@ func (l *PrivateJobLink) Validate(ctx context.Context) error {
 	b, other, e2 := l.identity(ctx, l.peer, "eth0", ":workload")
 	if e1 != nil || e2 != nil || !present || !other || a != l.routerIdentity || b != l.peerIdentity {
 		l.ready = false
+		return ErrNamespace
+	}
+	if !prepared {
+		return nil
+	}
+	if layout, err := l.observeLayout(ctx); err != nil || layout != l.layout {
+		l.ready = false
+		if err != nil {
+			return err
+		}
 		return ErrNamespace
 	}
 	return nil

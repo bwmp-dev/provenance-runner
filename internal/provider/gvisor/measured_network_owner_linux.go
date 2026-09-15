@@ -194,7 +194,7 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context, link *np.PrivateJo
 	if ctx == nil || ctx.Err() != nil || !s.started || s.stopping || s.closed || s.released || s.gate == nil || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil || !s.bundle.matchesPrivateRoot(s.privateRoot) || s.bundle.checkPrepared(s.mapping) != nil || s.measurement.Validate() != nil || s.resources.ValidateForChild(s.job, s.child) != nil {
 		return refuse()
 	}
-	if s.authority.ObserveInstalledForLink(ctx, s.job, s.child, link) != nil {
+	if link.ValidatePrepared(ctx) != nil || s.authority.ObserveInstalledForLink(ctx, s.job, s.child, link) != nil || link.ValidatePrepared(ctx) != nil {
 		return refuse()
 	}
 	if n, err := s.gate.Write([]byte("s")); err != nil || n != 1 {

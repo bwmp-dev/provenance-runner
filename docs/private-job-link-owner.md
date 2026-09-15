@@ -1,6 +1,7 @@
 # Owned private workload-to-router link
 
-`CreatePrivateJobLink` creates only the veth pair between the exact retained
+`CreatePrivateJobLink` creates the veth pair and its
+[fixed private layout](private-job-network-layout.md) between the exact retained
 router and workload namespaces. Both must initially contain only loopback and
 have distinct mapped owners. The operation uses retained protected executables
 and a passed namespace descriptor for peer transfer, never a PID lookup, shell,

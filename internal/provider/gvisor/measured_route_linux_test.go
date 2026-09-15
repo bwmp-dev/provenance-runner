@@ -166,9 +166,13 @@ func TestMeasuredAuthorityRouteSentryLinkRefusal(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "link-refusal")
 }
 
+func TestMeasuredAuthorityRouteSentryLayoutRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "layout-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -393,7 +397,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
-		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal") {
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" || authorityMode == "layout-refusal") {
 			inputRead, inputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -605,6 +609,44 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		if probe.Validate(ctx) == nil || probe.Close(ctx) != nil {
 			t.Fatal("link refusal resumed or could not clean original identity")
 		}
+		for _, drift := range []struct {
+			name            string
+			change, restore []string
+		}{
+			{"default-route", []string{"route", "del", "default"}, []string{"route", "add", "default", "via", "10.0.1.1", "dev", "eth0"}},
+			{"ipv6-address", []string{"-6", "addr", "del", "fd00:1::2/64", "dev", "eth0"}, []string{"-6", "addr", "add", "fd00:1::2/64", "dev", "eth0", "nodad"}},
+			{"permanent-neighbor", []string{"neigh", "del", "10.0.1.1", "dev", "eth0"}, nil},
+			{"extra-interface", []string{"link", "add", "bypass", "type", "dummy"}, []string{"link", "delete", "bypass"}},
+		} {
+			probe, err := np.CreatePrivateJobLink(ctx, job, router, workload, tools)
+			if probe != nil {
+				t.Cleanup(func() {
+					if probe.Close(context.Background()) != nil {
+						t.Error("layout probe cleanup")
+					}
+				})
+			}
+			if err != nil || probe.ValidatePrepared(ctx) != nil {
+				t.Fatal("layout probe creation", drift.name, err)
+			}
+			if _, err := execute(jobFD, tools.IP, drift.change...); err != nil {
+				t.Fatal("layout drift fixture", drift.name)
+			}
+			if probe.ValidatePrepared(ctx) == nil {
+				t.Fatal("layout drift admitted", drift.name)
+			}
+			if drift.restore != nil {
+				if _, err := execute(jobFD, tools.IP, drift.restore...); err != nil {
+					t.Fatal("layout restoration fixture", drift.name)
+				}
+				if probe.ValidatePrepared(ctx) == nil || probe.Validate(ctx) == nil {
+					t.Fatal("restored layout resumed", drift.name)
+				}
+			}
+			if probe.Close(ctx) != nil {
+				t.Fatal("layout drift cleanup", drift.name)
+			}
+		}
 	}
 	privateLink, err := np.CreatePrivateJobLink(ctx, job, router, workload, tools)
 	if privateLink != nil {
@@ -617,7 +659,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err != nil {
 		t.Fatal("owned private link creation", err)
 	}
-	if err := privateLink.Validate(ctx); err != nil {
+	if err := privateLink.ValidatePrepared(ctx); err != nil {
 		t.Fatal("private link identity", err)
 	}
 	if unexpected, err := np.CreatePrivateJobLink(ctx, job, router, workload, tools); unexpected != nil || err == nil {
@@ -646,7 +688,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	for _, item := range []struct {
 		fd          *os.File
 		dev, v4, v6 string
-	}{{jobFD, "eth0", "10.0.1.2", "fd00:1::2"}, {routerFD, "job0", "10.0.1.1", "fd00:1::1"}, {routerFD, "wan0", "10.0.2.1", "fd00:2::1"}, {wanFD, "eth0", "10.0.2.2", "fd00:2::2"}} {
+	}{{routerFD, "wan0", "10.0.2.1", "fd00:2::1"}, {wanFD, "eth0", "10.0.2.2", "fd00:2::2"}} {
 		scoped(item.fd, "link", "set", "lo", "up")
 		scoped(item.fd, "addr", "add", item.v4+"/24", "dev", item.dev)
 		scoped(item.fd, "-6", "addr", "add", item.v6+"/64", "dev", item.dev, "nodad")
@@ -664,7 +706,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	for _, item := range []struct {
 		fd, peer             *os.File
 		dev, peerdev, v4, v6 string
-	}{{jobFD, routerFD, "eth0", "job0", "10.0.1.1", "fd00:1::1"}, {routerFD, jobFD, "job0", "eth0", "10.0.1.2", "fd00:1::2"}, {routerFD, wanFD, "wan0", "eth0", "10.0.2.2", "fd00:2::2"}, {wanFD, routerFD, "eth0", "wan0", "10.0.2.1", "fd00:2::1"}} {
+	}{{routerFD, wanFD, "wan0", "eth0", "10.0.2.2", "fd00:2::2"}, {wanFD, routerFD, "eth0", "wan0", "10.0.2.1", "fd00:2::1"}} {
 		for _, address := range []string{item.v4, item.v6} {
 			scoped(item.fd, "neigh", "replace", address, "lladdr", mac(item.peer, item.peerdev), "nud", "permanent", "dev", item.dev)
 		}
@@ -672,7 +714,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	for _, item := range []struct {
 		fd     *os.File
 		v4, v6 string
-	}{{jobFD, "10.0.1.1", "fd00:1::1"}, {routerFD, "10.0.2.2", "fd00:2::2"}, {wanFD, "10.0.2.1", "fd00:2::1"}} {
+	}{{routerFD, "10.0.2.2", "fd00:2::2"}, {wanFD, "10.0.2.1", "fd00:2::1"}} {
 		scoped(item.fd, "route", "add", "default", "via", item.v4)
 		scoped(item.fd, "-6", "route", "add", "default", "via", item.v6)
 	}
@@ -792,8 +834,14 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
-	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" {
-		if authorityMode == "link-refusal" {
+	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" || authorityMode == "layout-refusal" {
+		if authorityMode == "layout-refusal" {
+			scoped(jobFD, "route", "del", "default")
+			if launchOwner.Release(ctx, privateLink) == nil {
+				t.Fatal("damaged layout opened gate")
+			}
+			scoped(jobFD, "route", "add", "default", "via", "10.0.1.1", "dev", "eth0")
+		} else if authorityMode == "link-refusal" {
 			if launchOwner.Release(ctx, nil) == nil {
 				t.Fatal("missing link proof opened gate")
 			}
@@ -856,6 +904,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			t.Fatal("owned launch gate", err)
 		}
 	} else {
+		if privateLink.ValidatePrepared(ctx) != nil {
+			t.Fatal("fixture pre-exec layout")
+		}
 		if _, err := release.Write([]byte("s")); err != nil {
 			t.Fatal(err)
 		}
