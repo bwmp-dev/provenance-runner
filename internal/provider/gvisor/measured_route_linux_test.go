@@ -55,14 +55,6 @@ func TestMeasuredRouteFixtureHelper(t *testing.T) {
 	if err != nil || os.SameFile(current, parent) {
 		os.Exit(2)
 	}
-	if mode == "forward" {
-		for _, path := range []string{"/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv6/conf/all/forwarding"} {
-			if os.WriteFile(path, []byte("1\n"), 0600) != nil {
-				os.Exit(2)
-			}
-		}
-		os.Exit(0)
-	}
 	if mode != "server" {
 		os.Exit(2)
 	}
@@ -192,7 +184,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Fatal("disposable group drop unavailable")
 	}
 	// Only this fresh container's private mount namespace gets a writable proc
-	// view. The helper below writes forwarding solely in the retained router net.
+	// view. The router child configures forwarding solely in its own fresh net.
 	if unix.Mount("proc", "/proc", "proc", 0, "") != nil {
 		t.Fatal("disposable proc view unavailable")
 	}
@@ -201,6 +193,24 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			t.Error("disposable proc cleanup failed")
 		}
 	})
+	parentForwarding := map[string]string{}
+	for _, path := range []string{"/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv6/conf/all/forwarding", "/proc/sys/net/ipv6/conf/default/forwarding", "/proc/sys/net/ipv4/conf/all/send_redirects", "/proc/sys/net/ipv4/conf/default/send_redirects", "/proc/sys/net/ipv6/conf/all/accept_ra", "/proc/sys/net/ipv6/conf/default/accept_ra"} {
+		value, err := os.ReadFile(path)
+		if err != nil || len(value) > 3 {
+			t.Fatal("parent forwarding observation")
+		}
+		parentForwarding[path] = string(value)
+	}
+	checkParentForwarding := func() {
+		t.Helper()
+		for path, expected := range parentForwarding {
+			value, err := os.ReadFile(path)
+			if err != nil || string(value) != expected {
+				t.Error("router changed parent networking")
+			}
+		}
+	}
+	t.Cleanup(checkParentForwarding)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	const job = "10000000-0000-4000-8000-000000000001"
@@ -547,6 +557,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	assertRouterThreadsUnprivileged(t, routerOwner)
 	router := routerOwner.Child()
+	checkParentForwarding()
 	routerFD, err := router.NetworkForJob(job)
 	if err != nil {
 		t.Fatal(err)
@@ -740,10 +751,6 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 		return cmd, bufio.NewReaderSize(output, 4096)
-	}
-	forward, _ := helper(routerFD, "forward")
-	if forward.Wait() != nil {
-		t.Fatal("owned forwarding setup failed")
 	}
 	server, serverOutput := helper(wanFD, "server")
 	if read(serverOutput)["serverReady"] != true {

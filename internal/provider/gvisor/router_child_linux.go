@@ -33,7 +33,8 @@ func routerChildInputs(args []string) ([4]uint32, bool) {
 }
 
 // RunRouterChild is a closed, credential-free namespace holder. It executes no
-// command, reads no job payload and provisions no route. FD3 is its lifetime
+// command and reads no job payload. Before dropping privileges, it configures
+// only fixed forwarding controls in its fresh private namespace. FD3 is its lifetime
 // pipe, FD4 readiness, FD5 the retained runner, FD6 the parent's network namespace.
 func RunRouterChild(args []string, stderr io.Writer) int {
 	fail := func() int { fmt.Fprintln(stderr, "router holder refused"); return runscFailureExitCode }
@@ -63,7 +64,10 @@ func RunRouterChild(args []string, stderr io.Writer) int {
 			return fail()
 		}
 	}
-	// The holder needs no capabilities after namespace creation and never execs.
+	if !prepareRouterForwarding() {
+		return fail()
+	}
+	// The holder needs no capabilities after private setup and never execs.
 	// Capabilities and no-new-privileges are per-thread. Go has already created
 	// runtime threads, so changing only the calling thread is insufficient.
 	if _, _, err := syscall.AllThreadsSyscall6(unix.SYS_PRCTL, unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0, 0); err != 0 {
