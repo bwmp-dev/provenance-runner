@@ -84,6 +84,10 @@ func TestMeasuredPaperServiceEventRefusalKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "reject-events")
 }
 
+func TestMeasuredPaperDaemonKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "daemon")
+}
+
 func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		t.Skip("explicit disposable service fixture required")
@@ -317,7 +321,30 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), mode)
+	var daemon *Daemon
+	var daemonDone chan error
+	clientMode := mode
+	if mode == "daemon" {
+		clientMode = "complete"
+		// Retire the manual fixture provisioner before testing the complete
+		// daemon's reopening/recovery of these same owned, empty journals.
+		if listener.Close() != nil || server.Close(ctx) != nil || uplinks.Close() != nil || bundles.Close() != nil || groups.Close() != nil {
+			t.Fatal("retire fixture provisioner before daemon")
+		}
+		daemon = openFixtureDaemon(t, ctx, root, state, bundlePath, lease, tools, source, job)
+		listener, server = daemon.listener, daemon.server
+		daemonDone = make(chan error, 1)
+		go func() { daemonDone <- daemon.Serve() }()
+		t.Cleanup(func() {
+			if daemon.Close(context.Background()) != nil {
+				t.Error("daemon ownership retained")
+			}
+			if daemonDone != nil {
+				<-daemonDone
+			}
+		})
+	}
+	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), clientMode)
 	command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1"}
 	command.ExtraFiles = files
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
@@ -325,15 +352,18 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	command.Stderr = &diagnostic
 	clientDone := make(chan error, 1)
 	go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); clientDone <- command.Run() }()
-	channel, err := listener.Accept(time.Now().Add(5 * time.Second))
-	if err != nil {
-		cancel()
-		<-clientDone
-		t.Fatal("service client acceptance", err, diagnostic.String())
+	var serveErr error
+	if daemon == nil {
+		channel, err := listener.Accept(time.Now().Add(5 * time.Second))
+		if err != nil {
+			cancel()
+			<-clientDone
+			t.Fatal("service client acceptance", err, diagnostic.String())
+		}
+		serveErr = server.Serve(ctx, channel)
 	}
-	serveErr := server.Serve(ctx, channel)
 	clientErr := <-clientDone
-	if (serveErr != nil) != (mode != "complete" && mode != "reject-events") || clientErr != nil {
+	if (serveErr != nil) != (clientMode != "complete" && clientMode != "reject-events") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
 	}
 	t.Run("root-idle-barrier-after-retirement", func(t *testing.T) {
@@ -344,17 +374,27 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		probe.Stderr = &output
 		done := make(chan error, 1)
 		go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); done <- probe.Run() }()
-		channel, err := listener.Accept(time.Now().Add(5 * time.Second))
-		if err != nil {
-			cancel()
-			<-done
-			t.Fatal("idle probe admission", err)
+		var serveErr error
+		if daemon == nil {
+			channel, err := listener.Accept(time.Now().Add(5 * time.Second))
+			if err != nil {
+				cancel()
+				<-done
+				t.Fatal("idle probe admission", err)
+			}
+			serveErr = server.Serve(ctx, channel)
 		}
-		serveErr := server.Serve(ctx, channel)
 		if clientErr := <-done; serveErr != nil || clientErr != nil {
 			t.Fatal("authenticated idle barrier", serveErr, clientErr, output.String())
 		}
 	})
+	if daemon != nil {
+		if daemon.Close(ctx) != nil {
+			t.Fatal("daemon retirement")
+		}
+		<-daemonDone
+		daemonDone = nil
+	}
 	if server.Close(ctx) != nil || listener.Close() != nil {
 		t.Fatal("service retirement")
 	}

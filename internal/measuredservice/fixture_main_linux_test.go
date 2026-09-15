@@ -28,6 +28,18 @@ import (
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
+		if len(os.Args) == 2 && os.Args[1] == "--version" && os.Getuid() == 0 {
+			// Explicit root-pin regression canary, never a JAR interpreter.
+			if enabled, err := os.Stat("/tmp/provenance-version-pin-fixture-enabled"); err == nil && enabled.Mode().IsRegular() && enabled.Mode().Perm() == 0400 {
+				if _, err := os.Stat("/.dockerenv"); err == nil {
+					if os.WriteFile("/tmp/provenance-unexpected-version-invocation", []byte("synthetic version invocation"), 0600) != nil {
+						os.Exit(1)
+					}
+					fmt.Println("runsc version fixture")
+					return
+				}
+			}
+		}
 		switch os.Args[1] {
 		case gvisor.MeasuredNetworkChildCommand:
 			os.Exit(gvisor.RunMeasuredNetworkChild(os.Args[2:], os.Stderr))

@@ -69,6 +69,29 @@ func (l *Lease) Close() error {
 // Acquire never converts or mounts anything. A configured measured path either
 // establishes every identity, or returns a safe error to abort that execution.
 func Acquire(ctx context.Context, sandboxPath, rootPath, imagePath string, loopPaths ...string) (result *Lease, err error) {
+	return acquire(ctx, sandboxPath, rootPath, imagePath, nil, loopPaths...)
+}
+
+// ExpectedObjects are trusted deployment pins, not observed version labels.
+type ExpectedObjects struct {
+	RunnerSHA256, SandboxSHA256, RootFSSHA256 string
+}
+
+// AcquirePinned checks expected object digests before invoking the retained
+// sandbox executable for its version. A wrong pin cannot execute even --version.
+func AcquirePinned(ctx context.Context, sandboxPath, rootPath, imagePath string, expected ExpectedObjects, loopPaths ...string) (*Lease, error) {
+	for _, digest := range []string{expected.RunnerSHA256, expected.SandboxSHA256, expected.RootFSSHA256} {
+		if !digestPattern.MatchString(digest) || digest == strings.Repeat("0", 64) {
+			return nil, ErrUnavailable
+		}
+	}
+	return acquire(ctx, sandboxPath, rootPath, imagePath, &expected, loopPaths...)
+}
+
+func acquire(ctx context.Context, sandboxPath, rootPath, imagePath string, expected *ExpectedObjects, loopPaths ...string) (result *Lease, err error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, ErrUnavailable
+	}
 	if len(loopPaths) > 1 {
 		return nil, ErrUnavailable
 	}
@@ -86,6 +109,9 @@ func Acquire(ctx context.Context, sandboxPath, rootPath, imagePath string, loopP
 	if err != nil {
 		return nil, err
 	}
+	if expected != nil && l.runnerHash != expected.RunnerSHA256 {
+		return nil, ErrDrift
+	}
 	l.sandbox, err = openProtected(sandboxPath, false)
 	if err != nil {
 		return nil, err
@@ -94,6 +120,9 @@ func Acquire(ctx context.Context, sandboxPath, rootPath, imagePath string, loopP
 	if err != nil {
 		return nil, err
 	}
+	if expected != nil && l.sandboxHash != expected.SandboxSHA256 {
+		return nil, ErrDrift
+	}
 	l.image, err = openProtected(imagePath, false)
 	if err != nil {
 		return nil, err
@@ -101,6 +130,9 @@ func Acquire(ctx context.Context, sandboxPath, rootPath, imagePath string, loopP
 	l.imageHash, err = hashObject(l.image, maximumImageBytes, false)
 	if err != nil {
 		return nil, err
+	}
+	if expected != nil && l.imageHash != expected.RootFSSHA256 {
+		return nil, ErrDrift
 	}
 	if unix.Fstat(int(l.image.Fd()), &l.imageStat) != nil {
 		return nil, ErrUnavailable
@@ -391,6 +423,8 @@ func sandboxVersion(parent context.Context, path string) (string, error) {
 	defer cancel()
 	var output boundedOutput
 	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	cmd.Dir = "/"
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	if cmd.Run() != nil || output.overflow {
