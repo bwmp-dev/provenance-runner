@@ -19,11 +19,14 @@ class MeasuredAcceptanceTests(unittest.TestCase):
             remove.assert_called_once_with('/tmp/owned-fixture', ignore_errors=True)
 
     def test_all_repeated_real_cases_and_cleanup_are_mandatory(self):
-        rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal', 'LayoutRefusal') for _ in range(3)]
+        rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal', 'LayoutRefusal', 'UplinkRefusal') for _ in range(3)]
         rows += ['{"measuredRoutedOwnedLoopDetached": true}']
         rows += ['{"exclusiveMeasuredJobScopesRemoved": true}']
         rows += ['{"measuredJobJournalRetired": true}']
         rows += ['{"measuredBundleJournalRetired": true}']
+        rows += ['{"measuredHostUplinkJournalRetired": true}']
+        rows += ['--- PASS: TestMeasuredHostUplinkColdRecovery (1s)' for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredAuthorityRouteSentryOwnedLaunch/'+case+' (1s)' for case in ('uplink-alias-refusal', 'uplink-journal-refusal', 'uplink-prefix-refusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' (1s)' for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/'+suffix+' (1s)' for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root') for _ in range(3)]
         report = '\n'.join(rows)

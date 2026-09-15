@@ -34,9 +34,13 @@ def validate_report(stdout, stderr, status):
     assert '{"exclusiveMeasuredJobScopesRemoved": true}' in stdout
     assert '{"measuredJobJournalRetired": true}' in stdout
     assert '{"measuredBundleJournalRetired": true}' in stdout
+    assert '{"measuredHostUplinkJournalRetired": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal', 'LayoutRefusal'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal', 'LayoutRefusal', 'UplinkRefusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
+    assert stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
+    for case in ('uplink-alias-refusal', 'uplink-journal-refusal', 'uplink-prefix-refusal'):
+        assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentryOwnedLaunch/'+case+' ') == 3
     for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' ') == 3
     for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root'):

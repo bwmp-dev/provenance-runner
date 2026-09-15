@@ -52,10 +52,26 @@ func TestMeasuredRouteFixtureHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	parent, err := os.Stat("/proc/1/ns/net")
-	if err != nil || os.SameFile(current, parent) {
+	if err != nil {
 		os.Exit(2)
 	}
-	if mode != "server" {
+	if mode == "host-uplink-server" {
+		if !os.SameFile(current, parent) {
+			os.Exit(2)
+		}
+		if _, err := os.Stat("/.dockerenv"); err != nil {
+			os.Exit(2)
+		}
+		interfaces, err := net.Interfaces()
+		if err != nil || len(interfaces) != 2 {
+			os.Exit(2)
+		}
+		for _, link := range interfaces {
+			if link.Name != "lo" && (!strings.HasPrefix(link.Name, "ph") || len(link.Name) != 15) {
+				os.Exit(2)
+			}
+		}
+	} else if mode != "server" || os.SameFile(current, parent) {
 		os.Exit(2)
 	}
 	for _, network := range []string{"tcp4", "tcp6"} {
@@ -162,9 +178,13 @@ func TestMeasuredAuthorityRouteSentryLayoutRefusal(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "layout-refusal")
 }
 
+func TestMeasuredAuthorityRouteSentryUplinkRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "uplink-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -386,12 +406,15 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	tools := np.RouteTools{NSenter: load("nsenter"), NFT: load("nft"), IP: load("ip")}
 	self := load(os.Args[0])
-	execute := func(fd *os.File, tool np.ProtectedRouteTool, args ...string) ([]byte, error) {
-		command := exec.CommandContext(ctx, "/proc/self/fd/4")
+	executeContext := func(commandContext context.Context, fd *os.File, tool np.ProtectedRouteTool, args ...string) ([]byte, error) {
+		command := exec.CommandContext(commandContext, "/proc/self/fd/4")
 		command.Args = append([]string{"nsenter", "-F", "--preserve-credentials", "-n/proc/self/fd/3", "--", "/proc/self/fd/5"}, args...)
 		command.ExtraFiles = []*os.File{fd, tools.NSenter.File, tool.File}
 		command.Env = []string{"PATH=/usr/bin:/bin"}
 		return command.Output()
+	}
+	execute := func(fd *os.File, tool np.ProtectedRouteTool, args ...string) ([]byte, error) {
+		return executeContext(ctx, fd, tool, args...)
 	}
 	read := func(reader *bufio.Reader) map[string]any {
 		t.Helper()
@@ -407,7 +430,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
-		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" || authorityMode == "layout-refusal") {
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" || authorityMode == "layout-refusal" || authorityMode == "uplink-refusal" || authorityMode == "uplink-crash") {
 			inputRead, inputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -588,7 +611,11 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 		return
 	}
-	_, wan, _, _, wanFD := child(65528, false)
+	wanFD, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal("disposable host network descriptor")
+	}
+	t.Cleanup(func() { wanFD.Close() })
 	if authorityMode == "owned-launch" {
 		probe, err := np.CreatePrivateJobLink(ctx, job, router, workload, tools)
 		if probe != nil {
@@ -684,50 +711,43 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 		return raw
 	}
-	for _, pair := range []struct {
-		name, peer string
-		pid        int
-	}{{"wan0", "eth0", wan.Process.Pid}} {
-		scoped(routerFD, "link", "add", pair.name, "type", "veth", "peer", "name", "newpeer")
-		scoped(routerFD, "link", "set", "newpeer", "netns", strconv.Itoa(pair.pid))
-		peerFD := jobFD
-		if pair.name == "wan0" {
-			peerFD = wanFD
-		}
-		scoped(peerFD, "link", "set", "newpeer", "name", pair.peer)
+	statePath := "/state-input/uplink-journal"
+	if err := os.Mkdir(statePath, 0700); err != nil && !os.IsExist(err) {
+		t.Fatal("uplink state fixture")
 	}
-	for _, item := range []struct {
-		fd          *os.File
-		dev, v4, v6 string
-	}{{routerFD, "wan0", "10.0.2.1", "fd00:2::1"}, {wanFD, "eth0", "10.0.2.2", "fd00:2::2"}} {
-		scoped(item.fd, "link", "set", "lo", "up")
-		scoped(item.fd, "addr", "add", item.v4+"/24", "dev", item.dev)
-		scoped(item.fd, "-6", "addr", "add", item.v6+"/64", "dev", item.dev, "nodad")
-		scoped(item.fd, "link", "set", item.dev, "up")
+	uplinkState, err := os.Open(statePath)
+	if err != nil {
+		t.Fatal("uplink state descriptor")
 	}
-	mac := func(fd *os.File, dev string) string {
-		var rows []struct {
-			Address string `json:"address"`
-		}
-		if json.Unmarshal(scoped(fd, "-j", "link", "show", dev), &rows) != nil || len(rows) != 1 {
-			t.Fatal("native peer identity unavailable")
-		}
-		return rows[0].Address
+	uplinkJournal, err := np.OpenHostUplinkJournal(uplinkState, tools)
+	uplinkState.Close()
+	if err != nil {
+		t.Fatal("host uplink journal", err)
 	}
-	for _, item := range []struct {
-		fd, peer             *os.File
-		dev, peerdev, v4, v6 string
-	}{{routerFD, wanFD, "wan0", "eth0", "10.0.2.2", "fd00:2::2"}, {wanFD, routerFD, "eth0", "wan0", "10.0.2.1", "fd00:2::1"}} {
-		for _, address := range []string{item.v4, item.v6} {
-			scoped(item.fd, "neigh", "replace", address, "lladdr", mac(item.peer, item.peerdev), "nud", "permanent", "dev", item.dev)
+	t.Cleanup(func() {
+		if uplinkJournal.Close() != nil {
+			t.Error("uplink journal close")
 		}
+	})
+	if err := uplinkJournal.Recover(ctx); err != nil {
+		t.Fatal("host uplink recovery", err)
 	}
-	for _, item := range []struct {
-		fd     *os.File
-		v4, v6 string
-	}{{routerFD, "10.0.2.2", "fd00:2::2"}, {wanFD, "10.0.2.1", "fd00:2::1"}} {
-		scoped(item.fd, "route", "add", "default", "via", item.v4)
-		scoped(item.fd, "-6", "route", "add", "default", "via", item.v6)
+	if authorityMode == "owned-launch" {
+		testMeasuredUplinkRefusals(t, ctx, uplinkJournal, privateLink, specification, tools, wanFD, executeContext)
+	}
+	uplink, err := uplinkJournal.Create(ctx, specification, privateLink)
+	if uplink != nil {
+		t.Cleanup(func() {
+			if uplink.Close(context.Background()) != nil {
+				t.Error("host uplink cleanup")
+			}
+		})
+	}
+	if err != nil || uplink.Validate(ctx) != nil {
+		t.Fatal("host uplink creation", err)
+	}
+	if authorityMode == "uplink-crash" {
+		os.Exit(73)
 	}
 	for _, address := range []string{"1.1.1.1/32", "1.0.0.1/32", "169.254.169.254/32", "2606:4700:4700::1111/128", "2606:4700:4700::1001/128"} {
 		args := []string{"addr", "add", address, "dev", "lo"}
@@ -735,6 +755,14 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			args = append(args, "nodad")
 		}
 		scoped(wanFD, args...)
+		t.Cleanup(func() {
+			cleanupContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			remove := []string{"addr", "del", address, "dev", "lo"}
+			if _, err := executeContext(cleanupContext, wanFD, tools.IP, remove...); err != nil {
+				t.Error("synthetic host address cleanup")
+			}
+		})
 	}
 	helper := func(fd *os.File, mode string) (*exec.Cmd, *bufio.Reader) {
 		t.Helper()
@@ -752,7 +780,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 		return cmd, bufio.NewReaderSize(output, 4096)
 	}
-	server, serverOutput := helper(wanFD, "server")
+	server, serverOutput := helper(wanFD, "host-uplink-server")
 	if read(serverOutput)["serverReady"] != true {
 		t.Fatal("native server not ready")
 	}
@@ -841,15 +869,19 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
-	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" || authorityMode == "layout-refusal" {
-		if authorityMode == "layout-refusal" {
+	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" || authorityMode == "layout-refusal" || authorityMode == "uplink-refusal" {
+		if authorityMode == "uplink-refusal" {
+			if launchOwner.Release(ctx, privateLink, nil) == nil {
+				t.Fatal("missing host uplink proof opened gate")
+			}
+		} else if authorityMode == "layout-refusal" {
 			scoped(jobFD, "route", "del", "default")
-			if launchOwner.Release(ctx, privateLink) == nil {
+			if launchOwner.Release(ctx, privateLink, uplink) == nil {
 				t.Fatal("damaged layout opened gate")
 			}
 			scoped(jobFD, "route", "add", "default", "via", "10.0.1.1", "dev", "eth0")
 		} else if authorityMode == "link-refusal" {
-			if launchOwner.Release(ctx, nil) == nil {
+			if launchOwner.Release(ctx, nil, uplink) == nil {
 				t.Fatal("missing link proof opened gate")
 			}
 		} else if authorityMode == "prepared-refusal" {
@@ -892,7 +924,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 				t.Fatal("expected one owned synthetic journal record")
 			}
 		}
-		if launchOwner.Release(ctx, privateLink) == nil {
+		if launchOwner.Release(ctx, privateLink, uplink) == nil {
 			t.Fatal("corrupt journal opened gate")
 		}
 		if err := launchOwner.Wait(ctx); err == nil || ctx.Err() != nil {
@@ -907,7 +939,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		return
 	}
 	if launchOwner != nil {
-		if err := launchOwner.Release(ctx, privateLink); err != nil {
+		if err := launchOwner.Release(ctx, privateLink, uplink); err != nil {
 			t.Fatal("owned launch gate", err)
 		}
 	} else {
@@ -962,6 +994,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := privateLink.Validate(ctx); err != nil {
 		t.Fatal("live private link changed", err)
 	}
+	if err := uplink.Validate(ctx); err != nil {
+		t.Fatal("live host uplink changed", err)
+	}
 	if err := lease.ValidateChildObjects(workload, job, privateRoot); err != nil {
 		t.Fatal("live sandbox objects do not match measured lease", err)
 	}
@@ -971,7 +1006,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := resources.ValidateForChild(specification, workload); err != nil {
 		t.Fatal("live runtime left original resource boundary", err)
 	}
-	observation, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard, privateLink)
+	observation, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard, privateLink, uplink)
 	if launchOwner != nil {
 		observation, err = launchOwner.ObserveRuntime(ctx)
 	}
@@ -1110,7 +1145,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.CheckJob(specification); err == nil {
 		t.Fatal("native withdrawn authority accepted job")
 	}
-	if resumed, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard, privateLink); resumed != nil || err == nil {
+	if resumed, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard, privateLink, uplink); resumed != nil || err == nil {
 		t.Fatal("withdrawn runtime produced a fresh observation")
 	}
 	historical, err := terminalevidence.BuildObservedNetwork(evidenceContext, "runner-fixture", nil, observation)
@@ -1139,6 +1174,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if router.Validate(job) != nil {
 		t.Fatal("workload cleanup killed independent router")
+	}
+	if uplink.Close(context.Background()) != nil || uplink.Close(context.Background()) != nil {
+		t.Fatal("host uplink retirement")
 	}
 	if privateLink.Close(context.Background()) != nil || privateLink.Close(context.Background()) != nil {
 		t.Fatal("private link retirement")

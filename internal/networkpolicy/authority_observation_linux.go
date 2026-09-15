@@ -14,7 +14,7 @@ import (
 // Failure withdraws the owning route. This is an installation/authority check,
 // not proof of a measured rootfs, a Sentry launch, or completed cleanup.
 func (s *AuthorityRoute) ObserveInstalled(ctx context.Context, job *p.JobSpecification) error {
-	return s.observeInstalled(ctx, job, nil, false, nil, false)
+	return s.observeInstalled(ctx, job, nil, false, nil, false, nil, false)
 }
 
 // ObserveInstalledForChild additionally binds the observation to the exact
@@ -23,16 +23,22 @@ func (s *AuthorityRoute) ObserveInstalled(ctx context.Context, job *p.JobSpecifi
 // permanently withdraws this authority, including a nil or foreign owner.
 // This Linux-only launch check does not grant cleanup or resource authority.
 func (s *AuthorityRoute) ObserveInstalledForChild(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces) error {
-	return s.observeInstalled(ctx, job, child, true, nil, false)
+	return s.observeInstalled(ctx, job, child, true, nil, false, nil, false)
 }
 
 // ObserveInstalledForLink also verifies the actual owned veth pair belongs to
 // this native route's exact router and workload, not merely matching labels.
 func (s *AuthorityRoute) ObserveInstalledForLink(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, link *PrivateJobLink) error {
-	return s.observeInstalled(ctx, job, child, true, link, true)
+	return s.observeInstalled(ctx, job, child, true, link, true, nil, false)
 }
 
-func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, requireChild bool, link *PrivateJobLink, requireLink bool) error {
+// ObserveInstalledForUplink additionally requires the exact journaled host
+// uplink, its private-link owner, and the actual fixed router/host layout.
+func (s *AuthorityRoute) ObserveInstalledForUplink(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, link *PrivateJobLink, uplink *HostUplink) error {
+	return s.observeInstalled(ctx, job, child, true, link, true, uplink, true)
+}
+
+func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, requireChild bool, link *PrivateJobLink, requireLink bool, uplink *HostUplink, requireUplink bool) error {
 	if err := s.CheckJob(job); err != nil {
 		return err
 	}
@@ -46,6 +52,9 @@ func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecifi
 		return s.withdrawLocked(ErrNamespace)
 	}
 	if requireLink && (link == nil || link.carrier == nil || link.carrier.router != native.router || link.carrier.workload != native.workload || link.Validate(ctx) != nil) {
+		return s.withdrawLocked(ErrNamespace)
+	}
+	if requireUplink && (!requireLink || uplink == nil || uplink.private != link || uplink.pair == nil || uplink.pair.carrier.router != native.router || uplink.pair.carrier.workload != native.workload || !uplink.matchesJob(job) || uplink.Validate(ctx) != nil) {
 		return s.withdrawLocked(ErrNamespace)
 	}
 	// Serialize readback with DNS refresh/expiry. No independent route caller
@@ -65,6 +74,9 @@ func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecifi
 			return ErrExpired
 		}
 		if requireLink && link.Validate(ctx) != nil {
+			return ErrNamespace
+		}
+		if requireUplink && uplink.Validate(ctx) != nil {
 			return ErrNamespace
 		}
 		return nil
