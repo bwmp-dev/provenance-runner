@@ -49,11 +49,13 @@ type measuredBundleJournal struct {
 }
 
 type measuredBundle struct {
-	owner     *measuredBundleJournal
-	record    measuredBundleRecord
-	directory *os.File
-	scope     *np.JobCgroup
-	retired   bool
+	owner             *measuredBundleJournal
+	record            measuredBundleRecord
+	directory         *os.File
+	scope             *np.JobCgroup
+	retired           bool
+	prepared          *measuredBundlePreparation
+	preparationFailed bool
 }
 
 func (b *measuredBundle) matchesPrivateRoot(path string) bool {
@@ -308,6 +310,10 @@ func (j *measuredBundleJournal) check(b *measuredBundle, job *p.JobSpecification
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.checkLocked(b, job)
+}
+
+func (j *measuredBundleJournal) checkLocked(b *measuredBundle, job *p.JobSpecification) error {
 	if j.closed || !j.ready || b.owner != j || b.retired || j.active[b.record.Job] != b || b.scope == nil || job.GetLease().GetJobId() != b.record.Job || job.GetLease().GetLeaseId() != b.record.Lease || job.GetLease().GetExecutionId() != b.record.Execution || job.GetAttempt().GetAttemptId() != b.record.Attempt || hex.EncodeToString(job.GetHashes().GetPolicy().GetValue()) != b.record.Policy {
 		return errMeasuredBundle
 	}

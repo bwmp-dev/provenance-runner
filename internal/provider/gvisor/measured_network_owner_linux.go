@@ -47,6 +47,7 @@ type MeasuredNetworkProcess struct {
 	journal                             *np.JobCgroupJournal
 	bundle                              *measuredBundle
 	privateRoot                         string
+	mapping                             np.MappedIdentity
 	authority                           *np.AuthorityRoute
 	child                               *np.ChildNamespaces
 	resources                           *np.RetainedResources
@@ -68,7 +69,7 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 		return nil, ErrMeasuredNetworkLaunch
 	}
 	job := proto.Clone(config.Job).(*p.JobSpecification)
-	if config.Authority.CheckJob(job) != nil || config.Journal.CheckScope(config.Scope) != nil || config.Bundle == nil || config.Bundle.owner == nil || config.Bundle.scope != config.Scope || config.Bundle.owner.cgroups != config.Journal || config.Bundle.owner.check(config.Bundle, job) != nil || !config.Bundle.matchesPrivateRoot(config.PrivateRoot) {
+	if config.Authority.CheckJob(job) != nil || config.Journal.CheckScope(config.Scope) != nil || config.Bundle == nil || config.Bundle.owner == nil || config.Bundle.scope != config.Scope || config.Bundle.owner.cgroups != config.Journal || config.Bundle.owner.check(config.Bundle, job) != nil || !config.Bundle.matchesPrivateRoot(config.PrivateRoot) || config.Bundle.checkPrepared(config.Mapping) != nil {
 		return nil, ErrMeasuredNetworkLaunch
 	}
 	m := config.Mapping
@@ -80,7 +81,7 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 	if err != nil {
 		return nil, ErrMeasuredNetworkLaunch
 	}
-	s := &MeasuredNetworkProcess{job: job, measurement: measurement, scope: config.Scope, journal: config.Journal, bundle: config.Bundle, privateRoot: config.PrivateRoot, authority: config.Authority, done: make(chan struct{})}
+	s := &MeasuredNetworkProcess{job: job, measurement: measurement, scope: config.Scope, journal: config.Journal, bundle: config.Bundle, privateRoot: config.PrivateRoot, mapping: m, authority: config.Authority, done: make(chan struct{})}
 	fail := func(err error) (*MeasuredNetworkProcess, error) {
 		return s, errors.Join(ErrMeasuredNetworkLaunch, err, s.Close(context.Background()))
 	}
@@ -189,7 +190,7 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context) error {
 		}
 		return errors.Join(ErrMeasuredNetworkLaunch, s.authority.Withdraw())
 	}
-	if ctx == nil || ctx.Err() != nil || !s.started || s.stopping || s.closed || s.released || s.gate == nil || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil || !s.bundle.matchesPrivateRoot(s.privateRoot) || s.measurement.Validate() != nil || s.resources.Validate(s.job) != nil {
+	if ctx == nil || ctx.Err() != nil || !s.started || s.stopping || s.closed || s.released || s.gate == nil || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil || !s.bundle.matchesPrivateRoot(s.privateRoot) || s.bundle.checkPrepared(s.mapping) != nil || s.measurement.Validate() != nil || s.resources.Validate(s.job) != nil {
 		return refuse()
 	}
 	if s.authority.ObserveInstalledForChild(ctx, s.job, s.child) != nil {

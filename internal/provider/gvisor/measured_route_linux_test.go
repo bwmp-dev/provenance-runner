@@ -157,9 +157,13 @@ func TestMeasuredAuthorityRouteSentryBundleRefusal(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "bundle-refusal")
 }
 
+func TestMeasuredAuthorityRouteSentryPreparedRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "prepared-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -304,6 +308,19 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	})
 	bundle := "/tmp/bundle-input/" + job
 	privateRoot := bundle + "/.measured-root"
+	input, sourcePath := measuredFixtureInput(t, ctx)
+	mode := "probe-confined-lifecycle"
+	if authorityMode == "owned-normal" {
+		mode = "probe-confined"
+	}
+	mapping := np.MappedIdentity{UID: 65532, GID: 65532, OverflowUID: 65533, OverflowGID: 65533}
+	if ownedBundle.prepare(ctx, specification, measuredGuestCommand{Command: "/smoke", Arguments: []string{mode}}, privateRoot, mapping, []measuredInput{input}, 2<<20) != nil || ownedBundle.checkPrepared(mapping) != nil {
+		t.Fatal("closed bundle preparation")
+	}
+	// Later source mutation cannot change the independently verified copy.
+	if os.WriteFile(sourcePath, []byte("changed-source"), 0444) != nil {
+		t.Fatal("synthetic source mutation")
+	}
 	var release *os.File
 	cgroup, err := os.OpenFile("/sys/fs/cgroup/provenance-fixture-controller", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -370,7 +387,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
-		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal") {
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal") {
 			inputRead, inputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -610,108 +627,6 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if read(serverOutput)["serverReady"] != true {
 		t.Fatal("native server not ready")
 	}
-	for _, directory := range []string{".measured-root"} {
-		path := filepath.Join(bundle, directory)
-		if os.Mkdir(path, 0700) != nil {
-			t.Fatal("owned Sentry directory setup failed")
-		}
-	}
-	mode := "probe-confined-lifecycle"
-	if authorityMode == "owned-normal" {
-		mode = "probe-confined"
-	}
-	inputs := filepath.Join(bundle, "inputs")
-	if os.Mkdir(inputs, 0700) != nil {
-		t.Fatal("owned read-only inputs unavailable")
-	}
-	inputDirectory, err := os.Open(inputs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { inputDirectory.Close() })
-	sourcePath := filepath.Join(t.TempDir(), "source")
-	payload := []byte("synthetic-input")
-	if os.WriteFile(sourcePath, payload, 0444) != nil {
-		t.Fatal("synthetic input source unavailable")
-	}
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { source.Close() })
-	input := measuredInput{Name: "sample", Source: source, Size: uint64(len(payload)), SHA256: sha256.Sum256(payload)}
-	badHash := input
-	badHash.SHA256 = sha256.Sum256([]byte("wrong"))
-	badName := input
-	badName.Name = "../foreign"
-	badSize := input
-	badSize.Size++
-	writable, err := os.OpenFile(sourcePath, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { writable.Close() })
-	badWritable := input
-	badWritable.Source = writable
-	pipeRead, pipeWrite, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { pipeRead.Close(); pipeWrite.Close() })
-	badPipe := input
-	badPipe.Source = pipeRead
-	for _, rejected := range [][]measuredInput{{badHash}, {badName}, {badSize}, {input, input}, {badWritable}, {badPipe}} {
-		if stageMeasuredInputs(ctx, inputDirectory, rejected, 2<<20) == nil {
-			t.Fatal("invalid input inventory admitted")
-		}
-		entries, err := os.ReadDir(inputs)
-		if err != nil || len(entries) != 0 {
-			t.Fatal("refused staging left partial input files")
-		}
-	}
-	if stageMeasuredInputs(ctx, inputDirectory, []measuredInput{input}, input.Size-1) == nil {
-		t.Fatal("aggregate input quota bypassed")
-	}
-	foreign := filepath.Join(inputs, "foreign")
-	if os.WriteFile(foreign, []byte("preserve"), 0600) != nil {
-		t.Fatal("synthetic foreign entry unavailable")
-	}
-	if stageMeasuredInputs(ctx, inputDirectory, []measuredInput{input}, 2<<20) == nil {
-		t.Fatal("nonempty input directory adopted")
-	}
-	if raw, err := os.ReadFile(foreign); err != nil || string(raw) != "preserve" {
-		t.Fatal("foreign input entry changed")
-	}
-	if os.Remove(foreign) != nil {
-		t.Fatal("synthetic foreign entry cleanup failed")
-	}
-	if stageMeasuredInputs(ctx, inputDirectory, []measuredInput{input}, 2<<20) != nil {
-		t.Fatal("hash-verified input staging failed")
-	}
-	// The guest must still read the original verified bytes after the source is
-	// changed. No workload-controlled descriptor is used as the guest mount.
-	if os.WriteFile(sourcePath, []byte("changed-source"), 0444) != nil {
-		t.Fatal("synthetic source mutation failed")
-	}
-	if stageMeasuredInputs(ctx, inputDirectory, []measuredInput{input}, 2<<20) == nil {
-		t.Fatal("sealed input directory reopened for staging")
-	}
-	spec, err := buildMeasuredNetworkSpec(specification, measuredGuestCommand{Command: "/smoke", Arguments: []string{mode}}, privateRoot)
-	if err != nil {
-		t.Fatal("closed measured OCI construction", err)
-	}
-	raw, err := json.Marshal(spec)
-	if err != nil || os.WriteFile(filepath.Join(bundle, "config.json"), raw, 0644) != nil {
-		t.Fatal("owned OCI fixture unavailable")
-	}
-	for _, directory := range []string{".measured-root"} {
-		if os.Chown(filepath.Join(bundle, directory), 65532, 65532) != nil {
-			t.Fatal("owned Sentry directory ownership unavailable")
-		}
-	}
-	if err := os.Chown(bundle, 65532, 65532); err != nil {
-		t.Fatal(err)
-	}
 	binder, err := np.NewV2Binder(job, policyRaw, sha256.Sum256(policyRaw), np.LocalV2Boundary{Maximum: proto.Clone(policy.NetworkV2).(*runnerv1.NetworkPolicyV2), SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: time.Minute}, measuredResolver{})
 	if err != nil {
 		t.Fatal(err)
@@ -782,26 +697,32 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
-	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" {
-		journalPath := "/state-input/journal"
-		if authorityMode == "bundle-refusal" {
-			journalPath = "/state-input/bundle-journal"
-		}
-		entries, err := os.ReadDir(journalPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		changed := 0
-		for _, entry := range entries {
-			if strings.HasSuffix(entry.Name(), ".owned.json") {
-				if err := os.WriteFile(filepath.Join(journalPath, entry.Name()), []byte("{}\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				changed++
+	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" {
+		if authorityMode == "prepared-refusal" {
+			if os.Chmod(filepath.Join(bundle, "config.json"), 0644) != nil {
+				t.Fatal("prepared configuration drift fixture")
 			}
-		}
-		if changed != 1 {
-			t.Fatal("expected one owned synthetic journal record")
+		} else {
+			journalPath := "/state-input/journal"
+			if authorityMode == "bundle-refusal" {
+				journalPath = "/state-input/bundle-journal"
+			}
+			entries, err := os.ReadDir(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := 0
+			for _, entry := range entries {
+				if strings.HasSuffix(entry.Name(), ".owned.json") {
+					if err := os.WriteFile(filepath.Join(journalPath, entry.Name()), []byte("{}\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					changed++
+				}
+			}
+			if changed != 1 {
+				t.Fatal("expected one owned synthetic journal record")
+			}
 		}
 		if launchOwner.Release(ctx) == nil {
 			t.Fatal("corrupt journal opened gate")
