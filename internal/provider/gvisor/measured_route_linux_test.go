@@ -165,6 +165,16 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	retained, err := lease.Retain()
+	if err != nil {
+		lease.Close()
+		t.Fatal(err)
+	}
+	if err := lease.Close(); err != nil {
+		retained.Close()
+		t.Fatal(err)
+	}
+	lease = retained
 	t.Cleanup(func() {
 		if err := lease.Close(); err != nil {
 			t.Error(err)

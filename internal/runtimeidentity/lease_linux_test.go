@@ -10,11 +10,39 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestLeaseConcurrentCloseValidateRetainFailsClosed(t *testing.T) {
+	var missing *Lease
+	if copy, err := missing.Retain(); copy != nil || err != ErrUnavailable {
+		t.Fatal("nil lease retained")
+	}
+	lease := &Lease{}
+	var group sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for n := 0; n < 10; n++ {
+				if lease.Validate() != ErrUnavailable {
+					t.Error("invalid lease validated")
+				}
+				if copy, err := lease.Retain(); copy != nil || err != ErrUnavailable {
+					t.Error("invalid lease retained")
+				}
+				if lease.Close() != nil {
+					t.Error("empty lease close failed")
+				}
+			}
+		}()
+	}
+	group.Wait()
+}
 
 func TestLeaseValidMappingRequiresExactCompleteReadOnlyImage(t *testing.T) {
 	lease := &Lease{imageStat: unix.Stat_t{Dev: 2049, Ino: 12345}}
@@ -202,12 +230,57 @@ func TestRuntimeMountFixture(t *testing.T) {
 	if err := lease.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	retained, err := lease.Retain()
+	if err != nil {
+		t.Fatal("retained owner unavailable", err)
+	}
+	defer retained.Close()
+	if retained.Snapshot() != lease.Snapshot() {
+		t.Fatal("retained measurement changed")
+	}
+	for _, pair := range [][2]*os.File{{lease.runner, retained.runner}, {lease.sandbox, retained.sandbox}, {lease.root, retained.root}, {lease.image, retained.image}, {lease.loop, retained.loop}} {
+		left, err := pair[0].Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := pair[1].Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		flags, err := unix.FcntlInt(pair[1].Fd(), unix.F_GETFD, 0)
+		if pair[0].Fd() == pair[1].Fd() || !os.SameFile(left, right) || err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Fatal("retained descriptor ownership changed")
+		}
+	}
 	if err := lease.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if lease.Validate() == nil {
 		t.Fatal("closed lease accepted")
 	}
+	if err := retained.Validate(); err != nil {
+		t.Fatal("closing original invalidated retained owner", err)
+	}
+	if copy, err := lease.Retain(); copy != nil || err == nil {
+		t.Fatal("closed owner revived")
+	}
+	var group sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			copy, err := retained.Retain()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer copy.Close()
+			if err := copy.Validate(); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	group.Wait()
 	t.Log("actual SquashFS image/loop/mount and retained executable binding verified")
 }
 
