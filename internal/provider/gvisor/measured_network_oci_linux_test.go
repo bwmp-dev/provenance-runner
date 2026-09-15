@@ -55,11 +55,15 @@ func TestMeasuredNetworkSpecKeepsClosedConfinement(t *testing.T) {
 	if spec.Linux.Resources.Memory.Limit != 1<<30 || spec.Linux.Resources.CPU.Quota != 200000 || spec.Linux.Resources.PIDs.Limit != 273 {
 		t.Fatal("frozen resources not derived")
 	}
-	if len(spec.Mounts) != 6 {
+	if len(spec.Mounts) != 7 {
 		t.Fatal("unexpected host mount")
 	}
 	for _, mount := range spec.Mounts {
 		switch mount.Destination {
+		case "/etc/resolv.conf":
+			if mount.Type != "bind" || mount.Source != filepath.Join(filepath.Dir(root), "resolv.conf") || !slices.Equal(mount.Options, []string{"bind", "ro", "nosuid", "nodev", "noexec"}) {
+				t.Fatal("resolver escaped fixed protected binding")
+			}
 		case "/workspace", "/tmp":
 			if mount.Type != "tmpfs" || !slices.Contains(mount.Options, "size=1048576") || !slices.Contains(mount.Options, "uid=65532") || !slices.Contains(mount.Options, "nosuid") || !slices.Contains(mount.Options, "nodev") {
 				t.Fatal("unbounded writable storage")

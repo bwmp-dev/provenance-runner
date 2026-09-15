@@ -39,6 +39,9 @@ class ImageBuilderTests(unittest.TestCase):
             [("link", "symlink", "/bin"), ("link/write", "file", b"x")],
             [("same", "file", b"x"), ("same", "file", b"y")],
             [("tmp/leftover", "file", b"x")],
+            [("etc", "symlink", "bin"), ("bin", "directory", b"")],
+            [("etc", "directory", b""), ("etc/resolv.conf", "symlink", "other"), ("etc/other", "file", b"x")],
+            [("etc", "directory", b""), ("etc/resolv.conf", "directory", b"")],
             [("a", "symlink", "b"), ("b", "symlink", "a")],
             [("dir", "directory", b""), ("dir/root", "symlink", ".."), ("escape", "symlink", "dir/root/../outside")],
         ]
@@ -49,6 +52,21 @@ class ImageBuilderTests(unittest.TestCase):
                 (path / "tree").mkdir()
                 with open(path / "source.tar", "rb") as source, self.assertRaises(builder.Invalid):
                     builder.extract(source, path / "tree", os.getuid(), os.getgid())
+
+    def test_regular_resolver_mount_target(self):
+        for entries in ([], [("etc", "directory", b""), ("etc/resolv.conf", "file", b"source-metadata")]):
+            with self.subTest(entries=entries), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                self.archive(path / "source.tar", entries)
+                (path / "tree").mkdir()
+                with open(path / "source.tar", "rb") as source:
+                    builder.extract(source, path / "tree", os.getuid(), os.getgid())
+                resolver = path / "tree/etc/resolv.conf"
+                self.assertTrue(resolver.is_file())
+                self.assertFalse(resolver.is_symlink())
+                self.assertEqual(b"source-metadata" if entries else b"", resolver.read_bytes())
+                if not entries:
+                    self.assertEqual(0o444, resolver.stat().st_mode & 0o777)
 
     def test_real_reproducible_builder_and_exclusive_output(self):
         executable = shutil.which("mksquashfs")

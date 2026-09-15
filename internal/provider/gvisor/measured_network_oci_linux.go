@@ -69,6 +69,7 @@ func buildMeasuredNetworkSpec(job *p.JobSpecification, command measuredGuestComm
 	// The outer owner places the entire runtime in its retained cgroup at birth.
 	// runsc must not create or select another cgroup by a caller-provided path.
 	spec.Linux.CgroupsPath = ""
+	spec.Mounts = append(spec.Mounts, ociMount{Destination: "/etc/resolv.conf", Type: "bind", Source: filepath.Join(filepath.Dir(privateRoot), "resolv.conf"), Options: []string{"bind", "ro", "nosuid", "nodev", "noexec"}})
 	for i := range spec.Linux.Namespaces {
 		if spec.Linux.Namespaces[i].Type == "network" {
 			// This is the already-wired child's private namespace, never the

@@ -29,7 +29,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['--- PASS: TestMeasuredNetworkSession'+case+' (1s)' for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredAuthorityRouteSentryOwnedLaunch/'+case+' (1s)' for case in ('uplink-alias-refusal', 'uplink-journal-refusal', 'uplink-prefix-refusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' (1s)' for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal') for _ in range(3)]
-        rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/'+suffix+' (1s)' for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/'+suffix+' (1s)' for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-resolver', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root') for _ in range(3)]
         report = '\n'.join(rows)
         driver.validate_report(report, '', 0)
         for index in range(len(rows)):
