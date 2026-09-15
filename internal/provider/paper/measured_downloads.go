@@ -19,6 +19,7 @@ type MeasuredInputs struct {
 	request             []byte
 	files               []*os.File
 	preparationDeadline time.Time
+	probePlan           []byte
 }
 
 // PreparationDeadline is frozen before manifest and artifact downloads. Passing
@@ -60,6 +61,7 @@ func (m *MeasuredInputs) Close() error {
 		}
 	}
 	m.files, m.request = nil, nil
+	m.probePlan = nil
 	m.preparationDeadline = time.Time{}
 	return result
 }
@@ -148,7 +150,11 @@ func (provider *Provider) PrepareMeasuredInputs(ctx context.Context, job *p.JobS
 		_, err := io.Copy(out, bytes.NewReader(probe))
 		return err
 	})})
-	return acquireMeasuredDownloads(ctx, raw, identities, downloads)
+	owned, err := acquireMeasuredDownloads(ctx, raw, identities, downloads)
+	if err == nil {
+		owned.probePlan = bytes.Clone(probe)
+	}
+	return owned, err
 }
 
 // Provider.source creates a private transport for each policy-constrained

@@ -88,6 +88,10 @@ func TestMeasuredPaperDaemonKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "daemon")
 }
 
+func TestMeasuredPaperWorkerKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "worker")
+}
+
 func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		t.Skip("explicit disposable service fixture required")
@@ -324,7 +328,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	var daemon *Daemon
 	var daemonDone chan error
 	clientMode := mode
-	if mode == "daemon" {
+	if mode == "daemon" || mode == "worker" {
 		clientMode = "complete"
 		// Retire the manual fixture provisioner before testing the complete
 		// daemon's reopening/recovery of these same owned, empty journals.
@@ -346,6 +350,10 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), clientMode)
 	command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1"}
+	if mode == "worker" {
+		command = exec.CommandContext(ctx, "/tmp/measured-worker.test", "-test.run=^TestMeasuredWorkerRootFixture$", "-test.timeout=40s")
+		command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1", "PROVENANCE_DISPOSABLE_WORKER_ROOT_SOCKET=" + filepath.Join(root, cc.SocketName)}
+	}
 	command.ExtraFiles = files
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
 	var diagnostic bytes.Buffer

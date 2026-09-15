@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
@@ -16,12 +17,15 @@ type remoteJobAdapter interface {
 }
 
 type connectedWorker struct {
-	registry *execution.Registry
-	adapter  remoteJobAdapter
+	registry         *execution.Registry
+	adapter          remoteJobAdapter
+	measuredEndpoint string
+	admission        sync.Mutex
+	cleanupFailed    bool
 }
 
 func (w *connectedWorker) SupportsTestSecretSource() bool {
-	if w == nil {
+	if w == nil || w.measuredEndpoint != "" {
 		return false
 	}
 	provider, ok := w.adapter.(interface{ SupportsTestSecretSource() bool })
@@ -39,6 +43,26 @@ func (w *connectedWorker) ExecuteV2(ctx context.Context, specification *runnerv1
 }
 
 func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error, v2 bool) execution.Result {
+	if !w.admission.TryLock() {
+		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhasePreparation, execution.ClassificationInfrastructureFailure, "worker_busy", errors.New("worker already owns a session"))
+	}
+	defer w.admission.Unlock()
+	if w.cleanupFailed {
+		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseCleanup, execution.ClassificationInfrastructureFailure, "worker_cleanup_unconfirmed", errors.New("worker admission stopped after failed cleanup"))
+	}
+	if w.measuredEndpoint != "" {
+		provider, ok := w.adapter.(interface {
+			ExecuteMeasured(context.Context, *runnerv1.JobSpecification, string, func(context.Context, execution.ExecutionStart) error) execution.Result
+		})
+		if !v2 || !ok {
+			return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "measured_v2_required", errors.New("measured worker requires separately admitted v2 execution"))
+		}
+		result := provider.ExecuteMeasured(ctx, specification, w.measuredEndpoint, beforeExecute)
+		if result.Cleanup != nil && !result.Cleanup.Succeeded {
+			w.cleanupFailed = true
+		}
+		return result
+	}
 	job, err := w.adapter.AdaptJob(specification)
 	if err != nil {
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "remote_job_adaptation_failed", err)
@@ -72,5 +96,5 @@ func newConnectedWorker(registry *providerRegistry) (*connectedWorker, error) {
 	if !ok {
 		return nil, errors.New("Paper provider does not implement remote job adaptation")
 	}
-	return &connectedWorker{registry: registry.Registry, adapter: adapter}, nil
+	return &connectedWorker{registry: registry.Registry, adapter: adapter, measuredEndpoint: registry.measuredEndpoint}, nil
 }

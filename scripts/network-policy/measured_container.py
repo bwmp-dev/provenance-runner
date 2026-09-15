@@ -45,6 +45,7 @@ def main():
     (root/'work').mkdir(mode=0o711)
     for source, target, mode in ((sys.argv[1], '/tmp/measured-route.test', 0o555),
                                   ('/state-input/service.test', '/tmp/measured-service.test', 0o555),
+                                  ('/state-input/download.test', '/tmp/measured-worker.test', 0o555),
                                   (sys.argv[2], str(root/'image.squashfs'), 0o444),
                                   ('/opt/gvisor/runsc', str(root/'runsc'), 0o555)):
         shutil.copyfile(source, target)
@@ -78,7 +79,7 @@ def main():
         # Exercise the new composed service before the longer regression suite
         # so provisioning failures surface promptly. Both remain mandatory.
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',
-                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal)?|Daemon)Kernel$',
+                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal)?|Daemon|Worker)Kernel$',
                                   '-test.count=3', '-test.timeout=120s'],
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                       'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
@@ -92,6 +93,8 @@ def main():
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceEventRefusalKernel ') == 3
+        assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 3
+        assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel/root-idle-barrier-after-retirement ') == 3
         for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' ') == 3
         for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal'):

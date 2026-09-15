@@ -35,7 +35,8 @@ type paperProviderOptions struct {
 
 type providerRegistry struct {
 	*execution.Registry
-	instanceLocks *instancelock.Set
+	instanceLocks    *instancelock.Set
+	measuredEndpoint string
 }
 
 func (r *providerRegistry) Close() error {
@@ -58,6 +59,10 @@ func registryForLocalExecution(ctx context.Context, providerName string, lookup 
 }
 
 func registryForProviderWithOptions(ctx context.Context, providerName string, lookup environmentLookup, options paperProviderOptions) (*providerRegistry, error) {
+	endpoint := lookup("PROVENANCE_MEASURED_SERVICE_SOCKET")
+	if endpoint != "" && (providerName != paper.ProviderName || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0)) {
+		return nil, errors.New("PROVENANCE_MEASURED_SERVICE_SOCKET must be an absolute clean Unix socket path for Paper")
+	}
 	providers := []execution.EnvironmentProvider{processprovider.New()}
 	var instanceLocks *instancelock.Set
 	if providerName == paper.ProviderName {
@@ -72,7 +77,7 @@ func registryForProviderWithOptions(ctx context.Context, providerName string, lo
 	if err != nil {
 		return nil, errors.Join(err, instanceLocks.Close())
 	}
-	return &providerRegistry{Registry: registry, instanceLocks: instanceLocks}, nil
+	return &providerRegistry{Registry: registry, instanceLocks: instanceLocks, measuredEndpoint: endpoint}, nil
 }
 
 func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup, options paperProviderOptions) (*paper.Provider, *instancelock.Set, error) {
@@ -90,10 +95,6 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 		}
 		catalogs, err = operatorCatalogs(lookup)
 	}
-	if err != nil {
-		return nil, nil, err
-	}
-	workspaceRoot, err := requiredEnvironment(lookup, "PROVENANCE_WORKSPACE_ROOT")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -133,6 +134,40 @@ func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup,
 	}
 	if cacheEntryLimit > maximumCacheBytes {
 		return nil, nil, errors.New("PROVENANCE_MAX_ARTIFACT_BYTES cannot exceed PROVENANCE_MAX_CACHE_BYTES")
+	}
+	if lookup("PROVENANCE_MEASURED_SERVICE_SOCKET") != "" {
+		if runtimeSource == nil || options.allowHostileFixtures {
+			return nil, nil, errors.New("measured worker requires signed runtime source and forbids local hostile fixture mode")
+		}
+		locks, err := instancelock.AcquireAll(filepath.Join(cacheRoot, ".provenance-measured-worker.lock"))
+		if err != nil {
+			return nil, nil, err
+		}
+		cache, err := artifact.NewCache(filepath.Join(cacheRoot, "content"), artifact.CacheOptions{MaximumEntryBytes: cacheEntryLimit, MaximumTotalBytes: maximumCacheBytes})
+		if err != nil {
+			return nil, nil, errors.Join(err, locks.Close())
+		}
+		provider, err := paper.NewMeasured(paper.Config{
+			RuntimeSource: runtimeSource, ArtifactCache: cache, PaperCache: cache, JavaCache: cache, ProbeCache: cache, RuntimeCache: cache,
+			ArtifactHosts: artifactHosts, MaximumArtifactBytes: maximumArtifactBytes, MaximumDependencyBytes: maximumDependencyBytes, MaximumPreparationBytes: maximumPreparationBytes,
+		})
+		if err != nil {
+			return nil, nil, errors.Join(err, locks.Close())
+		}
+		readiness, ok := any(provider).(interface {
+			CheckMeasuredService(context.Context, string) error
+		})
+		if !ok {
+			return nil, nil, errors.Join(errors.New("measured worker requires Linux root service"), locks.Close())
+		}
+		if err := readiness.CheckMeasuredService(ctx, lookup("PROVENANCE_MEASURED_SERVICE_SOCKET")); err != nil {
+			return nil, nil, errors.Join(err, locks.Close())
+		}
+		return provider, locks, nil
+	}
+	workspaceRoot, err := requiredEnvironment(lookup, "PROVENANCE_WORKSPACE_ROOT")
+	if err != nil {
+		return nil, nil, err
 	}
 	runscPath, err := requiredEnvironment(lookup, "PROVENANCE_RUNSC_PATH")
 	if err != nil {
