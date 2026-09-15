@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -330,17 +331,42 @@ func (e *Entry) Size() int64 {
 // Open verifies the entry before returning a read-only stream. Callers must not use
 // data copied from the stream if a later read returns an error.
 func (e *Entry) Open(ctx context.Context) (io.ReadCloser, error) {
-	if e == nil {
-		return nil, errors.New("open cache entry: entry is nil")
+	file, err := e.OpenDescriptor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &readOnlyEntry{file: file}, nil
+}
+
+// OpenDescriptor returns an owned read-only regular-file descriptor after
+// bounded size and hash verification. The caller must close it. This does not
+// make worker-owned cache data immutable: a receiving execution service must
+// independently copy and verify the descriptor before using its contents.
+func (e *Entry) OpenDescriptor(ctx context.Context) (*os.File, error) {
+	if e == nil || ctx == nil || e.size < 0 || e.size == math.MaxInt64 {
+		return nil, errors.New("open cache entry: invalid entry or context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	file, err := os.Open(e.path)
 	if err != nil {
 		return nil, fmt.Errorf("open cache entry: %w", err)
 	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != e.size {
+		file.Close()
+		return nil, ErrCacheCorrupt
+	}
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, &contextReader{ctx: ctx, reader: file}); err != nil {
+	n, err := io.Copy(hasher, &contextReader{ctx: ctx, reader: io.LimitReader(file, e.size+1)})
+	if err != nil {
 		file.Close()
 		return nil, fmt.Errorf("verify cache entry: %w", err)
+	}
+	if n != e.size {
+		file.Close()
+		return nil, ErrCacheCorrupt
 	}
 	var actual Digest
 	copy(actual[:], hasher.Sum(nil))
@@ -352,7 +378,7 @@ func (e *Entry) Open(ctx context.Context) (io.ReadCloser, error) {
 		file.Close()
 		return nil, fmt.Errorf("rewind cache entry: %w", err)
 	}
-	return &readOnlyEntry{file: file}, nil
+	return file, nil
 }
 
 type readOnlyEntry struct {

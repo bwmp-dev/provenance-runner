@@ -77,8 +77,15 @@ func (s *RuntimeSource) verify(m SignedRuntime) (resolvedCatalog, error) {
 }
 
 func (s *RuntimeSource) fetch(e *runnerv1.ResolvedEnvironment) (SignedRuntime, resolvedCatalog, error) {
-	if s.Client == nil {
+	return s.fetchContext(context.Background(), e)
+}
+
+func (s *RuntimeSource) fetchContext(ctx context.Context, e *runnerv1.ResolvedEnvironment) (SignedRuntime, resolvedCatalog, error) {
+	if s == nil || s.Client == nil || ctx == nil {
 		return SignedRuntime{}, resolvedCatalog{}, errors.New("runtime HTTP client unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return SignedRuntime{}, resolvedCatalog{}, err
 	}
 	if e == nil {
 		return SignedRuntime{}, resolvedCatalog{}, errors.New("runtime environment missing")
@@ -88,7 +95,7 @@ func (s *RuntimeSource) fetch(e *runnerv1.ResolvedEnvironment) (SignedRuntime, r
 		return SignedRuntime{}, resolvedCatalog{}, err
 	}
 	id := runtimeID(e.GetGameVersion(), e.GetServerBuild(), digest, e.GetJavaDistribution(), e.GetJavaVersion())
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.Origin+"/v1/paper-runtimes/"+id, nil)
 	if err != nil {
