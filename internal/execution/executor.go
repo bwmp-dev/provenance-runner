@@ -193,6 +193,9 @@ func collectPrepared(parent context.Context, prepared PreparedEnvironment, timeo
 	}
 	result.StructuredEvents = append([]StructuredEvent(nil), output.StructuredEvents...)
 	result.TerminalObservations = append([]terminalevidence.Observation(nil), output.TerminalObservations...)
+	// Preserve the sealed in-memory observation. Reconstructing a snapshot or
+	// round-tripping through JSON would discard its exact-execution authority.
+	result.MeasuredNetwork = output.MeasuredNetwork
 	if output.MeasuredRuntime != nil {
 		measured := *output.MeasuredRuntime
 		result.MeasuredRuntime = &measured

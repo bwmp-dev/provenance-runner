@@ -11,7 +11,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
-	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
@@ -1152,11 +1151,14 @@ func (s *clientSession) queueResult(result execution.Result) error {
 		return err
 	}
 	var proof *runnerv1.ExecutionEvidence
+	if result.MeasuredNetwork != nil && (result.TerminalContext == nil || !s.terminalEvidenceV2 || !advertisedFeature(s.networkFeatures, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_POLICY_V2) || !advertisedFeature(s.networkFeatures, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2)) {
+		return permanent("measured network evidence was not negotiated")
+	}
 	if result.TerminalContext != nil {
 		if !result.TerminalContext.Matches(lease, attempt) || s.authenticated == nil || s.authenticated.GetRunnerId() != s.client.config.RunnerID {
 			return permanent("terminal evidence executed identity mismatch")
 		}
-		proof, err = terminalevidence.Build(result.TerminalContext, s.authenticated.GetRunnerId(), result.TerminalObservations, result.MeasuredRuntime)
+		proof, err = result.FreezeTerminalEvidence(s.authenticated.GetRunnerId())
 		if err != nil {
 			return permanent("terminal evidence could not be frozen")
 		}

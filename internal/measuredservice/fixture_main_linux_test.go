@@ -15,10 +15,12 @@ import (
 
 	cc "github.com/bwmp-dev/provenance-runner/internal/controlchannel"
 	"github.com/bwmp-dev/provenance-runner/internal/evidence"
+	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/measuredclient"
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/gvisor"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -221,5 +223,24 @@ func serviceFixtureClient() {
 	exit, infra, err := result.Outcome()
 	if err != nil || exit != 0 || infra || !strings.Contains(bundle.Stdout, "ROOT_SERVICE_OK") || strings.Contains(bundle.Stdout, "synthetic-session-secret") || !strings.Contains(bundle.Stdout, evidence.RedactionMarker) || len(bundle.Events) != 1 || string(bundle.Events[0].Payload) != "{\"syntheticRootService\":true}" {
 		panic("root service result mismatch")
+	}
+	terminal, err := terminalevidence.NewContextV2(job)
+	if err != nil {
+		panic("fixture terminal context refused")
+	}
+	projected := execution.Result{TerminalContext: terminal, MeasuredNetwork: result.Observation()}
+	proof, err := projected.FreezeTerminalEvidence("fixture-runner")
+	if err != nil || terminalevidence.ValidateFrozenV2(proof, job, "fixture-runner") != nil {
+		panic("opaque measured terminal bridge refused")
+	}
+	changed := proto.Clone(job).(*p.JobSpecification)
+	changed.TargetPluginName = "DifferentFixture"
+	changedContext, err := terminalevidence.NewContextV2(changed)
+	if err != nil {
+		panic("changed fixture context")
+	}
+	projected.TerminalContext = changedContext
+	if substituted, err := projected.FreezeTerminalEvidence("fixture-runner"); err == nil || substituted != nil {
+		panic("opaque observation accepted changed execution")
 	}
 }
