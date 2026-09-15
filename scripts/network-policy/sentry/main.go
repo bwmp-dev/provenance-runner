@@ -20,6 +20,9 @@ import (
 )
 
 func main() {
+	if measuredControlClient != nil && measuredControlClient() {
+		return
+	}
 	if len(os.Args) > 2 && strings.HasPrefix(os.Args[1], "-Xms") {
 		paperPreparationFixture()
 		return
@@ -205,6 +208,10 @@ func main() {
 		panic("unknown fixture mode")
 	}
 }
+
+// The standalone Docker build compiles only this standard-library entry point.
+// Module builds register additional trusted control fixtures in separate files.
+var measuredControlClient func() bool
 
 // Synthetic Java stand-in, executed only by the measured disposable fixture.
 // No Paper/plugin compatibility claim is made by this helper.

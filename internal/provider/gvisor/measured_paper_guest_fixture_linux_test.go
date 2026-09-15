@@ -31,7 +31,7 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	}
 	config := seed.config
 	config.MaximumInputBytes = 64 << 20
-	controller, err := newMeasuredController(ctx, config)
+	controller, err := OpenMeasuredController(ctx, config)
 	if controller != nil {
 		t.Cleanup(func() {
 			if controller.Close(context.Background()) != nil {
@@ -111,7 +111,7 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 		t.Fatal(err)
 	}
 	input.Close()
-	owned, err := controller.start(ctx, c.Launch.Job, measuredGuestCommand{Command: "/provenance-measured-paper"}, inputs, c.Launch.Authority, c.Launch.Stdin, c.Launch.Stdout, c.Launch.Stderr)
+	owned, err := controller.Start(ctx, c.Launch.Job, MeasuredGuestCommand{Command: "/provenance-measured-paper"}, inputs, c.Launch.Authority, c.Launch.Stdin, c.Launch.Stdout, c.Launch.Stderr)
 	if owned != nil {
 		t.Cleanup(func() {
 			if owned.Close(context.Background()) != nil {
@@ -125,7 +125,7 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	c.Launch.Stdin.Close()
 	out.Close()
 	assertRouterThreadsUnprivileged(t, owned.session.router)
-	if _, err := owned.completedProcessExit(); err == nil {
+	if _, err := owned.CompletedProcessExit(); err == nil {
 		t.Fatal("unretired process supplied a completed exit")
 	}
 	if owned.Release(ctx) != nil {
@@ -149,7 +149,7 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	}
 	claimedExit, claimedInfrastructure := transcript.ClaimedExit()
 	waitErr := owned.Wait(ctx)
-	actualExit, exitErr := owned.completedProcessExit()
+	actualExit, exitErr := owned.CompletedProcessExit()
 	if exitErr != nil || actualExit != claimedExit {
 		t.Fatal("Paper guest claim differs from retired owned process exit", exitErr)
 	}
