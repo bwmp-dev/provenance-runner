@@ -355,7 +355,7 @@ func TestMeasuredBundleJournalKernelRecovery(t *testing.T) {
 			t.Fatal("failed-job cleanup affected unrelated prepared job")
 		}
 	})
-	for _, kind := range []string{"configuration", "input", "identity", "private-root"} {
+	for _, kind := range []string{"configuration", "resolver", "input", "identity", "private-root"} {
 		t.Run("prepared-drift-"+kind, func(t *testing.T) {
 			j, cgroups := openBundleFixture(t)
 			defer cgroups.Close()
@@ -375,6 +375,10 @@ func TestMeasuredBundleJournalKernelRecovery(t *testing.T) {
 				t.Fatal("positive preparation")
 			}
 			switch kind {
+			case "resolver":
+				if os.Chmod(filepath.Join(base, "resolv.conf"), 0644) != nil {
+					t.Fatal("resolver drift fixture")
+				}
 			case "configuration":
 				if os.Chmod(filepath.Join(base, "config.json"), 0644) != nil {
 					t.Fatal("configuration drift fixture")
@@ -404,8 +408,14 @@ func TestMeasuredBundleJournalKernelRecovery(t *testing.T) {
 				}
 			}
 			if kind == "input" {
+				// Input drift and resolver drift both remain permanently refused.
 				if os.Chmod(filepath.Join(base, "inputs", "sample"), 0444) != nil {
 					t.Fatal("restore fixture mode")
+				}
+			}
+			if kind == "resolver" {
+				if os.Chmod(filepath.Join(base, "resolv.conf"), 0444) != nil {
+					t.Fatal("restore resolver fixture mode")
 				}
 			}
 			if b.checkPrepared(mapping) == nil {

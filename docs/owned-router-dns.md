@@ -34,5 +34,6 @@ Cold controller recovery also includes the new namespace-holding descriptors.
 
 This is not public DNS, an arbitrary recursive resolver, global capacity proof,
 or production activation. Names come only from authenticated effective policy
-bindings. Guest resolver-file configuration, service admission, global limits,
-Paper/secret/event integration and hosted acceptance remain separate work.
+bindings. Default resolver-file configuration is supplied by the
+[protected measured bundle](measured-guest-resolver.md). Service admission,
+global limits, Paper/secret/event integration and hosted acceptance remain open.

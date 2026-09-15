@@ -204,6 +204,35 @@ func main() {
 
 func probeOwnedDNS() {
 	result := map[string]bool{}
+	contents, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil || string(contents) != "nameserver 10.0.1.1\noptions timeout:1 attempts:1\n" {
+		panic("fixed resolver configuration missing")
+	}
+	if file, err := os.OpenFile("/etc/resolv.conf", os.O_WRONLY|os.O_TRUNC, 0); err == nil {
+		file.Close()
+		panic("resolver configuration writable")
+	}
+	result["resolverReadOnly"] = true
+	for _, family := range []string{"ip4", "ip6"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		addresses, err := net.DefaultResolver.LookupIP(ctx, family, "fixture.example.com.")
+		cancel()
+		want := "1.1.1.1"
+		if family == "ip6" {
+			want = "2606:4700:4700::1111"
+		}
+		if err != nil || len(addresses) != 1 || addresses[0].String() != want {
+			panic("default resolver binding failed")
+		}
+		result["default"+family] = true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	addresses, err := net.DefaultResolver.LookupIP(ctx, "ip4", "unlisted.example.com.")
+	cancel()
+	if err == nil || len(addresses) != 0 {
+		panic("default resolver unlisted name answered")
+	}
+	result["defaultUnlistedDenied"] = true
 	for _, transport := range []string{"udp", "tcp"} {
 		resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, transport, "10.0.1.1:53")

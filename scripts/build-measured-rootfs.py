@@ -169,6 +169,20 @@ def extract(source, root, uid, gid):
         pass
     os.chown(event, uid, gid)
     os.chmod(event, 0o600)
+    # The network controller supplies a separately protected, fixed resolver
+    # file. Its mount target must not redirect through an image symlink.
+    etc = root / "etc"
+    if etc.is_symlink() or (etc.exists() and not etc.is_dir()):
+        raise Invalid("unsafe resolver parent")
+    etc.mkdir(mode=0o755, exist_ok=True)
+    resolver = etc / "resolv.conf"
+    if resolver.is_symlink() or (resolver.exists() and not resolver.is_file()):
+        raise Invalid("unsafe resolver target")
+    if not resolver.exists():
+        with open(resolver, "xb"):
+            pass
+        os.chown(resolver, uid, gid)
+        os.chmod(resolver, 0o444)
 
 
 def tree_digest(root):

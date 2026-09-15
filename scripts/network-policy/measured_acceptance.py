@@ -45,7 +45,7 @@ def validate_report(stdout, stderr, status):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentryOwnedLaunch/'+case+' ') == 3
     for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' ') == 3
-    for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root'):
+    for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-resolver', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/'+suffix+' ') == 3
 
 

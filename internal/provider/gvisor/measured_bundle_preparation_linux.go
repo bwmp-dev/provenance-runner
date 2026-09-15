@@ -20,6 +20,8 @@ type preparedBundleEntry struct {
 	stat unix.Stat_t
 }
 
+const measuredResolverConfiguration = "nameserver 10.0.1.1\noptions timeout:1 attempts:1\n"
+
 type measuredBundlePreparation struct {
 	mapping     np.MappedIdentity
 	entries     []preparedBundleEntry
@@ -84,19 +86,24 @@ func (b *measuredBundle) prepare(ctx context.Context, job *p.JobSpecification, c
 	if err != nil || closeErr != nil {
 		return errMeasuredBundle
 	}
-	config, err := openBundleAt(b.directory, "config.json", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0600)
-	if err != nil {
-		return errMeasuredBundle
-	}
-	n, writeErr := config.Write(raw)
-	modeErr := config.Chmod(0444)
-	syncErr := config.Sync()
-	closeErr = config.Close()
-	if n != len(raw) || writeErr != nil || modeErr != nil || syncErr != nil || closeErr != nil {
-		return errMeasuredBundle
+	for _, entry := range []struct {
+		name     string
+		contents []byte
+	}{{"config.json", raw}, {"resolv.conf", []byte(measuredResolverConfiguration)}} {
+		config, err := openBundleAt(b.directory, entry.name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0600)
+		if err != nil {
+			return errMeasuredBundle
+		}
+		n, writeErr := config.Write(entry.contents)
+		modeErr := config.Chmod(0444)
+		syncErr := config.Sync()
+		closeErr = config.Close()
+		if n != len(entry.contents) || writeErr != nil || modeErr != nil || syncErr != nil || closeErr != nil {
+			return errMeasuredBundle
+		}
 	}
 	proof := &measuredBundlePreparation{mapping: mapping}
-	names := []string{"config.json", "inputs"}
+	names := []string{"config.json", "resolv.conf", "inputs"}
 	for _, input := range inputs {
 		names = append(names, filepath.Join("inputs", input.Name))
 	}
@@ -125,7 +132,7 @@ func (b *measuredBundle) prepare(ctx context.Context, job *p.JobSpecification, c
 		err = f.Chown(int(mapping.UID), int(mapping.GID))
 		var st unix.Stat_t
 		statErr := unix.Fstat(int(f.Fd()), &st)
-		syncErr = f.Sync()
+		syncErr := f.Sync()
 		closeErr = f.Close()
 		if err != nil || statErr != nil || syncErr != nil || closeErr != nil {
 			return errMeasuredBundle

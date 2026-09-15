@@ -83,6 +83,10 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 	if err != nil {
 		return nil, ErrMeasuredNetworkLaunch
 	}
+	if measurement.ValidateResolverTarget() != nil {
+		measurement.Close()
+		return nil, ErrMeasuredNetworkLaunch
+	}
 	s := &MeasuredNetworkProcess{job: job, measurement: measurement, scope: config.Scope, journal: config.Journal, bundle: config.Bundle, privateRoot: config.PrivateRoot, mapping: m, authority: config.Authority, done: make(chan struct{})}
 	fail := func(err error) (*MeasuredNetworkProcess, error) {
 		return s, errors.Join(ErrMeasuredNetworkLaunch, err, s.Close(context.Background()))

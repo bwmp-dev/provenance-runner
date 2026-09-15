@@ -175,10 +175,10 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		}
 	}
 	dnsChecks := read(reader)
-	if len(dnsChecks) != 6 {
+	if len(dnsChecks) != 10 {
 		t.Fatal("owned DNS checks missing")
 	}
-	for _, name := range []string{"udpip4", "udpip6", "tcpip4", "tcpip6", "udpUnlistedDenied", "tcpUnlistedDenied"} {
+	for _, name := range []string{"udpip4", "udpip6", "tcpip4", "tcpip6", "udpUnlistedDenied", "tcpUnlistedDenied", "defaultip4", "defaultip6", "defaultUnlistedDenied", "resolverReadOnly"} {
 		if dnsChecks[name] != true {
 			t.Fatal("owned DNS check failed")
 		}
