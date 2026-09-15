@@ -4,7 +4,8 @@ The internal controller now has one owner that composes the journaled router,
 gated measured workload, private link, journaled host uplink and native firewall.
 Its inputs are trusted in-process configuration: an already prepared bundle,
 freshly reconciled authority, retained measurement/tools, recovered journals,
-fixed distinct router/workload mappings and standard-file descriptors. It is
+fixed distinct router/workload mappings, trusted local DNS configuration and
+standard-file descriptors. It is
 not a privileged RPC accepting worker-selected paths, commands or identities.
 
 Construction leaves the workload gated. `Release` requires the exact live
@@ -22,6 +23,8 @@ retained native handles, router and bundle. A failed stage keeps its cleanup
 owner for retry. The completion channel closes only after all owned stages
 retire; it is not a global capacity or measured-mount proof. The follow-on
 [owned DNS channel](owned-router-dns.md) is now included in session teardown.
+The [owned renewal loop](measured-session-dns-renewal.md) preserves address pins
+and refreshes the installed binding view within current gateway authority.
 
 Normal process completion returns the process result, not a manufactured
 authority-loss error. Router loss and other cancellation sources remain

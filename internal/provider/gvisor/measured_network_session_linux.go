@@ -26,7 +26,8 @@ type measuredSessionConfig struct {
 	RouterMapping np.MappedIdentity
 	Uplinks       *np.HostUplinkJournal
 	Tools         np.RouteTools
-	Bindings      []np.Binding
+	DNSBoundary   np.LocalV2Boundary
+	Resolver      np.Exchange
 }
 
 // measuredNetworkSession coordinates the complete per-job network lifetime.
@@ -42,6 +43,9 @@ type measuredNetworkSession struct {
 	bundle           *measuredBundle
 	done             chan struct{}
 	dnsDone          chan struct{}
+	dnsRefreshDone   chan struct{}
+	dnsRefreshCancel context.CancelFunc
+	dns              *measuredSessionDNS
 	reason           error
 	outcomeSet       bool
 	stopping, closed bool
@@ -75,6 +79,14 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 		s.reason, s.outcomeSet = errors.Join(errMeasuredSession, err), true
 		return s, errors.Join(errMeasuredSession, err, s.Close(context.Background()))
 	}
+	s.dns, err = newMeasuredSessionDNS(l.Job, c.DNSBoundary, c.Resolver)
+	if err != nil {
+		return fail(err)
+	}
+	bindings, err := s.dns.resolve(ctx)
+	if err != nil {
+		return fail(err)
+	}
 	s.router, err = StartRouterOwner(ctx, l.Job, l.Journal, l.Measurement, c.RouterMapping)
 	if err != nil {
 		return fail(err)
@@ -95,7 +107,7 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 	if err != nil {
 		return fail(err)
 	}
-	if err = s.authority.Start(ctx, c.Bindings, s.native); err != nil {
+	if err = s.authority.Start(ctx, bindings, s.native); err != nil {
 		return fail(err)
 	}
 	if err = s.authority.ObserveInstalledForUplink(ctx, l.Job, s.process.Child(), s.link, s.uplink); err != nil {
@@ -109,6 +121,14 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 	go func() {
 		defer close(s.dnsDone)
 		_ = authority.ServeDNS(ctx, dns.udp, dns.tcp, []netip.Addr{netip.MustParseAddr("10.0.1.2")})
+	}()
+	refreshCtx, refreshCancel := context.WithCancel(ctx)
+	s.dnsRefreshCancel = refreshCancel
+	s.dnsRefreshDone = make(chan struct{})
+	refreshDone, resolver := s.dnsRefreshDone, s.dns
+	go func() {
+		defer close(refreshDone)
+		resolver.renew(refreshCtx, authority, bindings)
 	}()
 	routerDone, authorityDone, processDone := s.router.Done(), s.authority.Done(), s.process.done
 	go func() {
@@ -203,6 +223,9 @@ func (s *measuredNetworkSession) Close(ctx context.Context) error {
 		s.reason, s.outcomeSet = context.Canceled, true
 	}
 	var result error
+	if s.dnsRefreshCancel != nil {
+		s.dnsRefreshCancel()
+	}
 	if s.authority != nil {
 		if err := s.authority.Close(); err != nil {
 			result = errors.Join(result, err)
@@ -218,6 +241,18 @@ func (s *measuredNetworkSession) Close(ctx context.Context) error {
 		select {
 		case <-s.dnsDone:
 			s.dnsDone = nil
+		case <-ctx.Done():
+			result = errors.Join(result, ctx.Err())
+		case <-timer.C:
+			result = errors.Join(result, errMeasuredSession)
+		}
+		timer.Stop()
+	}
+	if s.dnsRefreshDone != nil {
+		timer := time.NewTimer(6 * time.Second)
+		select {
+		case <-s.dnsRefreshDone:
+			s.dnsRefreshDone = nil
 		case <-ctx.Done():
 			result = errors.Join(result, ctx.Err())
 		case <-timer.C:

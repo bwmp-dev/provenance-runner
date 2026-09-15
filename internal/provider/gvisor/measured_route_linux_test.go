@@ -194,10 +194,13 @@ func TestMeasuredNetworkSessionStartupRefusal(t *testing.T) {
 func TestMeasuredNetworkSessionDNSLoss(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "session-dns-loss")
 }
+func TestMeasuredNetworkSessionDNSRefreshFailure(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-dns-refresh-failure")
+}
 
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
+	if authorityMode != "session-dns-refresh-failure" && authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
