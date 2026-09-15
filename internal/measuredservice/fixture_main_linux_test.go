@@ -14,9 +14,12 @@ import (
 
 	cc "github.com/bwmp-dev/provenance-runner/internal/controlchannel"
 	"github.com/bwmp-dev/provenance-runner/internal/guestoutput"
+	"github.com/bwmp-dev/provenance-runner/internal/measuredclient"
+	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/gvisor"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestMain(m *testing.M) {
@@ -39,6 +42,9 @@ func TestMain(m *testing.M) {
 			if os.WriteFile("/tmp/provenance-probe-events.ndjson", []byte("{\"syntheticRootService\":true}\n"), 0600) != nil {
 				os.Exit(125)
 			}
+			// Completion must outlive the initial two-second authority grant;
+			// the real root route therefore needs the forwarded fresh renewal.
+			time.Sleep(3 * time.Second)
 			fmt.Println("ROOT_SERVICE_OK")
 			return
 		}
@@ -47,7 +53,7 @@ func TestMain(m *testing.M) {
 }
 
 func serviceFixtureClient() {
-	if len(os.Args) != 3 || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
+	if len(os.Args) != 4 || (os.Args[3] != "complete" && os.Args[3] != "withdraw") || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		panic("disposable service client required")
 	}
 	read := func(fd uintptr, maximum int64) []byte {
@@ -85,11 +91,40 @@ func serviceFixtureClient() {
 	if err != nil {
 		panic(err)
 	}
-	if channel.Send(cc.Packet{Kind: cc.Reconcile, Sequence: last + 1, Payload: ack}, time.Now().Add(3*time.Second)) != nil {
-		panic("fixture acknowledgement")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	update, err := np.DecodeAuthorityUpdate(ack)
+	if err != nil {
+		panic(err)
+	}
+	guard, err := np.NewAuthorityRoute(ctx, job)
+	if err != nil {
+		panic(err)
+	}
+	now := time.Now()
+	update.Reconciliation.NetworkAuthorityV2.CheckedAt = timestamppb.New(now)
+	update.Reconciliation.NetworkAuthorityV2.ExpiresAt = timestamppb.New(now.Add(2 * time.Second))
+	if guard.Reconcile(ctx, update.Reconciliation, update.Features, update.CredentialExpiry) != nil {
+		panic("initial fixture authority")
+	}
+	forwardDone := make(chan error, 1)
+	go func() { forwardDone <- measuredclient.ForwardAuthority(ctx, channel, guard, job, last) }()
+	renewed := make(chan struct{})
+	go func() {
+		defer close(renewed)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+		now := time.Now()
+		update.Reconciliation.NetworkAuthorityV2.CheckedAt = timestamppb.New(now)
+		update.Reconciliation.NetworkAuthorityV2.ExpiresAt = timestamppb.New(now.Add(40 * time.Second))
+		if guard.Reconcile(ctx, update.Reconciliation, update.Features, update.CredentialExpiry) != nil {
+			cancel()
+		}
+	}()
+	defer func() { cancel(); <-renewed; guard.Close(); <-forwardDone }()
 	packet, err := channel.AwaitRootObservation(ctx)
 	if err != nil {
 		panic(err)
@@ -102,8 +137,23 @@ func serviceFixtureClient() {
 		panic(err)
 	}
 	defer stream.Close()
+	if os.Args[3] == "withdraw" {
+		// A real startup observation proves this is after launch, not merely
+		// an invalid request. Forwarding loss must interrupt the owned root
+		// session and cannot produce a successful completion receipt.
+		_ = guard.Withdraw()
+	}
 	var output strings.Builder
 	transcript, err := guestoutput.ReadStream(ctx, stream, 1<<20, func(_ guestoutput.Kind, raw []byte) error { _, err := output.Write(raw); return err })
+	if os.Args[3] == "withdraw" {
+		if err == nil {
+			panic("withdrawal returned a complete guest transcript")
+		}
+		if _, err := stream.Receipt(); err == nil {
+			panic("withdrawal produced root completion")
+		}
+		return
+	}
 	if err != nil {
 		panic(err)
 	}
