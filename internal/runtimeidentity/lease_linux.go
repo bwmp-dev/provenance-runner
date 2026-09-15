@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/buildinfo"
@@ -27,6 +28,7 @@ const maximumImageBytes = int64(4 << 30)
 // Paths reference this living process's retained descriptors, never re-open the
 // configured executable/root pathname. No descriptor is passed into the guest.
 type Lease struct {
+	mu                                 sync.Mutex
 	runner, sandbox, root, image, loop *os.File
 	runnerHash, sandboxHash, imageHash string
 	imageStat                          unix.Stat_t
@@ -44,7 +46,12 @@ func (l *Lease) ImagePath() string   { return reference(l.image) }
 func (l *Lease) LoopPath() string    { return reference(l.loop) }
 func (l *Lease) Snapshot() Snapshot  { return l.snapshot }
 func (l *Lease) Close() error {
-	if l == nil || l.closed {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
 		return nil
 	}
 	l.closed = true
@@ -146,7 +153,16 @@ func (l *Lease) validMapping(m *unix.LoopInfo64) bool {
 }
 
 func (l *Lease) Validate() error {
-	if l == nil || l.closed {
+	if l == nil {
+		return ErrUnavailable
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.validateLocked()
+}
+
+func (l *Lease) validateLocked() error {
+	if l.closed || l.runner == nil || l.sandbox == nil || l.root == nil || l.image == nil || l.loop == nil {
 		return ErrUnavailable
 	}
 	mount, err := inspectMount(l.root)
@@ -175,6 +191,40 @@ func (l *Lease) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Retain creates an independent descriptor owner for the same validated kernel
+// objects, without reopening configured paths. Closing either owner does not
+// close the other's descriptors. This grants no execution or network authority.
+func (l *Lease) Retain() (*Lease, error) {
+	if l == nil {
+		return nil, ErrUnavailable
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.validateLocked(); err != nil {
+		return nil, err
+	}
+	copy := &Lease{runnerHash: l.runnerHash, sandboxHash: l.sandboxHash, imageHash: l.imageHash,
+		imageStat: l.imageStat, mountID: l.mountID, mapping: l.mapping, snapshot: l.snapshot}
+	for _, pair := range []struct {
+		source *os.File
+		target **os.File
+	}{
+		{l.runner, &copy.runner}, {l.sandbox, &copy.sandbox}, {l.root, &copy.root}, {l.image, &copy.image}, {l.loop, &copy.loop},
+	} {
+		fd, err := unix.FcntlInt(pair.source.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+		if err != nil {
+			copy.Close()
+			return nil, ErrUnavailable
+		}
+		*pair.target = os.NewFile(uintptr(fd), "retained-runtime-object")
+	}
+	if err := copy.Validate(); err != nil {
+		copy.Close()
+		return nil, err
+	}
+	return copy, nil
 }
 
 func openProtected(path string, directory bool) (*os.File, error) {
