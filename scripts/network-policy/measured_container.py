@@ -75,12 +75,12 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery)$',
-                                 '-test.count=3', '-test.timeout=240s'],
+                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal))$',
+                                 '-test.count=3', '-test.timeout=300s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
                                      'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
-                                capture_output=True, text=True, timeout=250)
+                                capture_output=True, text=True, timeout=310)
         assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
         print(result.stdout, end='')
         if result.returncode:
@@ -90,6 +90,8 @@ def main():
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
+        for case in ('Normal', 'RouterLoss', 'StartupRefusal'):
+            assert result.stdout.count('--- PASS: TestMeasuredNetworkSession'+case+' ') == 3
         uplink_state = Path('/state-input/uplink-journal')
         assert [p.name for p in uplink_state.iterdir()] == ['.lock']
         (uplink_state/'.lock').unlink()

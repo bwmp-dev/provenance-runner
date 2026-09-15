@@ -182,9 +182,19 @@ func TestMeasuredAuthorityRouteSentryUplinkRefusal(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "uplink-refusal")
 }
 
+func TestMeasuredNetworkSessionNormal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-normal")
+}
+func TestMeasuredNetworkSessionRouterLoss(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-router-loss")
+}
+func TestMeasuredNetworkSessionStartupRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-startup-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
+	if authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -350,7 +360,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	privateRoot := bundle + "/.measured-root"
 	input, sourcePath := measuredFixtureInput(t, ctx)
 	mode := "probe-confined-lifecycle"
-	if authorityMode == "owned-normal" {
+	if authorityMode == "owned-normal" || authorityMode == "session-normal" {
 		mode = "probe-confined"
 	}
 	mapping := np.MappedIdentity{UID: 65532, GID: 65532, OverflowUID: 65533, OverflowGID: 65533}
@@ -406,6 +416,11 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	tools := np.RouteTools{NSenter: load("nsenter"), NFT: load("nft"), IP: load("ip")}
 	self := load(os.Args[0])
+	if strings.HasPrefix(authorityMode, "session-") {
+		testMeasuredSessionFixture(t, ctx, authorityMode, measuredSessionConfig{Launch: MeasuredNetworkLaunchConfig{Job: specification, Measurement: lease, Scope: jobScope, Journal: journal, Bundle: ownedBundle, Authority: guard, Mapping: mapping, PrivateRoot: privateRoot}, RouterMapping: np.MappedIdentity{UID: 65530, GID: 65530, OverflowUID: 65531, OverflowGID: 65531}, Tools: tools}, self)
+		checkParentForwarding()
+		return
+	}
 	executeContext := func(commandContext context.Context, fd *os.File, tool np.ProtectedRouteTool, args ...string) ([]byte, error) {
 		command := exec.CommandContext(commandContext, "/proc/self/fd/4")
 		command.Args = append([]string{"nsenter", "-F", "--preserve-credentials", "-n/proc/self/fd/3", "--", "/proc/self/fd/5"}, args...)
