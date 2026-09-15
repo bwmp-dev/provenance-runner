@@ -8,8 +8,8 @@ spec.loader.exec_module(driver)
 
 
 class MeasuredAcceptanceTests(unittest.TestCase):
-    def test_both_repeated_real_cases_and_cleanup_are_mandatory(self):
-        rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry') for _ in range(3)]
+    def test_all_repeated_real_cases_and_cleanup_are_mandatory(self):
+        rows = ['--- PASS: TestMeasuredAuthorityRouteSentry'+case+' (1s)' for case in ('Withdrawal', 'Expiry', 'ChildMismatch') for _ in range(3)]
         rows += ['{"measuredRoutedOwnedLoopDetached": true}']
         report = '\n'.join(rows)
         driver.validate_report(report, '', 0)

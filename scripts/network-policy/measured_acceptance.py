@@ -19,7 +19,7 @@ def validate_report(stdout, stderr, status):
     assert status == 0, stderr[-4096:]
     assert '{"measuredRoutedOwnedLoopDetached": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
 
 
@@ -76,6 +76,7 @@ def main():
             validate_report(result.stdout, result.stderr, result.returncode)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]
             print(json.dumps({'measuredRoutedSentry': True, 'preLaunchKernelPolicyObserved': True,
+                              'exactChildObservationAndMismatchWithdrawal': True,
                               'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,

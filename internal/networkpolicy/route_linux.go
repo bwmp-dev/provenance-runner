@@ -276,11 +276,18 @@ func (r *RetainedRoute) readKernelIdentity(ctx context.Context) ([32]byte, error
 // ObserveInstalled proves a current owned kernel snapshot, not caller-supplied
 // labels. It is not by itself a measured Sentry launch or authority observation.
 func (r *RetainedRoute) ObserveInstalled(ctx context.Context, job string) error {
+	return r.observeInstalled(ctx, job, nil, false)
+}
+
+func (r *RetainedRoute) observeInstalled(ctx context.Context, job string, child *ChildNamespaces, requireChild bool) error {
 	if r == nil {
 		return ErrNamespace
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if requireChild && (child == nil || child != r.workload) {
+		return ErrNamespace
+	}
 	if r.closed || !r.installed || r.withdrawn || r.disconnected || job != r.job || r.router.Validate(job) != nil || r.workload.Validate(job) != nil {
 		return ErrNamespace
 	}
