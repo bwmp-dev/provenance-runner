@@ -77,8 +77,18 @@ func writeCgroupControl(scope *os.File, name, value string) error {
 // A non-nil result ALWAYS belongs to the caller, even on configuration failure:
 // call Cleanup until successful. Existing names are refused without mutation.
 func CreateJobCgroup(job *p.JobSpecification, parent *os.File) (*JobCgroup, error) {
+	return createJobCgroup(job, parent, "")
+}
+
+func createJobCgroup(job *p.JobSpecification, parent *os.File, name string) (*JobCgroup, error) {
 	owner, err := NewAuthority(job)
 	if err != nil || os.Getuid() != 0 || os.Geteuid() != 0 || !protectedCgroup(parent, true) || job.EffectivePolicy.Sandbox != p.SandboxKind_SANDBOX_KIND_GVISOR || job.EffectivePolicy.Resources.ProcessCount > 4096 {
+		return nil, ErrResources
+	}
+	if name == "" {
+		name = "job-" + owner.lease.JobId + "-" + owner.attempt.AttemptId
+	}
+	if name != "job-"+owner.lease.JobId+"-"+owner.attempt.AttemptId && !validJournalScopeName(name) {
 		return nil, ErrResources
 	}
 	root, err := os.Open("/sys/fs/cgroup")
@@ -112,7 +122,7 @@ func CreateJobCgroup(job *p.JobSpecification, parent *os.File) (*JobCgroup, erro
 		return nil, ErrResources
 	}
 	limits := job.EffectivePolicy.Resources
-	s := &JobCgroup{parent: os.NewFile(uintptr(fd), "owned-job-cgroup-parent"), name: "job-" + owner.lease.JobId + "-" + owner.attempt.AttemptId, owner: owner,
+	s := &JobCgroup{parent: os.NewFile(uintptr(fd), "owned-job-cgroup-parent"), name: name, owner: owner,
 		ceiling: resourceLimits{uint64(limits.CpuMillis), limits.MemoryBytes, uint64(limits.ProcessCount) + MappedRuntimeProcessReserve}}
 	if unix.Mkdirat(fd, s.name, 0700) != nil {
 		s.parent.Close()

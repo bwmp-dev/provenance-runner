@@ -15,6 +15,7 @@ def validate_report(stdout, stderr, status):
     assert len(stdout) <= 65536 and len(stderr) <= 65536
     assert status == 0, stderr[-4096:]
     assert stdout.count('--- PASS: TestJobCgroupKernelLifecycle ') == 3
+    assert stdout.count('--- PASS: TestJobCgroupJournalKernelRecovery ') == 3
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
 
 
@@ -34,15 +35,22 @@ def inside():
     (root/'cgroup.subtree_control').write_text('+cpu +memory +pids')
     jobs.mkdir(mode=0o700)
     (jobs/'cgroup.subtree_control').write_text('+cpu +memory +pids')
-    result = subprocess.run(['/test-input', '-test.v', '-test.run=^TestJobCgroupKernelLifecycle$',
+    state = Path('/state-input/journal')
+    assert not state.exists()
+    state.mkdir(mode=0o700)
+    result = subprocess.run(['/test-input', '-test.v', '-test.run=^TestJobCgroup(KernelLifecycle|JournalKernelRecovery)$',
                              '-test.count=3', '-test.timeout=30s'], cwd='/repo/internal/networkpolicy',
                             env={'PATH': '/usr/bin:/bin', 'PROVENANCE_DISPOSABLE_JOB_CGROUP_FIXTURE': '1'},
                             capture_output=True, text=True, timeout=40)
     print(result.stdout, end='')
     validate_report(result.stdout, result.stderr, result.returncode)
+    assert [p.name for p in state.iterdir()] == ['.lock']
+    (state/'.lock').unlink()
+    state.rmdir()
     assert not [p for p in jobs.iterdir() if p.is_dir()]
     jobs.rmdir()
     print(json.dumps({'ownedJobCgroupRemoved': True, 'descendantCleanup': True,
+                      'journalCrashRecoveryAndLock': True,
                       'staleLaunchFDRefused': True, 'controllerSurvived': True, 'repetitions': 3}))
 
 
@@ -57,7 +65,9 @@ def main():
         return
     assert args.image and re.fullmatch(r'sha256:[0-9a-f]{64}', args.image)
     repo = Path(__file__).resolve().parents[2]
-    with tempfile.TemporaryDirectory(prefix='provenance-job-cgroup-') as directory:
+    # A real persistent local filesystem is required by the journal; do not
+    # inherit a RAM-only TMPDIR used for Go's disposable compilation cache.
+    with tempfile.TemporaryDirectory(prefix='provenance-job-cgroup-', dir='/tmp', ignore_cleanup_errors=True) as directory:
         binary = Path(directory)/'cgroup.test'
         subprocess.run([args.go, 'test', '-c', '-o', str(binary), './internal/networkpolicy'],
                        cwd=repo, env=os.environ | {'CGO_ENABLED': '0'}, check=True, timeout=180)
@@ -67,6 +77,7 @@ def main():
                         '--cpus', '2', '--pids-limit', '128', '--tmpfs', '/tmp:rw,nosuid,size=16m',
                         '--mount', f'type=bind,src={repo},dst=/repo,readonly',
                         '--mount', f'type=bind,src={binary},dst=/test-input,readonly',
+                        '--mount', f'type=bind,src={directory},dst=/state-input',
                         '--entrypoint', 'python3', args.image,
                         '/repo/scripts/network-policy/job_cgroup_acceptance.py', '--inside'],
                        check=True, capture_output=True, timeout=30)

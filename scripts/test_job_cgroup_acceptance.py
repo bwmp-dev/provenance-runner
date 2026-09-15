@@ -10,12 +10,18 @@ spec.loader.exec_module(driver)
 class JobCgroupAcceptanceTests(unittest.TestCase):
     def test_three_real_cases_required(self):
         row = '--- PASS: TestJobCgroupKernelLifecycle (1s)\n'
-        driver.validate_report(row*3, '', 0)
-        for stdout, stderr, status in ((row*2, '', 0), (row*4, '', 0),
-                                       (row*3+'--- SKIP: missing', '', 0),
-                                       (row*3+'--- FAIL: failed', '', 0),
-                                       (row*3, '', 1), ('x'*65537, '', 0),
-                                       (row*3, 'x'*65537, 0)):
+        recovery = '--- PASS: TestJobCgroupJournalKernelRecovery (1s)\n'
+        valid = row*3+recovery*3
+        driver.validate_report(valid, '', 0)
+        with self.assertRaises(AssertionError):
+            driver.validate_report(row*3, '', 0)
+        with self.assertRaises(AssertionError):
+            driver.validate_report(recovery*3, '', 0)
+        for stdout, stderr, status in ((row*2+recovery*3, '', 0), (row*4+recovery*3, '', 0),
+                                       (valid+'--- SKIP: missing', '', 0),
+                                       (valid+'--- FAIL: failed', '', 0),
+                                       (valid, '', 1), (valid+'x'*65537, '', 0),
+                                       (valid, 'x'*65537, 0)):
             with self.assertRaises(AssertionError):
                 driver.validate_report(stdout, stderr, status)
 
