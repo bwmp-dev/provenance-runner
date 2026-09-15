@@ -24,6 +24,13 @@ inside its owned cgroup. Before returning, it retains the direct child's kernel
 identity and verifies its actual resource boundary. The launch pipe remains
 closed to execution until `Release` revalidates measurement, resource membership
 and the authorized native route for that exact retained child.
+Resource validation also requires the exact retained child object, not just
+matching job/attempt labels. Nil or foreign owners permanently invalidate that
+resource proof; retrying with the original child cannot revive it. Refusal does
+not kill either process or invalidate an independently retained resource proof.
+The disposable fixture checks this with a living router bearing the same job ID,
+as well as a nil owner, before launch and validates the real workload again after
+guest execution starts. These checks alone do not produce runtime evidence.
 The matching journal and both original durable records are checked before
 creation and again at gate release. A missing, foreign or corrupt record refuses
 launch; corrupted ownership also poisons future scope launch descriptors.

@@ -217,11 +217,26 @@ func (r *RetainedResources) observeLocked() (resourceState, error) {
 }
 
 func (r *RetainedResources) Validate(job *p.JobSpecification) error {
+	return r.validate(job, nil, false)
+}
+
+// ValidateForChild additionally requires the exact retained workload owner.
+// Matching job labels or a separately retained namespace cannot substitute for
+// that owner. A mismatch permanently invalidates this resource proof only.
+func (r *RetainedResources) ValidateForChild(job *p.JobSpecification, child *ChildNamespaces) error {
+	return r.validate(job, child, true)
+}
+
+func (r *RetainedResources) validate(job *p.JobSpecification, child *ChildNamespaces, requireChild bool) error {
 	if r == nil {
 		return ErrResources
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if requireChild && (child == nil || child != r.child) {
+		r.invalid = true
+		return ErrResources
+	}
 	owner, err := NewAuthority(job)
 	if err != nil || r.owner == nil || owner.digest != r.owner.digest || owner.lease.JobId != r.owner.lease.JobId || owner.lease.LeaseId != r.owner.lease.LeaseId || owner.lease.ExecutionId != r.owner.lease.ExecutionId || !proto.Equal(owner.attempt, r.owner.attempt) {
 		r.invalid = true

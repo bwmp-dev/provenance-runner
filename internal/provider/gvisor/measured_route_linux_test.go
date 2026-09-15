@@ -657,7 +657,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Fatal("actual pre-launch cgroup enforcement", err)
 	}
 	t.Cleanup(func() { resources.Close() })
-	if err := resources.Validate(specification); err != nil {
+	if err := resources.ValidateForChild(specification, workload); err != nil {
 		t.Fatal(err)
 	}
 	// Refuse real kernel limits above a frozen policy, without modifying even
@@ -693,6 +693,18 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if probe.Close() != nil || workload.Validate(job) != nil {
 		t.Fatal("closing resource proof killed or invalidated owned child")
+	}
+	for _, foreign := range []*np.ChildNamespaces{nil, router} {
+		probe, err := np.RetainResources(specification, workload, jobScopeFD)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if probe.ValidateForChild(specification, foreign) == nil || probe.ValidateForChild(specification, workload) == nil || probe.Validate(specification) == nil {
+			t.Fatal("resource proof resumed after exact child mismatch")
+		}
+		if probe.Close() != nil || workload.Validate(job) != nil || router.Validate(job) != nil || resources.ValidateForChild(specification, workload) != nil {
+			t.Fatal("foreign resource proof affected independently owned live resources")
+		}
 	}
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
@@ -788,7 +800,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if read(guestOutput)["phase"] != "flows-ready" {
 		t.Fatal("native persistent guest flows unavailable")
 	}
-	if err := resources.Validate(specification); err != nil {
+	if err := resources.ValidateForChild(specification, workload); err != nil {
 		t.Fatal("live runtime left original resource boundary", err)
 	}
 	if guard != nil {
