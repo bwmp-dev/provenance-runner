@@ -46,11 +46,20 @@ The controller-owned launch and normal-exit cases also repeat three times. The
 launch case checks actual whole-scope termination after authority withdrawal;
 the normal case checks successful process exit, cleanup and no self-induced
 authority withdrawal. The original packet-level withdrawal cases remain intact.
+Each owned-launch case also performs 32 consecutive DNS renewals against the same
+living guest, retained namespace and budget objects before its flow and withdrawal
+checks. Backend diagnostics preserve only sealed fixed stage labels; arbitrary
+backend error text remains discarded.
 
 Gated startup is also repeated three times with ten subcases each. Each child
 must be successfully retained and cleaned up without release or guest output.
 
-The CI driver requires all eighteen real test results, no skipped or failed cases and
+All scopes now use the cleanup-only durable journal. A seventh repeated case
+corrupts the owned record while the actual child waits behind the launch gate;
+execution must be refused and the failed attempt fully retired. The driver also
+requires the journal to contain no outstanding ownership records afterward.
+
+The CI driver requires all twenty-one real test results, no skipped or failed cases and
 the explicit successful loop-detach and exclusive-scope cleanup observations. Checker unit tests require
 missing cases or cleanup evidence to fail. Evidence includes the exact source,
 fixture image, builder hash, root image hash, test binary hash and captured test

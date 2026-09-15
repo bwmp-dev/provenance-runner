@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -148,9 +149,13 @@ func TestMeasuredAuthorityRouteSentryOwnedGatedStartup(t *testing.T) {
 	}
 }
 
+func TestMeasuredAuthorityRouteSentryJournalRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "journal-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -201,13 +206,31 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobScope, err := np.CreateJobCgroup(specification, parent)
+	state, err := os.Open("/state-input/journal")
+	if err != nil {
+		parent.Close()
+		t.Fatal(err)
+	}
+	journal, err := np.OpenJobCgroupJournal(parent, state)
 	parent.Close()
+	state.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := journal.Close(); err != nil {
+			t.Error("measured journal closure", err)
+		}
+	})
+	if recovered, err := journal.Recover(ctx); err != nil || len(recovered) != 0 {
+		t.Fatal("unexpected fixture recovery", err)
+	}
+	jobScope, err := journal.Create(specification)
 	cleanupScope := func() bool {
 		if jobScope != nil {
 			stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := jobScope.Cleanup(stop); err != nil {
+			if err := journal.Cleanup(stop, jobScope); err != nil {
 				t.Error("exclusive Sentry scope cleanup", err)
 				return false
 			}
@@ -310,7 +333,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
-		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup") {
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal") {
 			inputRead, inputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -336,7 +359,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 				diagnostics.Close()
 				os.Remove(diagnostics.Name())
 			})
-			launchOwner, err = StartMeasuredNetworkProcess(ctx, MeasuredNetworkLaunchConfig{Job: specification, Measurement: lease, Scope: jobScope, Authority: guard,
+			launchOwner, err = StartMeasuredNetworkProcess(ctx, MeasuredNetworkLaunchConfig{Job: specification, Measurement: lease, Scope: jobScope, Journal: journal, Authority: guard,
 				Mapping: np.MappedIdentity{UID: uid, GID: uid, OverflowUID: uid + 1, OverflowGID: uid + 1}, PrivateRoot: privateRoot, Stdin: inputRead, Stdout: outputWrite, Stderr: diagnostics})
 			if launchOwner != nil {
 				t.Cleanup(func() {
@@ -666,6 +689,37 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
+	if authorityMode == "journal-refusal" {
+		entries, err := os.ReadDir("/state-input/journal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := 0
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".owned.json") {
+				if err := os.WriteFile(filepath.Join("/state-input/journal", entry.Name()), []byte("{}\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				changed++
+			}
+		}
+		if changed != 1 {
+			t.Fatal("expected one owned synthetic journal record")
+		}
+		if launchOwner.Release(ctx) == nil {
+			t.Fatal("corrupt journal opened gate")
+		}
+		if err := launchOwner.Wait(ctx); err == nil || ctx.Err() != nil {
+			t.Fatal("refused gated child not terminated", err)
+		}
+		if _, err := guestOutput.ReadByte(); err != io.EOF {
+			t.Fatal("refused child produced guest output", err)
+		}
+		if launchOwner.Close(context.Background()) != nil || !cleanupScope() || guard.Close() != nil || server.Process.Signal(syscall.Signal(0)) != nil {
+			t.Fatal("refused child cleanup failed")
+		}
+		return
+	}
 	if launchOwner != nil {
 		if err := launchOwner.Release(ctx); err != nil {
 			t.Fatal("owned launch gate", err)
@@ -727,15 +781,21 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	// Renew from a real resolver observation while retaining the same Sentry,
 	// namespace objects, flow tracking, byte bucket and original wire policy.
 	time.Sleep(1100 * time.Millisecond)
-	binding, err = binder.Resolve(ctx, "fixture.example.com")
-	if err != nil {
-		t.Fatal(err)
+	renewals := 1
+	if authorityMode == "owned-launch" {
+		renewals = 32
 	}
-	{
+	for i := 0; i < renewals; i++ {
+		binding, err = binder.Resolve(ctx, "fixture.example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
 		err = guard.RefreshDNS(ctx, []np.Binding{binding})
 		if err != nil {
-			t.Fatal("native DNS renewal failed", err)
+			t.Fatal("native DNS renewal failed", i, err)
 		}
+	}
+	{
 		if err == nil {
 			// Real installed forwarding/DNS deadlines must shorten without
 			// replenishing accounting or interrupting still-authorized flows.

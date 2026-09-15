@@ -68,8 +68,8 @@ func RetainMappedChild(job string, child *os.Process, mapping MappedIdentity) (r
 	if e != nil {
 		return nil, ErrNamespace
 	}
-	if s.validateLocked(job) != nil {
-		return nil, ErrNamespace
+	if err := s.validateLocked(job); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -131,7 +131,10 @@ func (s *ChildNamespaces) validateLocked(job string) error {
 		return ErrNamespace
 	}
 	poll := []unix.PollFd{{Fd: int32(s.pidfd.Fd()), Events: unix.POLLIN}}
-	if n, err := unix.Poll(poll, 0); err != nil || n != 0 || poll[0].Revents != 0 {
+	if n, err := pollChildLiveness(poll, unix.Poll); err != nil || n != 0 || poll[0].Revents != 0 {
+		if err == unix.EINTR {
+			return fmt.Errorf("%w: initial liveness interrupted", ErrNamespace)
+		}
 		return ErrNamespace
 	}
 	status, err := s.read("status")
@@ -211,10 +214,29 @@ func (s *ChildNamespaces) validateLocked(job string) error {
 		return ErrNamespace
 	}
 	// Recheck liveness after all procfs reads and namespace ownership ioctls.
-	if n, err := unix.Poll(poll, 0); err != nil || n != 0 || poll[0].Revents != 0 {
+	if n, err := pollChildLiveness(poll, unix.Poll); err != nil || n != 0 || poll[0].Revents != 0 {
+		if err == unix.EINTR {
+			return fmt.Errorf("%w: final liveness interrupted", ErrNamespace)
+		}
 		return ErrNamespace
 	}
 	return nil
+}
+
+// EINTR means the kernel supplied no liveness observation. Complete that same
+// nonblocking observation on the retained pidfd; never retry an exit event or
+// another error. Bound interruptions so signal flooding still fails closed.
+func pollChildLiveness(fds []unix.PollFd, poll func([]unix.PollFd, int) (int, error)) (int, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		for i := range fds {
+			fds[i].Revents = 0
+		}
+		n, err := poll(fds, 0)
+		if err != unix.EINTR {
+			return n, err
+		}
+	}
+	return 0, unix.EINTR
 }
 
 func (s *ChildNamespaces) Validate(job string) error {
@@ -235,8 +257,8 @@ func (s *ChildNamespaces) NetworkForJob(job string) (*os.File, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.validateLocked(job) != nil {
-		return nil, ErrNamespace
+	if err := s.validateLocked(job); err != nil {
+		return nil, err
 	}
 	fd, err := unix.FcntlInt(s.network.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {

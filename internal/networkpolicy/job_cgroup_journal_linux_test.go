@@ -82,6 +82,12 @@ func TestJobCgroupJournalCrashHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if j.CheckScope(s) != nil {
+		t.Fatal("durable scope rejected")
+	}
+	if j.CheckScope(&JobCgroup{}) == nil {
+		t.Fatal("foreign scope object accepted")
+	}
 	if mode == "intent" {
 		// Simulate the crash window before the owned marker is durable. Nothing
 		// has launched; recovery must accept only an empty intended scope.
@@ -169,6 +175,12 @@ func TestJobCgroupJournalKernelRecovery(t *testing.T) {
 	}
 	if err := j.Cleanup(context.Background(), s); err != nil {
 		t.Fatal(err)
+	}
+	if j.CheckScope(s) == nil {
+		t.Fatal("retired scope accepted")
+	}
+	if err := j.Cleanup(context.Background(), s); err != nil {
+		t.Fatal("durable cleanup not idempotent", err)
 	}
 	if err := j.Close(); err != nil {
 		t.Fatal(err)

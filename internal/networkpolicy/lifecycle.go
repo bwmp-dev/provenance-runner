@@ -92,7 +92,15 @@ func StartRoute(ctx context.Context, job string, bindings []Binding, route Owned
 func (s *RouteSession) apply(ctx context.Context, program string, kind routeChangeKind) error {
 	bounded, cancel := context.WithTimeout(ctx, routeOperationTimeout)
 	defer cancel()
-	if s.route.Apply(bounded, FirewallChange{job: s.job, program: program, kind: kind}) != nil || bounded.Err() != nil {
+	err := s.route.Apply(bounded, FirewallChange{job: s.job, program: program, kind: kind})
+	if bounded.Err() != nil {
+		return &actuationFailure{actuationCommandCancelled}
+	}
+	if err != nil {
+		var diagnostic *actuationFailure
+		if errors.As(err, &diagnostic) && diagnostic != nil {
+			return &actuationFailure{diagnostic.stage}
+		}
 		return ErrActuation
 	}
 	return nil

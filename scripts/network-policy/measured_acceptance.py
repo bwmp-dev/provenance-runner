@@ -19,8 +19,9 @@ def validate_report(stdout, stderr, status):
     assert status == 0, stderr[-4096:]
     assert '{"measuredRoutedOwnedLoopDetached": true}' in stdout
     assert '{"exclusiveMeasuredJobScopesRemoved": true}' in stdout
+    assert '{"measuredJobJournalRetired": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
 
 
@@ -34,7 +35,7 @@ def main():
     builder = Path(args.builder).resolve(strict=True)
     assert hashlib.sha256((builder/'mksquashfs').read_bytes()).hexdigest() == BUILDER_SHA
     repo = Path(__file__).resolve().parents[2]
-    with tempfile.TemporaryDirectory(prefix='provenance-measured-route-') as directory:
+    with tempfile.TemporaryDirectory(prefix='provenance-measured-route-', dir='/var/tmp', ignore_cleanup_errors=True) as directory:
         work = Path(directory)
         # Both executables are compiled from this exact checkout. They contain
         # synthetic fixtures only and receive no host or platform credentials.
@@ -68,6 +69,7 @@ def main():
                        '--mount', f'type=bind,src={repo},dst=/repo,readonly',
                        '--mount', f'type=bind,src={work}/gvisor.test,dst=/test-input,readonly',
                        '--mount', f'type=bind,src={work}/image.squashfs,dst=/image-input,readonly',
+                       '--mount', f'type=bind,src={work},dst=/state-input',
                        args.image, '/repo/scripts/network-policy/measured_container.py', '/test-input', '/image-input']
             subprocess.run(command, check=True, capture_output=True, timeout=30)
             created.append(runtime_name)
@@ -81,6 +83,7 @@ def main():
                               'exactChildObservationAndMismatchWithdrawal': True,
                               'exclusiveMeasuredJobScopeCleanup': True,
                               'ownedMeasuredLaunchAndAuthorityTermination': True,
+                              'durableMeasuredJobScopeRetirement': True,
                               'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,

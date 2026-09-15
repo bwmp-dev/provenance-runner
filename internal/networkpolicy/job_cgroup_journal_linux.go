@@ -29,6 +29,7 @@ type JobCgroupJournal struct {
 	boot                 string
 	parentDev, parentIno uint64
 	active               map[string]*JobCgroup
+	records              map[string]journalScopeRecord
 	ready, closed        bool
 }
 
@@ -123,7 +124,7 @@ func OpenJobCgroupJournal(parent, state *os.File) (*JobCgroupJournal, error) {
 	if unix.Fstat(int(parent.Fd()), &st) != nil {
 		return nil, ErrResources
 	}
-	j := &JobCgroupJournal{boot: boot, parentDev: uint64(st.Dev), parentIno: st.Ino, active: map[string]*JobCgroup{}}
+	j := &JobCgroupJournal{boot: boot, parentDev: uint64(st.Dev), parentIno: st.Ino, active: map[string]*JobCgroup{}, records: map[string]journalScopeRecord{}}
 	for _, pair := range []struct {
 		from *os.File
 		to   **os.File
@@ -273,6 +274,9 @@ func (j *JobCgroupJournal) Create(job *p.JobSpecification) (*JobCgroup, error) {
 	s, err := createJobCgroup(job, j.parent, name)
 	if s != nil {
 		j.active[name] = s
+		s.mu.Lock()
+		s.journalOwner = j
+		s.mu.Unlock()
 	}
 	if err == nil {
 		var st unix.Stat_t
@@ -293,7 +297,45 @@ func (j *JobCgroupJournal) Create(job *p.JobSpecification) (*JobCgroup, error) {
 		}
 		return s, ErrResources
 	}
+	j.records[name] = r
 	return s, nil
+}
+
+// CheckScope verifies the exact live object and both durable records against
+// the journal's original in-memory kernel identity. It grants no network access.
+func (j *JobCgroupJournal) CheckScope(s *JobCgroup) error {
+	if j == nil || s == nil {
+		return ErrResources
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed || !j.ready || j.active[s.name] != s {
+		return ErrResources
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.journalOwner != j || s.journalRetired || s.removed || s.stopping {
+		return ErrResources
+	}
+	expected, ok := j.records[s.name]
+	if !ok {
+		return ErrResources
+	}
+	owned, err := j.readRecord(expected.Token+".owned.json", true)
+	if err != nil || owned != expected {
+		j.ready = false
+		s.stopping = true
+		return ErrResources
+	}
+	intent, err := j.readRecord(expected.Token+".intent.json", false)
+	expected.ScopeDev = 0
+	expected.ScopeIno = 0
+	if err != nil || intent != expected {
+		j.ready = false
+		s.stopping = true
+		return ErrResources
+	}
+	return nil
 }
 
 // Cleanup removes durable ownership records only after whole-scope cleanup.
@@ -304,6 +346,18 @@ func (j *JobCgroupJournal) Cleanup(ctx context.Context, s *JobCgroup) error {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	s.mu.Lock()
+	owner, retired, removed := s.journalOwner, s.journalRetired, s.removed
+	s.mu.Unlock()
+	if owner != j {
+		return ErrResources
+	}
+	if retired {
+		if removed {
+			return nil
+		}
+		return ErrResources
+	}
 	if j.closed || j.active[s.name] != s {
 		return ErrResources
 	}
@@ -315,6 +369,10 @@ func (j *JobCgroupJournal) Cleanup(ctx context.Context, s *JobCgroup) error {
 		return err
 	}
 	delete(j.active, s.name)
+	delete(j.records, s.name)
+	s.mu.Lock()
+	s.journalRetired = true
+	s.mu.Unlock()
 	return nil
 }
 
