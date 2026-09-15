@@ -15,12 +15,12 @@ import (
 )
 
 func init() {
-	measuredControlClient = func() bool {
+	measuredObservationClient = func() bool {
 		if len(os.Args) == 4 && os.Args[1] == "control-observation" {
 			controlObservationFixture(os.Args[2], os.Args[3])
 			return true
 		}
-		return runControlClient()
+		return false
 	}
 }
 
