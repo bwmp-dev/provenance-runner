@@ -35,7 +35,7 @@ def validate_report(stdout, stderr, status):
     assert '{"measuredJobJournalRetired": true}' in stdout
     assert '{"measuredBundleJournalRetired": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal', 'LayoutRefusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
     for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' ') == 3
