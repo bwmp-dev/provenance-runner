@@ -354,6 +354,36 @@ func (j *measuredControllerJob) ObserveRuntime(ctx context.Context) (*runtimeide
 	return observation, nil
 }
 
+// completedProcessExit reports the owned process's kernel exit only after every
+// controller-owned object has retired. It does not replace Wait's cancellation,
+// authority or infrastructure failure: exit zero alone is not a successful job.
+// In particular, no code supplied in a guest outcome frame is consulted here.
+func (j *measuredControllerJob) completedProcessExit() (int, error) {
+	if j == nil || j.controller == nil {
+		return 0, errMeasuredSession
+	}
+	c := j.controller
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !j.retired || j.session == nil || j.session.process == nil {
+		return 0, errMeasuredSession
+	}
+	process := j.session.process
+	select {
+	case <-process.done:
+	default:
+		return 0, errMeasuredSession
+	}
+	if process.cmd == nil || process.cmd.ProcessState == nil {
+		return 0, errMeasuredSession
+	}
+	code := process.cmd.ProcessState.ExitCode()
+	if code < 0 || code > 255 {
+		return 0, errMeasuredSession
+	}
+	return code, nil
+}
+
 // Called with the controller mutex held. Cleanup retries do not turn an
 // already completed normal session into a cancellation result.
 func (j *measuredControllerJob) recordCloseOutcome() {
