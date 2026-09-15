@@ -524,7 +524,26 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Cleanup(func() { fd.Close() })
 		return identity, cmd, input, reader, fd
 	}
-	router, _, _, _, routerFD := child(65530, false)
+	routerContext, cancelRouter := context.WithCancel(ctx)
+	t.Cleanup(cancelRouter)
+	routerOwner, err := StartRouterOwner(routerContext, specification, journal, lease, np.MappedIdentity{UID: 65530, GID: 65530, OverflowUID: 65531, OverflowGID: 65531})
+	if routerOwner != nil {
+		t.Cleanup(func() {
+			if routerOwner.Close(context.Background()) != nil {
+				t.Error("router scope cleanup")
+			}
+		})
+	}
+	if err != nil {
+		t.Fatal("journaled router launch", err)
+	}
+	assertRouterThreadsUnprivileged(t, routerOwner)
+	router := routerOwner.Child()
+	routerFD, err := router.NetworkForJob(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { routerFD.Close() })
 	workload, guest, guestInput, guestOutput, jobFD := child(65532, true)
 	if authorityMode == "owned-gated-startup" {
 		if err := launchOwner.Close(ctx); err != nil {
@@ -535,6 +554,18 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 		if _, err := guestOutput.ReadByte(); err != io.EOF {
 			t.Fatal("unreleased child produced guest output", err)
+		}
+		if router.Validate(job) != nil {
+			t.Fatal("gated workload cleanup killed router")
+		}
+		cancelRouter()
+		select {
+		case <-routerOwner.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("router cancellation did not end holder")
+		}
+		if routerOwner.Close(context.Background()) != nil || router.Validate(job) == nil {
+			t.Fatal("cancelled router scope cleanup")
 		}
 		return
 	}
@@ -731,6 +762,20 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			changed := 0
 			for _, entry := range entries {
 				if strings.HasSuffix(entry.Name(), ".owned.json") {
+					if authorityMode == "journal-refusal" {
+						var record struct {
+							ScopeDev uint64 `json:"scopeDev"`
+							ScopeIno uint64 `json:"scopeIno"`
+						}
+						var scopeStat unix.Stat_t
+						raw, err := os.ReadFile(filepath.Join(journalPath, entry.Name()))
+						if err != nil || json.Unmarshal(raw, &record) != nil || unix.Fstat(int(jobScopeFD.Fd()), &scopeStat) != nil {
+							t.Fatal("owned scope record selection")
+						}
+						if record.ScopeDev != uint64(scopeStat.Dev) || record.ScopeIno != scopeStat.Ino {
+							continue
+						}
+					}
 					if err := os.WriteFile(filepath.Join(journalPath, entry.Name()), []byte("{}\n"), 0600); err != nil {
 						t.Fatal(err)
 					}
@@ -979,6 +1024,15 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if fresh, err := jobScope.LaunchFD(specification); fresh != nil || err == nil {
 		t.Fatal("cleaned Sentry scope resumed")
+	}
+	if router.Validate(job) != nil {
+		t.Fatal("workload cleanup killed independent router")
+	}
+	if err := routerOwner.Close(context.Background()); err != nil {
+		t.Fatal("journaled router cleanup", err)
+	}
+	if router.Validate(job) == nil || routerOwner.Close(context.Background()) != nil {
+		t.Fatal("router cleanup was not terminal and idempotent")
 	}
 	if server.Process.Signal(syscall.Signal(0)) != nil {
 		t.Fatal("Sentry cleanup killed external endpoint")
