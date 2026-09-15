@@ -40,7 +40,7 @@ func (m *MeasuredInputPlan) GuestConfiguration(job *p.JobSpecification) ([]byte,
 		return nil, ErrMeasuredInputPlan
 	}
 	c := measuredGuestConfiguration{Version: 1, JobID: job.Lease.JobId, Inputs: m.Inputs(), Layout: m.RuntimeLayout(), MemoryBytes: job.EffectivePolicy.Resources.MemoryBytes, DiskBytes: job.EffectivePolicy.Resources.DiskBytes}
-	normalized, _, err := decodeNormalizedConfiguration(job.NormalizedConfigurationJson)
+	normalized, _, err := decodeNormalizedConfigurationVersion(job.NormalizedConfigurationJson, true)
 	if err != nil {
 		return nil, ErrMeasuredInputPlan
 	}

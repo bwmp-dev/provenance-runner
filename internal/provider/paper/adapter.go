@@ -284,6 +284,12 @@ func (p *Provider) catalogForRemoteEnvironment(environment *runnerv1.ResolvedEnv
 }
 
 func decodeNormalizedConfiguration(data []byte) (normalizedConfiguration, []consoleCommandTest, error) {
+	return decodeNormalizedConfigurationVersion(data, false)
+}
+
+// The legacy adapter remains v1-only. Measured admission may parse v2, but must
+// additionally validate its complete schema, policy maximum and execution hash.
+func decodeNormalizedConfigurationVersion(data []byte, measuredV2 bool) (normalizedConfiguration, []consoleCommandTest, error) {
 	if len(data) == 0 || len(data) > maximumNormalizedConfigurationBytes {
 		return normalizedConfiguration{}, nil, errors.New("normalized_configuration_json must contain between 1 and 1048576 bytes")
 	}
@@ -299,7 +305,7 @@ func decodeNormalizedConfiguration(data []byte) (normalizedConfiguration, []cons
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return normalizedConfiguration{}, nil, errors.New("normalized_configuration_json must contain one JSON value")
 	}
-	if configuration.APIVersion != "provenance.dev/v1" {
+	if configuration.APIVersion != "provenance.dev/v1" && !(measuredV2 && configuration.APIVersion == "provenance.dev/v2") {
 		return normalizedConfiguration{}, nil, errors.New("normalized_configuration_json apiVersion must be provenance.dev/v1")
 	}
 	if configuration.Project == nil || configuration.Project.Name == "" {

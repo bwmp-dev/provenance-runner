@@ -14,7 +14,9 @@ import (
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -57,11 +59,18 @@ func serviceFixtureJob(t *testing.T, java, prepared []byte) (*paper.RuntimeSourc
 	}
 	manifest := paper.SignedRuntime{Payload: manifestBytes, Signature: ed25519.Sign(key, append([]byte("provenance.paper-runtime/v1\n"), manifestBytes...))}
 	normalized, err := json.Marshal(map[string]any{
-		"apiVersion": "provenance.dev/v1", "project": map[string]any{"id": "service-fixture", "name": "ServiceFixture"},
+		"apiVersion": "provenance.dev/v2", "project": map[string]any{"id": "service-fixture", "name": "ServiceFixture"},
+		"network": map[string]any{"mode": "allowlist", "maximumConnections": 8, "maximumBytesPerSecond": 65536, "permissions": []any{map[string]any{"hostname": "example.com", "port": 443, "transport": "tcp"}}},
+		"release": map[string]any{"mode": "test-only", "targets": []any{}},
+		"paper": map[string]any{
+			"matrix":          []any{map[string]any{"id": "service-paper", "minecraftVersion": "1.21.8", "paperBuild": 60, "javaVersion": 21, "policy": "required"}},
+			"recommendations": map[string]any{"apiFloor": "1.21.8", "enabled": false, "newVersions": "informational"},
+			"gatePolicy":      map[string]any{"informationalFailure": "report", "infrastructureFailure": "retry", "maxInfrastructureRetries": 2, "requiredFailure": "block"},
+		},
 		"artifact":     map[string]any{"id": "service-fixture", "path": "build/service.jar", "version": "1.0.0"},
 		"dependencies": []any{},
 		"tests":        map[string]any{"startup": map[string]any{"timeoutSeconds": 10, "stabilizationSeconds": 1, "requirePluginEnabled": true, "shutdownTimeoutSeconds": 1, "requireCleanShutdown": true}, "console": []map[string]any{{"id": "service-command", "command": "help", "timeoutSeconds": 1, "assertions": []map[string]any{{"stream": "combined", "operator": "contains", "pattern": "ROOT_SERVICE_OK", "match": "present", "minimumOccurrences": 1}}}}},
-		"resources":    map[string]any{"cpuCores": 1, "memoryMiB": 128, "diskMiB": 256, "processes": 64, "wallTimeoutSeconds": 20, "logBytes": 1 << 20},
+		"resources":    map[string]any{"cpuCores": 1, "memoryMiB": 256, "diskMiB": 256, "processes": 64, "wallTimeoutSeconds": 20, "logBytes": 1 << 20},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +90,11 @@ func serviceFixtureJob(t *testing.T, java, prepared []byte) (*paper.RuntimeSourc
 		t.Fatal(err)
 	}
 	job.Hashes.Policy = &p.Digest{Algorithm: p.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest[:]}
+	environment, err := proto.MarshalOptions{Deterministic: true}.Marshal(job.Environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Hashes.Environment = fixtureDigest(environment)
 	return source, manifest, job
 }
 
@@ -93,5 +107,36 @@ func TestServiceFixtureUsesClosedSignedAdmission(t *testing.T) {
 	plan, err := source.PrepareMeasuredRequest(raw, 64<<20)
 	if err != nil || len(plan.Inputs()) != 6 {
 		t.Fatal("signed fixture admission", err)
+	}
+	if _, err := terminalevidence.NewContextV2(job); err != nil {
+		t.Fatal("complete terminal fixture admission", err)
+	}
+}
+
+func TestMeasuredV2AdmissionRejectsIncompleteOrBroaderConfiguration(t *testing.T) {
+	source, manifest, original := serviceFixtureJob(t, []byte("synthetic java archive"), []byte("synthetic prepared archive"))
+	for _, mode := range []string{"missing-network", "smaller-network", "missing-environment-hash", "unknown-field"} {
+		t.Run(mode, func(t *testing.T) {
+			job := proto.Clone(original).(*p.JobSpecification)
+			var config map[string]any
+			if json.Unmarshal(job.NormalizedConfigurationJson, &config) != nil {
+				t.Fatal("fixture config")
+			}
+			switch mode {
+			case "missing-network":
+				delete(config, "network")
+			case "smaller-network":
+				config["network"].(map[string]any)["maximumConnections"] = 1
+			case "unknown-field":
+				config["unexpected"] = true
+			case "missing-environment-hash":
+				job.Hashes.Environment = nil
+			}
+			job.NormalizedConfigurationJson, _ = json.Marshal(config)
+			job.Hashes.Configuration = fixtureDigest(job.NormalizedConfigurationJson)
+			if plan, err := source.DeriveMeasuredInputPlan(job, manifest, 64<<20); err == nil || plan != nil {
+				t.Fatal("invalid v2 job reached input planning")
+			}
+		})
 	}
 }

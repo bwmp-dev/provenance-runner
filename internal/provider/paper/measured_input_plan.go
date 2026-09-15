@@ -10,6 +10,7 @@ import (
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -86,9 +87,14 @@ func (s *RuntimeSource) DeriveMeasuredInputPlan(job *p.JobSpecification, manifes
 	if _, err := provider.catalogForRemoteEnvironment(job.Environment); err != nil {
 		return nil, ErrMeasuredInputPlan
 	}
-	normalized, console, err := decodeNormalizedConfiguration(job.NormalizedConfigurationJson)
+	normalized, console, err := decodeNormalizedConfigurationVersion(job.NormalizedConfigurationJson, true)
 	if err != nil || !pluginname.ValidPaper(job.TargetPluginName) || normalized.Project.Name != job.TargetPluginName || validateConfigurationDigest(job.Hashes, job.NormalizedConfigurationJson) != nil {
 		return nil, ErrMeasuredInputPlan
+	}
+	if normalized.APIVersion == "provenance.dev/v2" {
+		if _, err := terminalevidence.NewContextV2(job); err != nil {
+			return nil, ErrMeasuredInputPlan
+		}
 	}
 	plan := &MeasuredInputPlan{javaRoot: catalog.Java.ArchiveRoot, javaExpanded: uint64(catalog.Java.MaximumExpandedBytes), runtimeExpanded: uint64(catalog.PreparedRuntime.MaximumExpandedBytes)}
 	total := uint64(0)
