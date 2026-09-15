@@ -8,6 +8,12 @@ mapped identities, private root and standard file descriptors. It accepts no
 arbitrary command, runtime flags, environment, generic I/O callback or adopted
 PID. It is not an RPC endpoint or a production provider selection.
 
+It also requires the exact live [journaled bundle](measured-bundle-journal.md).
+The bundle records and the actual directory behind its private-root path are
+checked before starting and again at gate release. Process-owner cleanup still
+retires only the process scope; the outer bundle journal preserves independent
+file ownership until subsequent bundle cleanup or cold recovery completes.
+
 The process independently retains the measured objects, uses the closed measured
 network-child command, creates private user/network/mount namespaces, and is born
 inside its owned cgroup. Before returning, it retains the direct child's kernel

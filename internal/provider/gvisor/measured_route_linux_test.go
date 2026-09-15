@@ -153,9 +153,13 @@ func TestMeasuredAuthorityRouteSentryJournalRefusal(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "journal-refusal")
 }
 
+func TestMeasuredAuthorityRouteSentryBundleRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "bundle-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -222,10 +226,43 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			t.Error("measured journal closure", err)
 		}
 	})
-	if recovered, err := journal.Recover(ctx); err != nil || len(recovered) != 0 {
-		t.Fatal("unexpected fixture recovery", err)
+	bundleParent, err := os.Open("/tmp/bundle-input")
+	if err != nil {
+		t.Fatal(err)
 	}
-	jobScope, err := journal.Create(specification)
+	bundleState, err := os.Open("/state-input/bundle-journal")
+	if err != nil {
+		bundleParent.Close()
+		t.Fatal(err)
+	}
+	bundles, err := openMeasuredBundleJournal(bundleParent, bundleState, journal)
+	bundleParent.Close()
+	bundleState.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := bundles.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := bundles.recover(ctx); err != nil {
+		t.Fatal("bundle recovery", err)
+	}
+	ownedBundle, err := bundles.create(specification)
+	if ownedBundle != nil {
+		t.Cleanup(func() {
+			stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := bundles.cleanup(stop, ownedBundle); err != nil {
+				t.Error("journaled bundle cleanup", err)
+			}
+		})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobScope := ownedBundle.scope
 	cleanupScope := func() bool {
 		if jobScope != nil {
 			stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -265,7 +302,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			t.Error(err)
 		}
 	})
-	bundle := fixtureRoot + "/work/" + job
+	bundle := "/tmp/bundle-input/" + job
 	privateRoot := bundle + "/.measured-root"
 	var release *os.File
 	cgroup, err := os.OpenFile("/sys/fs/cgroup/provenance-fixture-controller", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -333,7 +370,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
-		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal") {
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal") {
 			inputRead, inputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -359,7 +396,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 				diagnostics.Close()
 				os.Remove(diagnostics.Name())
 			})
-			launchOwner, err = StartMeasuredNetworkProcess(ctx, MeasuredNetworkLaunchConfig{Job: specification, Measurement: lease, Scope: jobScope, Journal: journal, Authority: guard,
+			launchOwner, err = StartMeasuredNetworkProcess(ctx, MeasuredNetworkLaunchConfig{Job: specification, Measurement: lease, Scope: jobScope, Journal: journal, Bundle: ownedBundle, Authority: guard,
 				Mapping: np.MappedIdentity{UID: uid, GID: uid, OverflowUID: uid + 1, OverflowGID: uid + 1}, PrivateRoot: privateRoot, Stdin: inputRead, Stdout: outputWrite, Stderr: diagnostics})
 			if launchOwner != nil {
 				t.Cleanup(func() {
@@ -573,27 +610,6 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if read(serverOutput)["serverReady"] != true {
 		t.Fatal("native server not ready")
 	}
-	if os.Mkdir(bundle, 0755) != nil {
-		t.Fatal("fresh Sentry fixture directory unavailable")
-	}
-	t.Cleanup(func() {
-		if !cleanupScope() {
-			return
-		}
-		if guest != nil {
-			_ = guest.Process.Kill()
-			_ = guest.Wait()
-		}
-		_ = filepath.WalkDir(bundle, func(path string, entry os.DirEntry, err error) error {
-			if err == nil && entry.IsDir() {
-				return os.Chown(path, 0, 0)
-			}
-			return err
-		})
-		if os.RemoveAll(bundle) != nil {
-			t.Error("owned Sentry fixture cleanup failed")
-		}
-	})
 	for _, directory := range []string{".measured-root"} {
 		path := filepath.Join(bundle, directory)
 		if os.Mkdir(path, 0700) != nil {
@@ -766,15 +782,19 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
-	if authorityMode == "journal-refusal" {
-		entries, err := os.ReadDir("/state-input/journal")
+	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" {
+		journalPath := "/state-input/journal"
+		if authorityMode == "bundle-refusal" {
+			journalPath = "/state-input/bundle-journal"
+		}
+		entries, err := os.ReadDir(journalPath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		changed := 0
 		for _, entry := range entries {
 			if strings.HasSuffix(entry.Name(), ".owned.json") {
-				if err := os.WriteFile(filepath.Join("/state-input/journal", entry.Name()), []byte("{}\n"), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(journalPath, entry.Name()), []byte("{}\n"), 0600); err != nil {
 					t.Fatal(err)
 				}
 				changed++
