@@ -20,7 +20,8 @@ process termination if firewall cleanup fails. It preserves the private link
 until native firewall disconnection succeeds, then retires links, uplink,
 retained native handles, router and bundle. A failed stage keeps its cleanup
 owner for retry. The completion channel closes only after all owned stages
-retire; it is not a global capacity, measured mount or DNS-service proof.
+retire; it is not a global capacity or measured-mount proof. The follow-on
+[owned DNS channel](owned-router-dns.md) is now included in session teardown.
 
 Normal process completion returns the process result, not a manufactured
 authority-loss error. Router loss and other cancellation sources remain
@@ -37,7 +38,7 @@ three-repetition suite retains all prior ownership, authority, cold-recovery
 and cleanup requirements. Its bounded timeout increases for these nine added
 controller cases, not to excuse a failed case.
 
-Global identity/resource reservations, root service/RPC authentication, DNS
-service ownership, secret/event handoff, Paper composition and hosted egress
+Global identity/resource reservations, root service/RPC authentication,
+secret/event handoff, Paper composition and hosted egress
 acceptance remain separate requirements. Production network-v2 admission is
 not enabled by this internal composition.

@@ -28,6 +28,7 @@ func TestRouterHolderRejectsHostileArguments(t *testing.T) {
 
 func assertRouterThreadsUnprivileged(t *testing.T, owner *RouterOwner) {
 	t.Helper()
+	assertRouterDNSOrigin(t, owner)
 	if owner.child.Validate(owner.job.Lease.JobId) != nil {
 		t.Fatal("router identity before capability observation")
 	}

@@ -6,12 +6,13 @@ precedes process creation; the child is born inside that scope. Its user/network
 mount namespaces are fresh, with a trusted two-entry non-root host mapping and
 empty supplementary groups. It executes only the retained measured runner.
 
-The closed helper accepts five identity arguments and four fixed descriptors:
-lifetime pipe, readiness pipe, retained runner and parent network namespace. It
+The closed helper accepts five identity arguments and five fixed descriptors:
+lifetime pipe, readiness pipe, retained runner, parent network namespace and a
+private DNS socket-transfer channel. It
 accepts no command, environment override, host path, job artifact or PID. It
-provisions no links, routes or DNS sockets. After checking its mapping and fresh
+provisions no links or routes. After checking its mapping and fresh
 network namespace, it configures [fixed private forwarding controls](router-owned-forwarding.md),
-then drops capabilities/bounding sets and enables no-new-
+creates and transfers [fixed DNS sockets](owned-router-dns.md), then drops capabilities/bounding sets and enables no-new-
 privileges on **every Go runtime thread**, not just the calling thread. This
 requires a non-cgo runner; unsupported all-thread operations refuse startup.
 Core/file writes and real-time priority are disabled, and open files are bounded.
