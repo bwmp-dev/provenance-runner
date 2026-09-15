@@ -652,6 +652,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := lease.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	if lease.ValidateChildObjects(workload, job, privateRoot) == nil {
+		t.Fatal("gated runner mistaken for running measured sandbox")
+	}
 	resources, err := np.RetainResources(specification, workload, jobScopeFD)
 	if err != nil {
 		t.Fatal("actual pre-launch cgroup enforcement", err)
@@ -799,6 +802,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if read(guestOutput)["phase"] != "flows-ready" {
 		t.Fatal("native persistent guest flows unavailable")
+	}
+	if err := lease.ValidateChildObjects(workload, job, privateRoot); err != nil {
+		t.Fatal("live sandbox objects do not match measured lease", err)
+	}
+	if lease.ValidateChildObjects(router, job, privateRoot) == nil || lease.ValidateChildObjects(nil, job, privateRoot) == nil || lease.ValidateChildObjects(workload, job, bundle+"/inputs") == nil {
+		t.Fatal("foreign runtime objects accepted")
 	}
 	if err := resources.ValidateForChild(specification, workload); err != nil {
 		t.Fatal("live runtime left original resource boundary", err)
