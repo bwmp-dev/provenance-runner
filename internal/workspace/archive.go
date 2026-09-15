@@ -30,6 +30,32 @@ func (w *Workspace) ExtractTarGzip(ctx context.Context, relativePath string, ent
 }
 
 func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath string, entry *artifact.Entry, maximumExpanded int64) (string, error) {
+	return w.extractTarGzipBounded(ctx, relativePath, maximumExpanded, func() (io.ReadCloser, error) {
+		if entry == nil {
+			return nil, errors.New("extract archive: cache entry is nil")
+		}
+		return entry.Open(ctx)
+	})
+}
+
+// ExtractTarGzipReaderBounded uses an already authenticated input stream without
+// copying it into a second artifact cache. It does not authenticate its bytes;
+// callers must bind and verify the input separately before execution. The caller
+// owns the reader, which is not closed. Extraction retains all existing bounds,
+// unpublished-tree ownership and link containment checks.
+func (w *Workspace) ExtractTarGzipReaderBounded(ctx context.Context, relativePath string, reader io.Reader, maximumExpanded int64) (string, error) {
+	return w.extractTarGzipBounded(ctx, relativePath, maximumExpanded, func() (io.ReadCloser, error) {
+		if reader == nil {
+			return nil, errors.New("extract archive: reader is nil")
+		}
+		return io.NopCloser(reader), nil
+	})
+}
+
+func (w *Workspace) extractTarGzipBounded(ctx context.Context, relativePath string, maximumExpanded int64, open func() (io.ReadCloser, error)) (string, error) {
+	if w == nil || ctx == nil {
+		return "", errors.New("extract archive: workspace and context required")
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -38,9 +64,6 @@ func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath stri
 	}
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("extract archive: %w", err)
-	}
-	if entry == nil {
-		return "", errors.New("extract archive: cache entry is nil")
 	}
 	if maximumExpanded <= 0 || maximumExpanded > MaximumExpandedBytes {
 		return "", fmt.Errorf("extract archive: expanded size limit must be between 1 and %d", MaximumExpandedBytes)
@@ -67,12 +90,12 @@ func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath stri
 	}
 	defer os.RemoveAll(temporary)
 
-	reader, err := entry.Open(ctx)
+	reader, err := open()
 	if err != nil {
 		return "", fmt.Errorf("extract archive: %w", err)
 	}
 	defer reader.Close()
-	gzipReader, err := gzip.NewReader(reader)
+	gzipReader, err := gzip.NewReader(&contextReader{ctx: ctx, reader: reader})
 	if err != nil {
 		return "", fmt.Errorf("extract archive: open gzip stream: %w", err)
 	}
@@ -83,6 +106,9 @@ func (w *Workspace) ExtractTarGzipBounded(ctx context.Context, relativePath stri
 	var entries int
 	var expanded int64
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		header, err := archive.Next()
 		if errors.Is(err, io.EOF) {
 			break

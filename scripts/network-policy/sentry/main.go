@@ -20,6 +20,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 2 && strings.HasPrefix(os.Args[1], "-Xms") {
+		paperPreparationFixture()
+		return
+	}
 	if len(os.Args) != 2 {
 		panic("fixture mode required")
 	}
@@ -200,6 +204,32 @@ func main() {
 	default:
 		panic("unknown fixture mode")
 	}
+}
+
+// Synthetic Java stand-in, executed only by the measured disposable fixture.
+// No Paper/plugin compatibility claim is made by this helper.
+func paperPreparationFixture() {
+	if os.Getuid() != 65532 || os.Getgid() != 65532 {
+		panic("non-root guest required")
+	}
+	for name, want := range map[string]string{"paper.jar": "synthetic paper", "plugins/target.jar": "synthetic target", "plugins/provenance-probe.jar": "synthetic probe", "cache/patched.jar": "synthetic prepared"} {
+		raw, err := os.ReadFile(name)
+		if err != nil || string(raw) != want {
+			panic("guest input role mismatch")
+		}
+	}
+	if _, err := os.Stat(os.Getenv("JAVA_HOME") + "/bin/java"); err != nil {
+		panic("guest Java layout")
+	}
+	if err := os.WriteFile("/inputs/target.jar", []byte("changed"), 0600); err == nil {
+		panic("writable input mount")
+	}
+	if err := os.WriteFile("/tmp/provenance-probe-events.ndjson", []byte("{\"syntheticPaperEvent\":true}\n"), 0600); err != nil {
+		panic("guest event channel")
+	}
+	fmt.Fprintln(os.Stdout, "synthetic Paper guest prepared")
+	fmt.Fprintln(os.Stderr, "synthetic Paper guest stderr")
+	time.Sleep(500 * time.Millisecond)
 }
 
 func probeOwnedDNS() {

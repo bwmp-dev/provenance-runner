@@ -207,9 +207,16 @@ func TestMeasuredNetworkSessionControllerResourceLoss(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "session-controller-resource-loss")
 }
 
+func TestMeasuredNetworkSessionPaperGuest(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-paper-guest")
+}
+func TestMeasuredNetworkSessionPaperGuestRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-paper-guest-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "session-controller-resource-loss" && authorityMode != "session-preparation-timeout" && authorityMode != "session-execution-timeout" && authorityMode != "session-dns-refresh-failure" && authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
+	if authorityMode != "session-paper-guest" && authorityMode != "session-paper-guest-refusal" && authorityMode != "session-controller-resource-loss" && authorityMode != "session-preparation-timeout" && authorityMode != "session-execution-timeout" && authorityMode != "session-dns-refresh-failure" && authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -268,6 +275,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if authorityMode == "session-execution-timeout" {
 		policy.ExecutionTimeout = durationpb.New(7 * time.Second)
+	}
+	if strings.HasPrefix(authorityMode, "session-paper-guest") {
+		policy.Resources.DiskBytes = 64 << 20
 	}
 	policyRaw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
 	if err != nil {
