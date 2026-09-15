@@ -28,6 +28,7 @@ type MeasuredNetworkLaunchConfig struct {
 	Job                   *p.JobSpecification
 	Measurement           *runtimeidentity.Lease
 	Scope                 *np.JobCgroup
+	Journal               *np.JobCgroupJournal
 	Authority             *np.AuthorityRoute
 	Mapping               np.MappedIdentity
 	PrivateRoot           string
@@ -42,6 +43,7 @@ type MeasuredNetworkProcess struct {
 	job                                 *p.JobSpecification
 	measurement                         *runtimeidentity.Lease
 	scope                               *np.JobCgroup
+	journal                             *np.JobCgroupJournal
 	authority                           *np.AuthorityRoute
 	child                               *np.ChildNamespaces
 	resources                           *np.RetainedResources
@@ -59,11 +61,11 @@ type MeasuredNetworkProcess struct {
 // receives kernel duplicates, never generic unbounded I/O copier goroutines.
 func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaunchConfig) (*MeasuredNetworkProcess, error) {
 	groups, err := os.Getgroups()
-	if ctx == nil || ctx.Err() != nil || os.Getuid() != 0 || os.Geteuid() != 0 || err != nil || len(groups) != 0 || config.Job == nil || config.Measurement == nil || config.Scope == nil || config.Authority == nil || config.Stdin == nil || config.Stdout == nil || config.Stderr == nil {
+	if ctx == nil || ctx.Err() != nil || os.Getuid() != 0 || os.Geteuid() != 0 || err != nil || len(groups) != 0 || config.Job == nil || config.Measurement == nil || config.Scope == nil || config.Journal == nil || config.Authority == nil || config.Stdin == nil || config.Stdout == nil || config.Stderr == nil {
 		return nil, ErrMeasuredNetworkLaunch
 	}
 	job := proto.Clone(config.Job).(*p.JobSpecification)
-	if config.Authority.CheckJob(job) != nil {
+	if config.Authority.CheckJob(job) != nil || config.Journal.CheckScope(config.Scope) != nil {
 		return nil, ErrMeasuredNetworkLaunch
 	}
 	m := config.Mapping
@@ -75,7 +77,7 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 	if err != nil {
 		return nil, ErrMeasuredNetworkLaunch
 	}
-	s := &MeasuredNetworkProcess{job: job, measurement: measurement, scope: config.Scope, authority: config.Authority, done: make(chan struct{})}
+	s := &MeasuredNetworkProcess{job: job, measurement: measurement, scope: config.Scope, journal: config.Journal, authority: config.Authority, done: make(chan struct{})}
 	fail := func(err error) (*MeasuredNetworkProcess, error) {
 		return s, errors.Join(ErrMeasuredNetworkLaunch, err, s.Close(context.Background()))
 	}
@@ -184,7 +186,7 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context) error {
 		}
 		return errors.Join(ErrMeasuredNetworkLaunch, s.authority.Withdraw())
 	}
-	if ctx == nil || ctx.Err() != nil || !s.started || s.stopping || s.closed || s.released || s.gate == nil || s.measurement.Validate() != nil || s.resources.Validate(s.job) != nil {
+	if ctx == nil || ctx.Err() != nil || !s.started || s.stopping || s.closed || s.released || s.gate == nil || s.journal.CheckScope(s.scope) != nil || s.measurement.Validate() != nil || s.resources.Validate(s.job) != nil {
 		return refuse()
 	}
 	if s.authority.ObserveInstalledForChild(ctx, s.job, s.child) != nil {
@@ -220,8 +222,10 @@ func (s *MeasuredNetworkProcess) Close(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := s.scope.Cleanup(ctx); err != nil {
-		return errors.Join(ErrMeasuredNetworkLaunch, err)
+	if s.scope != nil {
+		if err := s.journal.Cleanup(ctx, s.scope); err != nil {
+			return errors.Join(ErrMeasuredNetworkLaunch, err)
+		}
 	}
 	if s.started {
 		select {

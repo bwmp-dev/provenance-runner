@@ -28,6 +28,8 @@ type JobCgroup struct {
 	ceiling           resourceLimits
 	state             resourceState
 	stopping, removed bool
+	journalOwner      *JobCgroupJournal
+	journalRetired    bool
 }
 
 func cgroupControl(scope *os.File, name string, flags uint64) (*os.File, error) {

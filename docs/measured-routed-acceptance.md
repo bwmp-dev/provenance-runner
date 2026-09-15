@@ -50,7 +50,12 @@ authority withdrawal. The original packet-level withdrawal cases remain intact.
 Gated startup is also repeated three times with ten subcases each. Each child
 must be successfully retained and cleaned up without release or guest output.
 
-The CI driver requires all eighteen real test results, no skipped or failed cases and
+All scopes now use the cleanup-only durable journal. A seventh repeated case
+corrupts the owned record while the actual child waits behind the launch gate;
+execution must be refused and the failed attempt fully retired. The driver also
+requires the journal to contain no outstanding ownership records afterward.
+
+The CI driver requires all twenty-one real test results, no skipped or failed cases and
 the explicit successful loop-detach and exclusive-scope cleanup observations. Checker unit tests require
 missing cases or cleanup evidence to fail. Evidence includes the exact source,
 fixture image, builder hash, root image hash, test binary hash and captured test

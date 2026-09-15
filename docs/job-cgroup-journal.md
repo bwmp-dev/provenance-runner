@@ -35,6 +35,11 @@ identities, not successful job results or released capacity. Routes, mounts,
 workspace storage, artifacts and reservation accounting still need their own
 recovery and completion evidence. No historical authority is resumed.
 
+The measured process owner requires the matching live journal and checks both
+records against their original in-memory identity before launch. Cleanup of an
+exact already-retired object is idempotent; foreign object handles remain
+invalid. Successful process-owner cleanup includes durable record retirement.
+
 Disposable acceptance uses a real persistent local filesystem and exits a helper
 with `os.Exit` to bypass all normal cleanup, leaving either an empty intended
 scope or a live non-root descendant. A fresh controller recovers both. Tests also

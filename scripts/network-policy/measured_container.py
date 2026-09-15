@@ -27,6 +27,9 @@ def main():
     (cgroup/'cgroup.subtree_control').write_text('+cpu +memory +pids')
     jobs.mkdir(mode=0o700)
     (jobs/'cgroup.subtree_control').write_text('+cpu +memory +pids')
+    state = Path('/state-input/journal')
+    assert not state.exists()
+    state.mkdir(mode=0o700)
     assert len(sys.argv) == 3
     root = Path('/tmp/provenance-runtime-fixture')
     assert not root.exists()
@@ -65,7 +68,7 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^TestMeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup)$',
+                                 '-test.run=^TestMeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal)$',
                                  '-test.count=3', '-test.timeout=200s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
@@ -76,10 +79,14 @@ def main():
         if result.returncode:
             raise RuntimeError('measured routed fixture failed: '+result.stderr[-4096:])
         assert '--- SKIP:' not in result.stdout
-        for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup'):
+        for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal'):
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
         assert not [p for p in jobs.iterdir() if p.is_dir()]
         jobs.rmdir()
+        assert [p.name for p in state.iterdir()] == ['.lock']
+        (state/'.lock').unlink()
+        state.rmdir()
+        print('{"measuredJobJournalRetired": true}')
         print('{"exclusiveMeasuredJobScopesRemoved": true}')
     finally:
         if mounted:
