@@ -66,8 +66,8 @@ def main():
     assert args.image and re.fullmatch(r'sha256:[0-9a-f]{64}', args.image)
     repo = Path(__file__).resolve().parents[2]
     # A real persistent local filesystem is required by the journal; do not
-    # inherit a RAM-only TMPDIR used for Go's disposable compilation cache.
-    with tempfile.TemporaryDirectory(prefix='provenance-job-cgroup-', dir='/tmp', ignore_cleanup_errors=True) as directory:
+    # inherit RAM-only TMPDIR or /tmp (tmpfs on current Ubuntu CI hosts).
+    with tempfile.TemporaryDirectory(prefix='provenance-job-cgroup-', dir='/var/tmp', ignore_cleanup_errors=True) as directory:
         binary = Path(directory)/'cgroup.test'
         subprocess.run([args.go, 'test', '-c', '-o', str(binary), './internal/networkpolicy'],
                        cwd=repo, env=os.environ | {'CGO_ENABLED': '0'}, check=True, timeout=180)
