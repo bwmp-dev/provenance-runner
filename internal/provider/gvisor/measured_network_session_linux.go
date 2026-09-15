@@ -22,12 +22,13 @@ var errMeasuredSession = errors.New("measured_network_session_unavailable")
 // The bundle must already be prepared and the authority freshly reconciled.
 // Journals, measurement, tools and standard files remain borrowed.
 type measuredSessionConfig struct {
-	Launch        MeasuredNetworkLaunchConfig
-	RouterMapping np.MappedIdentity
-	Uplinks       *np.HostUplinkJournal
-	Tools         np.RouteTools
-	Boundary      *measuredLocalBoundary
-	Resolver      np.Exchange
+	Launch              MeasuredNetworkLaunchConfig
+	RouterMapping       np.MappedIdentity
+	Uplinks             *np.HostUplinkJournal
+	Tools               np.RouteTools
+	Boundary            *measuredLocalBoundary
+	ControllerResources *np.ControllerResources
+	Resolver            np.Exchange
 }
 
 // measuredNetworkSession coordinates the complete per-job network lifetime.
@@ -106,7 +107,7 @@ func startMeasuredSessionWithBudget(ctx context.Context, c measuredSessionConfig
 	if err != nil {
 		return fail(err)
 	}
-	s.router, err = StartRouterOwner(ctx, l.Job, l.Journal, l.Measurement, c.RouterMapping)
+	s.router, err = startRouterOwnerWithResources(ctx, l.Job, l.Journal, l.Measurement, c.RouterMapping, c.ControllerResources)
 	if err != nil {
 		return fail(err)
 	}

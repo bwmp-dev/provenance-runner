@@ -119,7 +119,7 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	var controller *measuredController
 	var controlled *measuredControllerJob
 	var controllerInput measuredInput
-	if mode == "session-normal" {
+	if mode == "session-normal" || mode == "session-controller-resource-loss" {
 		controller, controllerInput = measuredControllerSessionFixture(t, ctx, c)
 	}
 	retainCleanup := func() {
@@ -181,7 +181,18 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			}
 		}
 	} else {
-		session, err = startMeasuredSession(ctx, c)
+		if controller != nil {
+			controlled, err = controller.start(ctx, c.Launch.Job, measuredGuestCommand{Command: "/smoke", Arguments: []string{"probe-confined-dns-lifecycle"}}, []measuredInput{controllerInput}, c.Launch.Authority, in, out, stderr)
+			if controlled != nil {
+				session = controlled.session
+				c.Launch.Bundle = controlled.bundle
+				if controlled.bundle != nil {
+					c.Launch.Scope = controlled.bundle.scope
+				}
+			}
+		} else {
+			session, err = startMeasuredSession(ctx, c)
+		}
 		retainCleanup()
 	}
 	in.Close()
@@ -202,6 +213,9 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		t.Run("controller-busy-refusal", func(t *testing.T) {
 			if second, err := controller.start(ctx, c.Launch.Job, measuredGuestCommand{Command: "/smoke"}, []measuredInput{controllerInput}, c.Launch.Authority, in, out, stderr); second != nil || err == nil {
 				t.Fatal("busy controller admitted another job")
+			}
+			if controller.resources.Close() == nil || controller.resources.Validate() != nil {
+				t.Fatal("active aggregate handle released")
 			}
 		})
 	}
@@ -262,7 +276,7 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		t.Fatal("session release")
 	}
 	const cleanupRefusal = "/state-input/uplink-journal/controller-cleanup-refusal"
-	if controlled != nil {
+	if controlled != nil && mode == "session-normal" {
 		foreign, err := os.OpenFile(cleanupRefusal, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			t.Fatal("controller cleanup refusal fixture")
@@ -296,11 +310,15 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			t.Fatal("owned DNS check failed")
 		}
 	}
-	if mode == "session-router-loss" || mode == "session-dns-loss" || mode == "session-dns-refresh-failure" || mode == "session-execution-timeout" {
+	if mode == "session-router-loss" || mode == "session-dns-loss" || mode == "session-dns-refresh-failure" || mode == "session-execution-timeout" || mode == "session-controller-resource-loss" {
 		if read(reader)["phase"] != "flows-ready" {
 			t.Fatal("session flows unavailable")
 		}
-		if observation, err := session.ObserveRuntime(ctx); observation == nil || err != nil {
+		observe := session.ObserveRuntime
+		if controlled != nil {
+			observe = controlled.ObserveRuntime
+		}
+		if observation, err := observe(ctx); observation == nil || err != nil {
 			t.Fatal("session runtime observation", err)
 		}
 		if mode == "session-router-loss" && session.router.Close(ctx) != nil {
@@ -312,12 +330,34 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		if mode == "session-dns-refresh-failure" {
 			resolver.fail.Store(true)
 		}
-		waitErr := session.Wait(ctx)
+		if mode == "session-controller-resource-loss" {
+			limit := strconv.FormatUint(2*c.Boundary.maximum.Resources.MemoryBytes, 10)
+			if os.WriteFile(controllerResourceFixturePath+"memory.max", []byte(strconv.FormatUint(2*c.Boundary.maximum.Resources.MemoryBytes+4096, 10)), 0600) != nil {
+				t.Fatal("aggregate drift fixture")
+			}
+			t.Cleanup(func() { os.WriteFile(controllerResourceFixturePath+"memory.max", []byte(limit), 0600) })
+		}
+		wait := session.Wait
+		if controlled != nil {
+			wait = controlled.Wait
+		}
+		waitErr := wait(ctx)
 		if waitErr == nil || ctx.Err() != nil {
 			t.Fatal("router loss not propagated")
 		}
 		if mode == "session-execution-timeout" && !errors.Is(waitErr, context.DeadlineExceeded) {
 			t.Fatal("execution timeout cause lost")
+		}
+		if mode == "session-controller-resource-loss" {
+			if !errors.Is(waitErr, np.ErrResources) {
+				t.Fatal("aggregate loss cause missing", waitErr)
+			}
+			if os.WriteFile(controllerResourceFixturePath+"memory.max", []byte(strconv.FormatUint(2*c.Boundary.maximum.Resources.MemoryBytes, 10)), 0600) != nil {
+				t.Fatal("restore aggregate fixture")
+			}
+			if controller.resources.Validate() == nil {
+				t.Fatal("restored aggregate drift resumed")
+			}
 		}
 	} else {
 		wait := session.Wait

@@ -203,10 +203,13 @@ func TestMeasuredNetworkSessionPreparationTimeout(t *testing.T) {
 func TestMeasuredNetworkSessionExecutionTimeout(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "session-execution-timeout")
 }
+func TestMeasuredNetworkSessionControllerResourceLoss(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-controller-resource-loss")
+}
 
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "session-preparation-timeout" && authorityMode != "session-execution-timeout" && authorityMode != "session-dns-refresh-failure" && authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
+	if authorityMode != "session-controller-resource-loss" && authorityMode != "session-preparation-timeout" && authorityMode != "session-execution-timeout" && authorityMode != "session-dns-refresh-failure" && authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {

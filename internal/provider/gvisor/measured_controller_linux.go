@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
@@ -33,6 +34,9 @@ type measuredController struct {
 	mu                      sync.Mutex
 	config                  measuredControllerConfig
 	measurement             *runtimeidentity.Lease
+	resources               *np.ControllerResources
+	stopWatch               context.CancelFunc
+	watchDone               chan struct{}
 	active                  *measuredControllerJob
 	ready, stopping, closed bool
 }
@@ -86,10 +90,21 @@ func newMeasuredController(ctx context.Context, config measuredControllerConfig)
 	}
 	j.controller = c
 	j.mu.Unlock()
+	c.resources, err = np.RetainControllerResources(j.cgroups, config.Boundary.maximum.Resources)
+	if err != nil {
+		return c, err
+	}
 	if err := c.recover(ctx); err != nil {
 		return c, err
 	}
+	if c.resources.Validate() != nil {
+		return c, np.ErrResources
+	}
 	c.ready = true
+	watch, stop := context.WithCancel(context.Background())
+	c.stopWatch = stop
+	c.watchDone = make(chan struct{})
+	go c.watchResources(watch)
 	return c, nil
 }
 
@@ -111,7 +126,7 @@ func (c *measuredController) start(ctx context.Context, job *p.JobSpecification,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	boundary := c.config.Boundary
-	if c.closed || c.stopping || !c.ready || c.active != nil || boundary == nil || boundary.check(job, boundary.workload, boundary.router) != nil || authority.CheckJob(job) != nil || c.measurement.Validate() != nil || !controllerRootMatches(c.config.BundleRoot, c.config.Bundles) {
+	if c.closed || c.stopping || !c.ready || c.active != nil || boundary == nil || !c.resourcesReady() || boundary.check(job, boundary.workload, boundary.router) != nil || authority.CheckJob(job) != nil || c.measurement.Validate() != nil || !controllerRootMatches(c.config.BundleRoot, c.config.Bundles) {
 		return nil, errMeasuredSession
 	}
 	budget, err := newMeasuredSessionBudget(ctx, job.EffectivePolicy.PreparationTimeout.AsDuration(), job.EffectivePolicy.ExecutionTimeout.AsDuration())
@@ -136,7 +151,7 @@ func (c *measuredController) start(ctx context.Context, job *p.JobSpecification,
 		return fail(err)
 	}
 	launch := MeasuredNetworkLaunchConfig{Job: job, Measurement: c.measurement, Scope: owned.bundle.scope, Journal: c.config.Bundles.cgroups, Bundle: owned.bundle, Authority: authority, Mapping: boundary.workload, PrivateRoot: root, Stdin: stdin, Stdout: stdout, Stderr: stderr}
-	owned.session, err = startMeasuredSessionWithBudget(budget.ctx, measuredSessionConfig{Launch: launch, RouterMapping: boundary.router, Uplinks: c.config.Uplinks, Tools: c.config.Tools, Boundary: boundary, Resolver: c.config.Resolver}, budget)
+	owned.session, err = startMeasuredSessionWithBudget(budget.ctx, measuredSessionConfig{Launch: launch, RouterMapping: boundary.router, Uplinks: c.config.Uplinks, Tools: c.config.Tools, Boundary: boundary, Resolver: c.config.Resolver, ControllerResources: c.resources}, budget)
 	if err != nil {
 		return fail(err)
 	}
@@ -184,6 +199,7 @@ func (c *measuredController) retire(ctx context.Context, owned *measuredControll
 	if c.recover(ctx) != nil {
 		return errMeasuredSession
 	}
+	_ = c.resourcesReady()
 	owned.retired = true
 	c.active = nil
 	close(owned.done)
@@ -197,7 +213,7 @@ func (j *measuredControllerJob) Release(ctx context.Context) error {
 	c := j.controller
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if j.retired || c.active != j || c.stopping || j.session == nil {
+	if j.retired || c.active != j || c.stopping || j.session == nil || !c.resourcesReady() {
 		return errMeasuredSession
 	}
 	return j.session.Release(ctx)
@@ -240,19 +256,39 @@ func (c *measuredController) Close(ctx context.Context) error {
 		return errMeasuredSession
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.stopping = true
 	c.ready = false
+	if c.stopWatch != nil {
+		c.stopWatch()
+	}
+	done := c.watchDone
+	c.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
 	if c.active != nil {
 		c.active.recordCloseOutcome()
 		if err := c.retire(ctx, c.active); err != nil {
 			return err
 		}
 	}
-	if c.recover(ctx) != nil || c.measurement.Close() != nil {
+	if c.recover(ctx) != nil {
+		return errMeasuredSession
+	}
+	if err := errors.Join(c.resources.Close(), c.measurement.Close()); err != nil {
 		return errMeasuredSession
 	}
 	j := c.config.Bundles
@@ -264,6 +300,58 @@ func (c *measuredController) Close(ctx context.Context) error {
 	j.controller = nil
 	c.closed = true
 	return nil
+}
+
+// resourcesReady runs with the controller mutex held. Drift permanently stops
+// admission and cancels the active session; restoring values cannot resume it.
+func (c *measuredController) resourcesReady() bool {
+	if c.resources.Validate() == nil {
+		return true
+	}
+	c.ready = false
+	c.stopping = true
+	if c.active != nil {
+		c.active.budget.cancel(np.ErrResources)
+	}
+	return false
+}
+
+func (c *measuredController) watchResources(ctx context.Context) {
+	defer close(c.watchDone)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if c.resources.Validate() != nil {
+				c.mu.Lock()
+				if !c.closed {
+					_ = c.resourcesReady()
+				}
+				c.mu.Unlock()
+				return
+			}
+		}
+	}
+}
+
+func (j *measuredControllerJob) ObserveRuntime(ctx context.Context) (*runtimeidentity.NetworkObservation, error) {
+	if j == nil || j.controller == nil {
+		return nil, errMeasuredSession
+	}
+	c := j.controller
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if j.retired || c.active != j || c.stopping || j.session == nil || !c.resourcesReady() {
+		return nil, errMeasuredSession
+	}
+	observation, err := j.session.ObserveRuntime(ctx)
+	if err != nil || !c.resourcesReady() {
+		return nil, errors.Join(err, np.ErrResources)
+	}
+	return observation, nil
 }
 
 // Called with the controller mutex held. Cleanup retries do not turn an

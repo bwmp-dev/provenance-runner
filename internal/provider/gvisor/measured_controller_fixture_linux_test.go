@@ -27,6 +27,7 @@ func measuredControllerSessionFixture(t *testing.T, ctx context.Context, c measu
 	if config.Bundles.cleanup(ctx, c.Launch.Bundle) != nil {
 		t.Fatal("seed bundle retirement")
 	}
+	measuredControllerResourcesFixture(t, config.Boundary.maximum.Resources)
 	controller, err := newMeasuredController(ctx, config)
 	if controller != nil {
 		t.Cleanup(func() {
@@ -47,6 +48,12 @@ func measuredControllerSessionFixture(t *testing.T, ctx context.Context, c measu
 		}
 		if config.Bundles.recover(ctx) == nil || config.Bundles.close() == nil {
 			t.Fatal("controller journal claim bypassed")
+		}
+		if scope, err := config.Bundles.cgroups.Create(c.Launch.Job); scope != nil || err == nil {
+			t.Fatal("controller cgroup claim bypassed")
+		}
+		if config.Bundles.cgroups.Close() == nil {
+			t.Fatal("controller parent handle released early")
 		}
 	})
 	input, _ := measuredFixtureInput(t, ctx)

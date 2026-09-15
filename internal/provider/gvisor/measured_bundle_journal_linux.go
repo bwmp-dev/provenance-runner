@@ -263,7 +263,11 @@ func (j *measuredBundleJournal) createForController(job *p.JobSpecification, con
 	}
 	b := &measuredBundle{owner: j, record: r, directory: dir}
 	j.active[r.Job] = b
-	b.scope, err = j.cgroups.Create(job)
+	if controller != nil {
+		b.scope, err = j.cgroups.CreateForController(job, controller.resources)
+	} else {
+		b.scope, err = j.cgroups.Create(job)
+	}
 	if err != nil {
 		return b, errMeasuredBundle
 	}
