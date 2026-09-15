@@ -52,6 +52,7 @@ type MeasuredNetworkProcess struct {
 	child                               *np.ChildNamespaces
 	resources                           *np.RetainedResources
 	link                                *np.PrivateJobLink
+	uplink                              *np.HostUplink
 	gate                                *os.File
 	cmd                                 *exec.Cmd
 	done                                chan struct{}
@@ -178,7 +179,7 @@ func (s *MeasuredNetworkProcess) Child() *np.ChildNamespaces {
 
 // Release validates actual measurement, resource membership and the exact
 // child's authorized kernel route immediately before opening the launch gate.
-func (s *MeasuredNetworkProcess) Release(ctx context.Context, link *np.PrivateJobLink) error {
+func (s *MeasuredNetworkProcess) Release(ctx context.Context, link *np.PrivateJobLink, uplink *np.HostUplink) error {
 	if s == nil {
 		return ErrMeasuredNetworkLaunch
 	}
@@ -194,7 +195,7 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context, link *np.PrivateJo
 	if ctx == nil || ctx.Err() != nil || !s.started || s.stopping || s.closed || s.released || s.gate == nil || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil || !s.bundle.matchesPrivateRoot(s.privateRoot) || s.bundle.checkPrepared(s.mapping) != nil || s.measurement.Validate() != nil || s.resources.ValidateForChild(s.job, s.child) != nil {
 		return refuse()
 	}
-	if link.ValidatePrepared(ctx) != nil || s.authority.ObserveInstalledForLink(ctx, s.job, s.child, link) != nil || link.ValidatePrepared(ctx) != nil {
+	if link.ValidatePrepared(ctx) != nil || s.authority.ObserveInstalledForUplink(ctx, s.job, s.child, link, uplink) != nil || link.ValidatePrepared(ctx) != nil {
 		return refuse()
 	}
 	if n, err := s.gate.Write([]byte("s")); err != nil || n != 1 {
@@ -205,6 +206,7 @@ func (s *MeasuredNetworkProcess) Release(ctx context.Context, link *np.PrivateJo
 	}
 	s.released = true
 	s.link = link
+	s.uplink = uplink
 	return nil
 }
 
@@ -224,7 +226,7 @@ func (s *MeasuredNetworkProcess) ObserveRuntime(ctx context.Context) (*runtimeid
 	if ctx == nil || ctx.Err() != nil || !s.started || !s.released || s.stopping || s.closed || s.journal.CheckScope(s.scope) != nil || s.bundle == nil || s.bundle.owner.check(s.bundle, s.job) != nil {
 		return refuse()
 	}
-	observation, err := s.measurement.ObserveNetwork(ctx, s.job, s.child, s.privateRoot, s.resources, s.authority, s.link)
+	observation, err := s.measurement.ObserveNetwork(ctx, s.job, s.child, s.privateRoot, s.resources, s.authority, s.link, s.uplink)
 	if err != nil {
 		return refuse()
 	}
