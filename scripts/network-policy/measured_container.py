@@ -16,6 +16,17 @@ def run(*args):
 def main():
     assert os.getuid() == 0 and Path('/.dockerenv').is_file()
     assert sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo']
+    assert Path('/proc/self/cgroup').read_text() == '0::/\n'
+    cgroup = Path('/sys/fs/cgroup')
+    controller = cgroup/'provenance-fixture-controller'
+    jobs = cgroup/'provenance-fixture-jobs'
+    assert not controller.exists() and not jobs.exists()
+    controller.mkdir(mode=0o700)
+    (controller/'cgroup.procs').write_text(str(os.getpid()))
+    assert (cgroup/'cgroup.procs').read_text() == ''
+    (cgroup/'cgroup.subtree_control').write_text('+cpu +memory +pids')
+    jobs.mkdir(mode=0o700)
+    (jobs/'cgroup.subtree_control').write_text('+cpu +memory +pids')
     assert len(sys.argv) == 3
     root = Path('/tmp/provenance-runtime-fixture')
     assert not root.exists()
@@ -67,6 +78,9 @@ def main():
         assert '--- SKIP:' not in result.stdout
         for case in ('Withdrawal', 'Expiry', 'ChildMismatch'):
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
+        assert not [p for p in jobs.iterdir() if p.is_dir()]
+        jobs.rmdir()
+        print('{"exclusiveMeasuredJobScopesRemoved": true}')
     finally:
         if mounted:
             run('umount', str(root/'mount'))

@@ -165,6 +165,46 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	defer cancel()
 	const job = "10000000-0000-4000-8000-000000000001"
 	const fixtureRoot = "/tmp/provenance-runtime-fixture"
+	policy := &runnerv1.EffectivePolicy{Sandbox: runnerv1.SandboxKind_SANDBOX_KIND_GVISOR, Requirement: runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_REQUIRED,
+		Resources: &runnerv1.ResourceLimits{CpuMillis: 2000, MemoryBytes: 1 << 30, DiskBytes: 4 << 30, ProcessCount: 256}, PreparationTimeout: durationpb.New(time.Minute), ExecutionTimeout: durationpb.New(time.Minute), GracefulShutdownTimeout: durationpb.New(10 * time.Second),
+		NetworkV2: &runnerv1.NetworkPolicyV2{Mode: runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST, MaximumConnections: 16, MaximumBytesPerSecond: 65536, Permissions: []*runnerv1.NetworkPermissionV2{{Hostname: "fixture.example.com", Port: 8080, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_TCP}, {Hostname: "fixture.example.com", Port: 8081, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_UDP}}}}
+	policyRaw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(policyRaw)
+	credentialExpiry := time.Now().Add(2 * time.Minute)
+	specification := &runnerv1.JobSpecification{
+		Lease:           &runnerv1.LeaseIdentity{JobId: job, LeaseId: "20000000-0000-4000-8000-000000000001", ExecutionId: "30000000-0000-4000-8000-000000000001", ExpiresAt: timestamppb.New(credentialExpiry)},
+		Attempt:         &runnerv1.AttemptIdentity{AttemptId: "40000000-0000-4000-8000-000000000001", ReleaseCandidateId: "50000000-0000-4000-8000-000000000001", MatrixEntryId: "60000000-0000-4000-8000-000000000001", AttemptNumber: 1},
+		EffectivePolicy: policy, Hashes: &runnerv1.JobHashes{Policy: &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest[:]}},
+	}
+	parent, err := os.Open("/sys/fs/cgroup/provenance-fixture-jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobScope, err := np.CreateJobCgroup(specification, parent)
+	parent.Close()
+	cleanupScope := func() bool {
+		if jobScope != nil {
+			stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := jobScope.Cleanup(stop); err != nil {
+				t.Error("exclusive Sentry scope cleanup", err)
+				return false
+			}
+		}
+		return true
+	}
+	t.Cleanup(func() { cleanupScope() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobScopeFD, err := jobScope.LaunchFD(specification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { jobScopeFD.Close() })
 	lease, err := runtimeidentity.Acquire(ctx, fixtureRoot+"/runsc", fixtureRoot+"/mount", fixtureRoot+"/image.squashfs")
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +227,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	bundle := fixtureRoot + "/work/" + job
 	privateRoot := bundle + "/.measured-root"
 	var release *os.File
-	cgroup, err := os.OpenFile("/sys/fs/cgroup", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	cgroup, err := os.OpenFile("/sys/fs/cgroup/provenance-fixture-controller", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,6 +315,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(uid), Size: 1}, {ContainerID: 65534, HostID: int(uid + 1), Size: 1}},
 			GidMappingsEnableSetgroups: false, Credential: &syscall.Credential{Uid: 0, Gid: 0, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL,
 			UseCgroupFD: true, CgroupFD: int(cgroup.Fd())}
+		if sentry {
+			cmd.SysProcAttr.CgroupFD = int(jobScopeFD.Fd())
+		}
 		if err := cmd.Start(); err != nil {
 			t.Fatal("native fixture child unavailable", err)
 		}
@@ -396,6 +439,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Fatal("fresh Sentry fixture directory unavailable")
 	}
 	t.Cleanup(func() {
+		if !cleanupScope() {
+			return
+		}
 		_ = guest.Process.Kill()
 		_ = guest.Wait()
 		_ = filepath.WalkDir(bundle, func(path string, entry os.DirEntry, err error) error {
@@ -430,14 +476,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := os.Chown(bundle, 65532, 65532); err != nil {
 		t.Fatal(err)
 	}
-	policy := &runnerv1.EffectivePolicy{Sandbox: runnerv1.SandboxKind_SANDBOX_KIND_GVISOR, Requirement: runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_REQUIRED,
-		Resources: &runnerv1.ResourceLimits{CpuMillis: 2000, MemoryBytes: 2 << 30, DiskBytes: 4 << 30, ProcessCount: 256}, PreparationTimeout: durationpb.New(time.Minute), ExecutionTimeout: durationpb.New(time.Minute), GracefulShutdownTimeout: durationpb.New(10 * time.Second),
-		NetworkV2: &runnerv1.NetworkPolicyV2{Mode: runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST, MaximumConnections: 16, MaximumBytesPerSecond: 65536, Permissions: []*runnerv1.NetworkPermissionV2{{Hostname: "fixture.example.com", Port: 8080, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_TCP}, {Hostname: "fixture.example.com", Port: 8081, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_UDP}}}}
-	raw, err = (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binder, err := np.NewV2Binder(job, raw, sha256.Sum256(raw), np.LocalV2Boundary{Maximum: proto.Clone(policy.NetworkV2).(*runnerv1.NetworkPolicyV2), SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: time.Minute}, measuredResolver{})
+	binder, err := np.NewV2Binder(job, policyRaw, sha256.Sum256(policyRaw), np.LocalV2Boundary{Maximum: proto.Clone(policy.NetworkV2).(*runnerv1.NetworkPolicyV2), SensitiveNetworks: []netip.Prefix{netip.MustParsePrefix("93.184.216.0/24")}, MaximumTTL: time.Minute}, measuredResolver{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,17 +491,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Cleanup(func() { route.Close() })
 	var guard *np.AuthorityRoute
 	var receipt *runnerv1.LeaseReconciliation
-	var specification *runnerv1.JobSpecification
 	features := []runnerv1.ProtocolFeature{1, 3, 9, 10}
-	credentialExpiry := time.Now().Add(2 * time.Minute)
 	{
 		now := time.Now()
-		digest := sha256.Sum256(raw)
-		specification = &runnerv1.JobSpecification{
-			Lease:           &runnerv1.LeaseIdentity{JobId: job, LeaseId: "20000000-0000-4000-8000-000000000001", ExecutionId: "30000000-0000-4000-8000-000000000001", ExpiresAt: timestamppb.New(credentialExpiry)},
-			Attempt:         &runnerv1.AttemptIdentity{AttemptId: "40000000-0000-4000-8000-000000000001", ReleaseCandidateId: "50000000-0000-4000-8000-000000000001", MatrixEntryId: "60000000-0000-4000-8000-000000000001", AttemptNumber: 1},
-			EffectivePolicy: policy, Hashes: &runnerv1.JobHashes{Policy: &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest[:]}},
-		}
 		guard, err = np.NewAuthorityRoute(ctx, specification)
 		if err != nil {
 			t.Fatal(err)
@@ -491,7 +522,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := lease.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	resources, err := np.RetainResources(specification, workload, cgroup)
+	resources, err := np.RetainResources(specification, workload, jobScopeFD)
 	if err != nil {
 		t.Fatal("actual pre-launch cgroup enforcement", err)
 	}
@@ -516,12 +547,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			t.Fatal(err)
 		}
 		lower.Hashes.Policy.Value = digest[:]
-		if unexpected, err := np.RetainResources(lower, workload, cgroup); err == nil {
+		if unexpected, err := np.RetainResources(lower, workload, jobScopeFD); err == nil {
 			unexpected.Close()
 			t.Fatal("kernel resource limit above original policy accepted", kind)
 		}
 	}
-	probe, err := np.RetainResources(specification, workload, cgroup)
+	probe, err := np.RetainResources(specification, workload, jobScopeFD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,6 +695,15 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 				t.Fatal("native owned table remains")
 			}
 		}
+	}
+	if !cleanupScope() {
+		t.Fatal("exclusive cleanup incomplete")
+	}
+	if fresh, err := jobScope.LaunchFD(specification); fresh != nil || err == nil {
+		t.Fatal("cleaned Sentry scope resumed")
+	}
+	if server.Process.Signal(syscall.Signal(0)) != nil {
+		t.Fatal("Sentry cleanup killed external endpoint")
 	}
 }
 
