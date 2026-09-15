@@ -215,6 +215,9 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	}
 	if controlled != nil {
 		t.Run("controller-busy-refusal", func(t *testing.T) {
+			if controller.CheckIdle() == nil {
+				t.Fatal("active controller advertised idle capacity")
+			}
 			if second, err := controller.start(ctx, c.Launch.Job, measuredGuestCommand{Command: "/smoke"}, []measuredInput{controllerInput}, c.Launch.Authority, in, out, stderr); second != nil || err == nil {
 				t.Fatal("busy controller admitted another job")
 			}

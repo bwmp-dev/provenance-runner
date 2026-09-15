@@ -120,7 +120,7 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 	defer stopSocket()
 	stopServiceSocket := context.AfterFunc(s.ctx, func() { channel.Close() })
 	defer stopServiceSocket()
-	request, err := cc.ReceiveStart(channel, time.Now().Add(10*time.Second))
+	request, err := cc.ReceiveServiceRequest(channel, time.Now().Add(10*time.Second))
 	if err != nil {
 		return ErrService
 	}
@@ -129,6 +129,14 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 			_ = file.Close()
 		}
 	}()
+	if len(request.IdleNonce) != 0 {
+		// Serve holds admission throughout this probe. A previous Serve must
+		// finish its deferred controller cleanup before this lock is available.
+		if s.controller.CheckIdle() != nil || s.measurement.ValidatePaperGuestTarget() != nil {
+			return ErrService
+		}
+		return channel.Send(cc.Packet{Kind: cc.IdleConfirmed, Sequence: 1, Payload: request.IdleNonce}, time.Now().Add(5*time.Second))
+	}
 	send := &sender{channel: channel}
 	stopKeep, keepDone := keepalive(jobCtx, send, cancel)
 	defer func() { stopKeep(); <-keepDone }()

@@ -19,6 +19,9 @@ type StartRequest struct {
 	Payload      []byte
 	Files        []*os.File
 	LastSequence uint64
+	// IdleNonce is set only by ReceiveServiceRequest for a standalone probe.
+	// It never accompanies execution payloads or input files.
+	IdleNonce []byte
 }
 
 // SendStart sends the first request on a fresh authenticated channel. One shared
@@ -69,6 +72,17 @@ func SendStart(channel *Channel, payload []byte, files []*os.File, deadline time
 // interleaved control messages or per-chunk deadline extension. The channel is
 // permanently closed on any malformed or incomplete request.
 func ReceiveStart(channel *Channel, deadline time.Time) (accepted *StartRequest, result error) {
+	return receiveStart(channel, deadline, false)
+}
+
+// ReceiveServiceRequest additionally accepts a standalone bounded idle probe.
+// It provides no job authorization and cannot be followed by a Start request on
+// this channel. The root service must check its actual controller before reply.
+func ReceiveServiceRequest(channel *Channel, deadline time.Time) (*StartRequest, error) {
+	return receiveStart(channel, deadline, true)
+}
+
+func receiveStart(channel *Channel, deadline time.Time, allowIdle bool) (accepted *StartRequest, result error) {
 	if channel == nil {
 		return nil, ErrChannel
 	}
@@ -92,12 +106,19 @@ func ReceiveStart(channel *Channel, deadline time.Time) (accepted *StartRequest,
 			return Packet{}, err
 		}
 		r.LastSequence++
-		if packet.Kind != Start || packet.Sequence != r.LastSequence {
+		if (packet.Kind != Start && !(allowIdle && r.LastSequence == 1 && packet.Kind == IdleCheck)) || packet.Sequence != r.LastSequence {
 			return Packet{}, ErrChannel
 		}
 		return packet, nil
 	}
 	header, err := receive()
+	if err == nil && header.Kind == IdleCheck {
+		if len(header.Payload) != 32 || len(header.Files) != 0 {
+			return nil, ErrChannel
+		}
+		r.IdleNonce = append([]byte(nil), header.Payload...)
+		return r, nil
+	}
 	if err != nil || len(header.Payload) != 12 || len(header.Files) != 0 {
 		return nil, errors.Join(ErrChannel, err)
 	}
