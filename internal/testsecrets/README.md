@@ -59,6 +59,18 @@ crash dumps, or forensic recovery. Only use the opt-in for a controlled acceptan
 runner until the complete lifecycle and staged deployment gates have passed.
 # Delivery validation (toolkit alpha.23)
 
+For the measured worker/root boundary, `ReadOnlyDescriptors` creates fresh
+read-only, close-on-exec descriptions of the retained sealed anonymous inodes.
+It validates the entire set's names and aggregate size and closes every partial
+view on failure. `ReadSealedDescriptor` rechecks the received inode, exact seals,
+read-only flags, memory filesystem, size and UTF-8 before returning caller-owned
+bytes. These helpers do not authenticate a peer or bind a delivery to a lease;
+the receiving composition must perform those checks and clear returned bytes.
+Neither helper changes production capability advertisement or provides root-side
+tmpfs ownership, late delivery, expiry handling or crash recovery by itself.
+Transferred descriptions have independent lifetimes: every recipient must close
+its references after consumer retirement, even if the original owner is closed.
+
 `TakeDelivery` requires the complete selected reference set, exact request,
 lease and attempt, bounded current expiry, UTF-8 values and the 64-KiB aggregate
 limit. Unknown protobuf fields are refused. Success transfers owned buffers out
