@@ -7,10 +7,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -113,6 +116,11 @@ func validRouteTool(tool ProtectedRouteTool) bool {
 	if unix.Fstat(int(tool.File.Fd()), &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != 0 || stat.Mode&06022 != 0 || stat.Mode&0111 == 0 || stat.Size < 4 || stat.Size > 512<<20 {
 		return false
 	}
+	// Privileged exec can clear the parent-death signal. Set-ID bits are
+	// rejected above; a file-capability xattr is also forbidden.
+	if _, err := unix.Fgetxattr(int(tool.File.Fd()), "security.capability", nil); !errors.Is(err, unix.ENODATA) && !errors.Is(err, unix.EOPNOTSUPP) {
+		return false
+	}
 	var magic [4]byte
 	if _, err := tool.File.ReadAt(magic[:], 0); err != nil || magic != ([4]byte{0x7f, 'E', 'L', 'F'}) {
 		return false
@@ -154,12 +162,18 @@ func executeRetainedTool(ctx context.Context, network *os.File, nsenter, tool Pr
 	cmd := exec.CommandContext(ctx, "/proc/self/fd/4")
 	cmd.Args = append([]string{"nsenter", "-F", "--preserve-credentials", "-n/proc/self/fd/3", "--", "/proc/self/fd/5"}, args...)
 	cmd.ExtraFiles = append([]*os.File{network, nsenter.File, tool.File}, extra...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	cmd.Env = []string{"LANG=C", "LC_ALL=C"}
 	cmd.Stdin = bytes.NewBufferString(input)
 	var output routeOutput
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	cmd.WaitDelay = time.Second
+	// Linux binds PDEATHSIG to the creating OS thread. Keep that thread alive
+	// through Wait, while ensuring controller death kills the exact no-fork tool
+	// even when no Go context cancellation or deferred cleanup can run.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := cmd.Run(); err != nil || ctx.Err() != nil {
 		if ctx.Err() != nil {
 			return nil, &actuationFailure{actuationCommandCancelled}

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"os"
@@ -177,6 +178,23 @@ func TestRetainedRouteKernelActuation(t *testing.T) {
 				t.Fatal("owned read-only executable unavailable")
 			}
 			selected.IP = ProtectedRouteTool{File: copyFile, SHA256: tools.IP.SHA256}
+			if !validRouteTool(selected.IP) {
+				t.Fatal("ordinary copied tool refused")
+			}
+			// Linux revision-2 capability xattr, effective CAP_NET_BIND_SERVICE.
+			// Never execute this object while the privileged metadata is present.
+			capability := make([]byte, 20)
+			binary.LittleEndian.PutUint32(capability[:4], 0x02000001)
+			binary.LittleEndian.PutUint32(capability[4:8], 1<<unix.CAP_NET_BIND_SERVICE)
+			if unix.Fsetxattr(int(copyFile.Fd()), "security.capability", capability, 0) != nil {
+				t.Fatal("owned capability fixture")
+			}
+			if validRouteTool(selected.IP) {
+				t.Fatal("capability-bearing executable admitted")
+			}
+			if unix.Fremovexattr(int(copyFile.Fd()), "security.capability") != nil || !validRouteTool(selected.IP) {
+				t.Fatal("owned capability fixture retirement")
+			}
 			bad := selected
 			bad.NFT.SHA256[0] ^= 1
 			if r, err := NewRetainedRoute(job, router, workload, bad); r != nil || err != ErrActuation {
