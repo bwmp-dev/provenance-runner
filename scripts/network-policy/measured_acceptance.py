@@ -94,6 +94,7 @@ def main():
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]
             print(json.dumps({'measuredRoutedSentry': True, 'preLaunchKernelPolicyObserved': True,
                               'closedMeasuredOCIAndGuestStorageQuotas': True,
+                              'descriptorOnlyHashVerifiedInputs': True,
                               'exactChildObservationAndMismatchWithdrawal': True,
                               'exclusiveMeasuredJobScopeCleanup': True,
                               'ownedMeasuredLaunchAndAuthorityTermination': True,
