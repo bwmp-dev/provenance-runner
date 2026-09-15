@@ -111,11 +111,17 @@ func TestMeasuredNetworkRootHandoff(t *testing.T) {
 			}
 			defer gate.Close()
 			defer release.Close()
+			ready, readyWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ready.Close()
+			defer readyWriter.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			args := []string{MeasuredNetworkChildCommand, job, strconv.Itoa(ids[0]), strconv.Itoa(ids[1]), strconv.Itoa(ids[0] + 1), strconv.Itoa(ids[1] + 1), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable"}
 			child := exec.CommandContext(ctx, "/proc/self/fd/5", args...)
-			child.ExtraFiles = append(files, gate)
+			child.ExtraFiles = append(files, gate, readyWriter)
 			child.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
 			child.SysProcAttr = &syscall.SysProcAttr{
 				Cloneflags:                 unix.CLONE_NEWUSER | unix.CLONE_NEWNET | unix.CLONE_NEWNS,
@@ -129,6 +135,10 @@ func TestMeasuredNetworkRootHandoff(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
+			readyWriter.Close()
+			if !awaitMeasuredNetworkToken(ready, time.Now().Add(5*time.Second), 'r') {
+				t.Fatal("measured child readiness missing")
+			}
 			owned, err := networkpolicy.RetainMappedChild(job, child.Process, networkpolicy.MappedIdentity{UID: uint32(ids[0]), GID: uint32(ids[1]), OverflowUID: uint32(ids[0] + 1), OverflowGID: uint32(ids[1] + 1)})
 			if err != nil {
 				t.Fatal(err)

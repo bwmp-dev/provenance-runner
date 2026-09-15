@@ -130,9 +130,27 @@ func TestMeasuredAuthorityRouteSentryChildMismatch(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "child-mismatch")
 }
 
+func TestMeasuredAuthorityRouteSentryOwnedLaunch(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "owned-launch")
+}
+
+func TestMeasuredAuthorityRouteSentryOwnedNormal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "owned-normal")
+}
+
+func TestMeasuredAuthorityRouteSentryOwnedGatedStartup(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		if !t.Run(strconv.Itoa(i), func(t *testing.T) {
+			testMeasuredAuthorityRouteSentry(t, "owned-gated-startup")
+		}) {
+			return
+		}
+	}
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -235,6 +253,23 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if uint64(gvisorRuntimePIDReserve) != np.MappedRuntimeProcessReserve {
 		t.Fatal("resource profile reserve drift")
 	}
+	guard, err := np.NewAuthorityRoute(ctx, specification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := guard.Close(); err != nil {
+			t.Error("authority route cleanup", err)
+		}
+	})
+	features := []runnerv1.ProtocolFeature{1, 3, 9, 10}
+	now := time.Now()
+	receipt := &runnerv1.LeaseReconciliation{Lease: specification.Lease, Attempt: specification.Attempt, Status: runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE,
+		NetworkAuthorityV2: &runnerv1.NetworkAuthorityV2{Policy: specification.Hashes.Policy, State: runnerv1.NetworkAuthorityStateV2_NETWORK_AUTHORITY_STATE_V2_CURRENT, CheckedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(40 * time.Second))}}
+	if err := guard.Reconcile(ctx, receipt, features, credentialExpiry); err != nil {
+		t.Fatal(err)
+	}
+	var launchOwner *MeasuredNetworkProcess
 	load := func(path string) np.ProtectedRouteTool {
 		t.Helper()
 		resolved, err := exec.LookPath(path)
@@ -275,8 +310,58 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup") {
+			inputRead, inputWrite, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { inputRead.Close(); inputWrite.Close() })
+			outputRead, outputWrite, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { outputRead.Close(); outputWrite.Close() })
+			diagnostics, err := os.CreateTemp("/tmp", "measured-owner-diagnostic-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if t.Failed() {
+					if f, err := os.Open(diagnostics.Name()); err == nil {
+						raw, _ := io.ReadAll(io.LimitReader(f, 4096))
+						f.Close()
+						t.Logf("owned launch diagnostic: %s", raw)
+					}
+				}
+				diagnostics.Close()
+				os.Remove(diagnostics.Name())
+			})
+			launchOwner, err = StartMeasuredNetworkProcess(ctx, MeasuredNetworkLaunchConfig{Job: specification, Measurement: lease, Scope: jobScope, Authority: guard,
+				Mapping: np.MappedIdentity{UID: uid, GID: uid, OverflowUID: uid + 1, OverflowGID: uid + 1}, PrivateRoot: privateRoot, Stdin: inputRead, Stdout: outputWrite, Stderr: diagnostics})
+			if launchOwner != nil {
+				t.Cleanup(func() {
+					if err := launchOwner.Close(context.Background()); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			if err != nil {
+				t.Fatal("owned measured launch", err)
+			}
+			inputRead.Close()
+			outputWrite.Close()
+			diagnostics.Close()
+			identity := launchOwner.Child()
+			fd, err := identity.NetworkForJob(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { fd.Close() })
+			return identity, nil, inputWrite, bufio.NewReaderSize(outputRead, 4096), fd
+		}
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMeasuredRouteFixtureHelper$")
 		cmd.Env = []string{"PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1", "PROVENANCE_RETAINED_HELPER=holder"}
+		var ready, readyWriter *os.File
 		if sentry {
 			cmd = exec.CommandContext(ctx, "/proc/self/fd/5", MeasuredNetworkChildCommand, job, strconv.Itoa(int(uid)), strconv.Itoa(int(uid)), strconv.Itoa(int(uid+1)), strconv.Itoa(int(uid+1)), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable")
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
@@ -299,6 +384,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			release = writer
 			t.Cleanup(func() { gate.Close(); writer.Close() })
 			cmd.ExtraFiles = append(cmd.ExtraFiles, gate)
+			ready, readyWriter, err = os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ready.Close(); readyWriter.Close() })
+			cmd.ExtraFiles = append(cmd.ExtraFiles, readyWriter)
 		}
 		input, err := cmd.StdinPipe()
 		if err != nil {
@@ -329,6 +420,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 				t.Logf("disposable child diagnostic: %.4096s", diagnostics.Bytes())
 			}
 		})
+		if sentry {
+			readyWriter.Close()
+			if !awaitMeasuredNetworkToken(ready, time.Now().Add(5*time.Second), 'r') {
+				t.Fatal("measured child initialization readiness missing")
+			}
+		}
 		reader := bufio.NewReaderSize(output, 4096)
 		if !sentry {
 			line, err := reader.ReadString('\n')
@@ -350,6 +447,18 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	router, _, _, _, routerFD := child(65530, false)
 	workload, guest, guestInput, guestOutput, jobFD := child(65532, true)
+	if authorityMode == "owned-gated-startup" {
+		if err := launchOwner.Close(ctx); err != nil {
+			t.Fatal("gated startup cleanup", err)
+		}
+		if err := launchOwner.Wait(ctx); err == nil || ctx.Err() != nil {
+			t.Fatal("unreleased child reported success or timed out", err)
+		}
+		if _, err := guestOutput.ReadByte(); err != io.EOF {
+			t.Fatal("unreleased child produced guest output", err)
+		}
+		return
+	}
 	_, wan, _, _, wanFD := child(65528, false)
 	scoped := func(fd *os.File, args ...string) []byte {
 		t.Helper()
@@ -359,10 +468,16 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 		return raw
 	}
+	var guestPID int
+	if launchOwner != nil {
+		guestPID = launchOwner.cmd.Process.Pid
+	} else {
+		guestPID = guest.Process.Pid
+	}
 	for _, pair := range []struct {
 		name, peer string
 		pid        int
-	}{{"job0", "eth0", guest.Process.Pid}, {"wan0", "eth0", wan.Process.Pid}} {
+	}{{"job0", "eth0", guestPID}, {"wan0", "eth0", wan.Process.Pid}} {
 		scoped(routerFD, "link", "add", pair.name, "type", "veth", "peer", "name", "newpeer")
 		scoped(routerFD, "link", "set", "newpeer", "netns", strconv.Itoa(pair.pid))
 		peerFD := jobFD
@@ -442,8 +557,10 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		if !cleanupScope() {
 			return
 		}
-		_ = guest.Process.Kill()
-		_ = guest.Wait()
+		if guest != nil {
+			_ = guest.Process.Kill()
+			_ = guest.Wait()
+		}
 		_ = filepath.WalkDir(bundle, func(path string, entry os.DirEntry, err error) error {
 			if err == nil && entry.IsDir() {
 				return os.Chown(path, 0, 0)
@@ -464,6 +581,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		"process": map[string]any{"terminal": false, "user": map[string]any{"uid": 65532, "gid": 65532}, "args": []string{"/smoke", "probe-lifecycle"}, "env": []string{"PATH=/"}, "cwd": "/", "noNewPrivileges": true,
 			"capabilities": map[string]any{"bounding": []string{}, "effective": []string{}, "inheritable": []string{}, "permitted": []string{}, "ambient": []string{}}, "rlimits": []any{map[string]any{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}}},
 		"linux": map[string]any{"namespaces": []any{map[string]string{"type": "pid"}, map[string]string{"type": "ipc"}, map[string]string{"type": "uts"}, map[string]string{"type": "mount"}, map[string]string{"type": "network", "path": "/proc/self/ns/net"}}}}
+	if authorityMode == "owned-normal" {
+		spec["process"].(map[string]any)["args"] = []string{"/smoke", "probe"}
+	}
 	raw, err := json.Marshal(spec)
 	if err != nil || os.WriteFile(filepath.Join(bundle, "config.json"), raw, 0644) != nil {
 		t.Fatal("owned OCI fixture unavailable")
@@ -489,28 +609,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { route.Close() })
-	var guard *np.AuthorityRoute
-	var receipt *runnerv1.LeaseReconciliation
-	features := []runnerv1.ProtocolFeature{1, 3, 9, 10}
-	{
-		now := time.Now()
-		guard, err = np.NewAuthorityRoute(ctx, specification)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if err := guard.Close(); err != nil {
-				t.Error("authority route cleanup failed", err)
-			}
-		})
-		receipt = &runnerv1.LeaseReconciliation{Lease: specification.Lease, Attempt: specification.Attempt, Status: runnerv1.LeaseStatus_LEASE_STATUS_ACTIVE, Phase: runnerv1.JobPhase_JOB_PHASE_RUNNING, Disposition: runnerv1.RunnerMessageDisposition_RUNNER_MESSAGE_DISPOSITION_STALE,
-			NetworkAuthorityV2: &runnerv1.NetworkAuthorityV2{Policy: specification.Hashes.Policy, State: runnerv1.NetworkAuthorityStateV2_NETWORK_AUTHORITY_STATE_V2_CURRENT, CheckedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(40 * time.Second))}}
-		if err := guard.Reconcile(ctx, receipt, features, credentialExpiry); err != nil {
-			t.Fatal(err)
-		}
-		err = guard.Start(ctx, []np.Binding{binding}, route)
-		// AuthorityRoute owns the private route session.
-	}
+	err = guard.Start(ctx, []np.Binding{binding}, route)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,11 +666,17 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
-	if _, err := release.Write([]byte("s")); err != nil {
-		t.Fatal(err)
-	}
-	if err := release.Close(); err != nil {
-		t.Fatal(err)
+	if launchOwner != nil {
+		if err := launchOwner.Release(ctx); err != nil {
+			t.Fatal("owned launch gate", err)
+		}
+	} else {
+		if _, err := release.Write([]byte("s")); err != nil {
+			t.Fatal(err)
+		}
+		if err := release.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	checks := read(guestOutput)
 	if len(checks) != 10 {
@@ -581,6 +686,32 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		if checks[name] != true {
 			t.Fatal("native guest packet check failed")
 		}
+	}
+	if authorityMode == "owned-normal" {
+		if err := launchOwner.Wait(ctx); err != nil {
+			t.Fatal("normal owned execution", err)
+		}
+		if guard.CheckJob(specification) != nil {
+			t.Fatal("normal completion manufactured authority loss")
+		}
+		if guard.Close() != nil || !cleanupScope() || lease.Validate() != nil || server.Process.Signal(syscall.Signal(0)) != nil {
+			t.Fatal("normal owned cleanup incomplete")
+		}
+		for _, fd := range []*os.File{routerFD, jobFD, wanFD} {
+			raw, err := execute(fd, tools.NFT, "-j", "list", "tables")
+			var tables struct {
+				Items []map[string]json.RawMessage `json:"nftables"`
+			}
+			if err != nil || json.Unmarshal(raw, &tables) != nil {
+				t.Fatal("normal route cleanup inspection", err)
+			}
+			for _, item := range tables.Items {
+				if _, ok := item["table"]; ok {
+					t.Fatal("normal route table remains")
+				}
+			}
+		}
+		return
 	}
 	if read(guestOutput)["phase"] != "flows-ready" {
 		t.Fatal("native persistent guest flows unavailable")
@@ -602,6 +733,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	{
 		err = guard.RefreshDNS(ctx, []np.Binding{binding})
+		if err != nil {
+			t.Fatal("native DNS renewal failed", err)
+		}
 		if err == nil {
 			// Real installed forwarding/DNS deadlines must shorten without
 			// replenishing accounting or interrupting still-authorized flows.
@@ -661,11 +795,20 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			t.Fatal("native withdrawn authority resumed")
 		}
 	}
-	if _, err := guestInput.Write([]byte("withdraw\n")); err != nil {
-		t.Fatal(err)
-	}
-	if read(guestOutput)["phase"] != "flows-withdrawn" {
-		t.Fatal("native withdrawal retained guest flows")
+	if launchOwner != nil {
+		if err := launchOwner.Wait(ctx); err == nil || ctx.Err() != nil {
+			t.Fatal("authority loss did not terminate owned runtime", err)
+		}
+		if err := launchOwner.Close(context.Background()); err != nil {
+			t.Fatal("owned runtime cleanup", err)
+		}
+	} else {
+		if _, err := guestInput.Write([]byte("withdraw\n")); err != nil {
+			t.Fatal(err)
+		}
+		if read(guestOutput)["phase"] != "flows-withdrawn" {
+			t.Fatal("native withdrawal retained guest flows")
+		}
 	}
 	if server.Process.Signal(syscall.Signal(0)) != nil {
 		t.Fatal("endpoint loss cannot count as withdrawal")
@@ -673,7 +816,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := lease.Validate(); err != nil {
 		t.Fatal("retained measured objects changed", err)
 	}
-	if guest.Wait() != nil {
+	if guest != nil && guest.Wait() != nil {
 		t.Fatal("native Sentry guest failed")
 	}
 	if err := guard.Close(); err != nil {

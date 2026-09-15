@@ -19,6 +19,11 @@ controller network/mount namespaces solely for the isolation check. Descriptor
 missing or additional bytes refuse execution, with a 30-second deadline. No
 namespace or evidence descriptors are inherited by the executed runtime.
 
+Descriptor 11 is a separate write-only readiness pipe: the initialized mapped
+child writes exactly `r` then closes it before waiting on descriptor 10. The
+controller waits for this bounded readiness signal before observing resource
+limits. It is never interchangeable with the `s` launch authorization token.
+
 Before releasing that gate, a production controller must retain/prove ownership
 of the child, install and observe its current authorized route using
 `ObserveInstalledForChild` with that exact retained workload owner, and create

@@ -65,18 +65,18 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^TestMeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch)$',
-                                 '-test.count=3', '-test.timeout=150s'],
+                                 '-test.run=^TestMeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup)$',
+                                 '-test.count=3', '-test.timeout=200s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
                                      'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
-                                capture_output=True, text=True, timeout=160)
+                                capture_output=True, text=True, timeout=210)
         assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
         print(result.stdout, end='')
         if result.returncode:
             raise RuntimeError('measured routed fixture failed: '+result.stderr[-4096:])
         assert '--- SKIP:' not in result.stdout
-        for case in ('Withdrawal', 'Expiry', 'ChildMismatch'):
+        for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup'):
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
         assert not [p for p in jobs.iterdir() if p.is_dir()]
         jobs.rmdir()
