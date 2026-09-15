@@ -27,6 +27,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['{"measuredHostUplinkJournalRetired": true}']
         rows += ['--- PASS: TestMeasuredHostUplinkColdRecovery (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredControlListener (1s)' for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSession'+case+' (1s)' for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss', 'PaperGuest', 'PaperGuestRefusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSessionNormal/'+case+' (1s)' for case in ('local-maximum-refusal', 'local-identity-refusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSessionNormal/'+case+' (1s)' for case in ('controller-occupied-refusal', 'controller-exclusive-admission', 'controller-staging-failure', 'controller-busy-refusal', 'controller-cleanup-refusal', 'controller-slot-retirement') for _ in range(3)]

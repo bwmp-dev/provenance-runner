@@ -4,8 +4,9 @@
 after verifying its kernel peer UID against trusted local configuration. It
 rejects stream sockets and unidentified or mismatched peers. Future worker clients
 must require UID 0 and connect through a root-protected pathname; the root service
-must require its separately provisioned non-root worker UID. No listener or root
-execution endpoint is enabled by this package.
+must require its separately provisioned non-root worker UID. The separately
+provisioned [root listener](measured-root-listener.md) creates no execution endpoint
+by itself; daemon/worker dispatch remains gated.
 
 Every packet has a closed version/kind header, zero reserved fields, exact payload
 and file counts, and an independent consecutive sequence starting at 1 in each
@@ -23,8 +24,9 @@ does not prove that another process cannot modify the backing inode.
 
 Payload interpretation, current-authority validation, Paper input-role derivation,
 job correlation, per-kind direction/state checks, sealed evidence generation,
-global connection limits and protected socket provisioning are separate required
-service integration. A valid frame is not permission to execute a command or
+global connection limits and protected socket provisioning require the separate
+service composition. Bounded start assembly and dedicated root-observation receipt
+helpers do not substitute for that dispatcher. A valid frame is not permission to execute a command or
 accept evidence. This transport does not carry platform-management credentials
 and does not change the existing network-v2 production fence.
 

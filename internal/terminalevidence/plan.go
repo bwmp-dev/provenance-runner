@@ -14,6 +14,7 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"github.com/dlclark/regexp2"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -182,6 +183,12 @@ func newContext(job *runnerv1.JobSpecification, v2 bool) (*Context, error) {
 			return nil, ErrInvalid
 		}
 		c.networkMode = map[runnerv1.NetworkMode]string{runnerv1.NetworkMode_NETWORK_MODE_NONE: "none", runnerv1.NetworkMode_NETWORK_MODE_RESTRICTED: "restricted", runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST: "allowlist"}[job.EffectivePolicy.NetworkV2.Mode]
+		if c.networkMode == "restricted" || c.networkMode == "allowlist" {
+			c.measurementJobSHA256, err = runtimeidentity.ExecutionJobSHA256(job)
+			if err != nil {
+				return nil, ErrInvalid
+			}
+		}
 	}
 	c.v2 = v2
 	add := func(id, kind, name string, supported bool, selector map[string]string) error {

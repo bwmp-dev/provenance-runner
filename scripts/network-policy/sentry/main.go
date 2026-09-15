@@ -20,6 +20,9 @@ import (
 )
 
 func main() {
+	if measuredObservationClient != nil && measuredObservationClient() {
+		return
+	}
 	if measuredControlClient != nil && measuredControlClient() {
 		return
 	}
@@ -212,6 +215,7 @@ func main() {
 // The standalone Docker build compiles only this standard-library entry point.
 // Module builds register additional trusted control fixtures in separate files.
 var measuredControlClient func() bool
+var measuredObservationClient func() bool
 
 // Synthetic Java stand-in, executed only by the measured disposable fixture.
 // No Paper/plugin compatibility claim is made by this helper.

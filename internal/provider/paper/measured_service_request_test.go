@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -27,6 +28,14 @@ func TestMeasuredServiceRequestProjectsTransferCapabilities(t *testing.T) {
 	decoded, signed, err := DecodeMeasuredRequest(raw)
 	if err != nil {
 		t.Fatal(err)
+	}
+	originalBinding, err := runtimeidentity.ExecutionJobSHA256(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectedBinding, err := runtimeidentity.ExecutionJobSHA256(decoded)
+	if err != nil || originalBinding != projectedBinding {
+		t.Fatal("worker and root execution bindings disagree", err)
 	}
 	if decoded.Artifact.Uri != "" || decoded.Artifact.ExpiresAt != nil || decoded.Dependencies[0].Object.Uri != "" || decoded.CompleteLogUpload.Uri != "" || decoded.CompleteLogUpload.ObjectKey != job.CompleteLogUpload.ObjectKey || !proto.Equal(decoded.Hashes, job.Hashes) || !proto.Equal(decoded.EffectivePolicy, job.EffectivePolicy) {
 		t.Fatal("projected identity changed")

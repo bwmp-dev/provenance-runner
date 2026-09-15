@@ -18,6 +18,10 @@ func (l *Lease) ObserveNetwork(ctx context.Context, job *p.JobSpecification, chi
 		return nil, ErrUnavailable
 	}
 	job = proto.Clone(job).(*p.JobSpecification)
+	jobHash, err := networkObservationJobHash(job)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
 	if _, err := np.NewAuthority(job); err != nil {
 		return nil, ErrUnavailable
 	}
@@ -30,5 +34,5 @@ func (l *Lease) ObserveNetwork(ctx context.Context, job *p.JobSpecification, chi
 		return nil, ErrUnavailable
 	}
 	snapshot.NetworkMode = mode
-	return &NetworkObservation{snapshot: snapshot, lease: proto.Clone(job.Lease).(*p.LeaseIdentity), attempt: proto.Clone(job.Attempt).(*p.AttemptIdentity), hashes: proto.Clone(job.Hashes).(*p.JobHashes), observed: true}, nil
+	return &NetworkObservation{snapshot: snapshot, lease: proto.Clone(job.Lease).(*p.LeaseIdentity), attempt: proto.Clone(job.Attempt).(*p.AttemptIdentity), hashes: proto.Clone(job.Hashes).(*p.JobHashes), observed: true, jobSHA256: jobHash}, nil
 }

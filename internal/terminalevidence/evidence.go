@@ -53,14 +53,15 @@ type planned struct {
 
 // Context has no exported mutable fields. It contains no URLs or credentials.
 type Context struct {
-	binding            Binding
-	requested          map[string]any
-	planned            map[string]planned
-	v2                 bool
-	networkMode        string // original validated grant, never a measured runtime claim
-	measurementLease   *runnerv1.LeaseIdentity
-	measurementAttempt *runnerv1.AttemptIdentity
-	measurementHashes  *runnerv1.JobHashes
+	binding              Binding
+	requested            map[string]any
+	planned              map[string]planned
+	v2                   bool
+	networkMode          string // original validated grant, never a measured runtime claim
+	measurementLease     *runnerv1.LeaseIdentity
+	measurementAttempt   *runnerv1.AttemptIdentity
+	measurementHashes    *runnerv1.JobHashes
+	measurementJobSHA256 [32]byte
 }
 
 func (c *Context) Matches(lease *runnerv1.LeaseIdentity, attempt *runnerv1.AttemptIdentity) bool {
@@ -138,7 +139,7 @@ func build(c *Context, runnerID string, observations []Observation, observed *ru
 		return nil, ErrInvalid
 	}
 	if observed != nil {
-		snapshot, err := observed.SnapshotFor(c.measurementLease, c.measurementAttempt, c.measurementHashes)
+		snapshot, err := observed.SnapshotForExecution(c.measurementJobSHA256, c.measurementLease, c.measurementAttempt, c.measurementHashes)
 		if err != nil || snapshot.NetworkMode != c.networkMode {
 			return nil, ErrInvalid
 		}

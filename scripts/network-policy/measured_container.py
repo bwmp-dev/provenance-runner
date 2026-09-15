@@ -91,6 +91,7 @@ def main():
         assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredControlListener ') == 3
+        assert result.stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
         for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss', 'PaperGuest', 'PaperGuestRefusal'):
             assert result.stdout.count('--- PASS: TestMeasuredNetworkSession'+case+' ') == 3
         for case in ('local-maximum-refusal', 'local-identity-refusal'):

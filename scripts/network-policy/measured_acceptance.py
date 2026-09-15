@@ -40,6 +40,7 @@ def validate_report(stdout, stderr, status):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
     assert stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
     assert stdout.count('--- PASS: TestMeasuredControlListener ') == 3
+    assert stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
     for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss', 'PaperGuest', 'PaperGuestRefusal'):
         assert stdout.count('--- PASS: TestMeasuredNetworkSession'+case+' ') == 3
     for case in ('local-maximum-refusal', 'local-identity-refusal'):
