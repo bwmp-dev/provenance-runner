@@ -8,11 +8,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -145,11 +147,14 @@ func main() {
 		}
 		probe(false)
 		report("withdrawn")
-	case "probe", "probe-lifecycle":
+	case "probe", "probe-lifecycle", "probe-confined", "probe-confined-lifecycle":
 		if os.Getuid() != 65532 || os.Geteuid() != 65532 {
 			panic("non-root guest required")
 		}
 		result := map[string]bool{"nonRootGuest": true}
+		if os.Args[1] == "probe-confined" || os.Args[1] == "probe-confined-lifecycle" {
+			probeStorage(result)
+		}
 		for _, test := range []struct {
 			name, network, address string
 			allowed                bool
@@ -186,12 +191,74 @@ func main() {
 		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 			panic(err)
 		}
-		if os.Args[1] == "probe-lifecycle" {
+		if os.Args[1] == "probe-lifecycle" || os.Args[1] == "probe-confined-lifecycle" {
 			packetLifecycle()
 		}
 	default:
 		panic("unknown fixture mode")
 	}
+}
+
+// Synthetic guest only. The measured fixture grants exactly two MiB of writable
+// storage, split evenly between two private tmpfs mounts. No host data is used.
+func probeStorage(result map[string]bool) {
+	if cwd, err := os.Getwd(); err != nil || cwd != "/workspace" {
+		panic("private working directory missing")
+	}
+	result["privateWorkingDirectory"] = true
+	for _, test := range []struct{ path, name string }{{"/workspace/quota", "workspaceQuota"}, {"/tmp/quota", "temporaryQuota"}} {
+		file, err := os.OpenFile(test.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			panic("private writable mount missing")
+		}
+		var chunk [4096]byte
+		total := 0
+		for total <= 1<<20 {
+			n, writeErr := file.Write(chunk[:])
+			total += n
+			if writeErr != nil {
+				err = writeErr
+				break
+			}
+			if n == 0 {
+				panic("quota write made no progress")
+			}
+		}
+		if file.Close() != nil || total == 0 || total > 1<<20 || !errors.Is(err, syscall.ENOSPC) || os.Remove(test.path) != nil {
+			panic("private tmpfs quota not enforced")
+		}
+		result[test.name] = true
+	}
+	if !readOnlyGuestMount("/") || os.WriteFile("/forbidden", []byte("synthetic"), 0600) == nil {
+		panic("root is not read-only")
+	}
+	result["rootReadOnly"] = true
+	if raw, err := os.ReadFile("/inputs/sample"); err != nil || string(raw) != "synthetic-input" {
+		panic("read-only fixture input missing")
+	}
+	if !readOnlyGuestMount("/inputs") || os.WriteFile("/inputs/sample", []byte("changed"), 0600) == nil {
+		panic("inputs are not read-only")
+	}
+	result["inputsReadOnly"] = true
+}
+
+func readOnlyGuestMount(path string) bool {
+	file, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, 65537))
+	if err != nil || len(raw) > 65536 {
+		return false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 6 && fields[4] == path {
+			return strings.Contains(","+fields[5]+",", ",ro,")
+		}
+	}
+	return false
 }
 
 // Keep the same Sentry and four sockets alive across the controller's atomic

@@ -189,7 +189,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	const job = "10000000-0000-4000-8000-000000000001"
 	const fixtureRoot = "/tmp/provenance-runtime-fixture"
 	policy := &runnerv1.EffectivePolicy{Sandbox: runnerv1.SandboxKind_SANDBOX_KIND_GVISOR, Requirement: runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_REQUIRED,
-		Resources: &runnerv1.ResourceLimits{CpuMillis: 2000, MemoryBytes: 1 << 30, DiskBytes: 4 << 30, ProcessCount: 256}, PreparationTimeout: durationpb.New(time.Minute), ExecutionTimeout: durationpb.New(time.Minute), GracefulShutdownTimeout: durationpb.New(10 * time.Second),
+		Resources: &runnerv1.ResourceLimits{CpuMillis: 2000, MemoryBytes: 1 << 30, DiskBytes: 2 << 20, ProcessCount: 256}, PreparationTimeout: durationpb.New(time.Minute), ExecutionTimeout: durationpb.New(time.Minute), GracefulShutdownTimeout: durationpb.New(10 * time.Second),
 		NetworkV2: &runnerv1.NetworkPolicyV2{Mode: runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST, MaximumConnections: 16, MaximumBytesPerSecond: 65536, Permissions: []*runnerv1.NetworkPermissionV2{{Hostname: "fixture.example.com", Port: 8080, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_TCP}, {Hostname: "fixture.example.com", Port: 8081, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_UDP}}}}
 	policyRaw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
 	if err != nil {
@@ -600,12 +600,17 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			t.Fatal("owned Sentry directory setup failed")
 		}
 	}
-	spec := map[string]any{"ociVersion": "1.0.2", "root": map[string]any{"path": privateRoot, "readonly": true}, "mounts": []any{},
-		"process": map[string]any{"terminal": false, "user": map[string]any{"uid": 65532, "gid": 65532}, "args": []string{"/smoke", "probe-lifecycle"}, "env": []string{"PATH=/"}, "cwd": "/", "noNewPrivileges": true,
-			"capabilities": map[string]any{"bounding": []string{}, "effective": []string{}, "inheritable": []string{}, "permitted": []string{}, "ambient": []string{}}, "rlimits": []any{map[string]any{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}}},
-		"linux": map[string]any{"namespaces": []any{map[string]string{"type": "pid"}, map[string]string{"type": "ipc"}, map[string]string{"type": "uts"}, map[string]string{"type": "mount"}, map[string]string{"type": "network", "path": "/proc/self/ns/net"}}}}
+	mode := "probe-confined-lifecycle"
 	if authorityMode == "owned-normal" {
-		spec["process"].(map[string]any)["args"] = []string{"/smoke", "probe"}
+		mode = "probe-confined"
+	}
+	inputs := filepath.Join(bundle, "inputs")
+	if os.Mkdir(inputs, 0555) != nil || os.Chown(inputs, 65532, 65532) != nil || os.WriteFile(filepath.Join(inputs, "sample"), []byte("synthetic-input"), 0444) != nil {
+		t.Fatal("owned read-only inputs unavailable")
+	}
+	spec, err := buildMeasuredNetworkSpec(specification, measuredGuestCommand{Command: "/smoke", Arguments: []string{mode}}, privateRoot)
+	if err != nil {
+		t.Fatal("closed measured OCI construction", err)
 	}
 	raw, err := json.Marshal(spec)
 	if err != nil || os.WriteFile(filepath.Join(bundle, "config.json"), raw, 0644) != nil {
@@ -733,10 +738,10 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 	}
 	checks := read(guestOutput)
-	if len(checks) != 10 {
+	if len(checks) != 15 {
 		t.Fatal("native guest packet checks missing")
 	}
-	for _, name := range []string{"nonRootGuest", "tcp4", "tcp6", "udp4", "udp6", "unbound4", "unbound6", "metadata", "wrongPort", "wrongProtocol"} {
+	for _, name := range []string{"nonRootGuest", "tcp4", "tcp6", "udp4", "udp6", "unbound4", "unbound6", "metadata", "wrongPort", "wrongProtocol", "workspaceQuota", "temporaryQuota", "rootReadOnly", "inputsReadOnly", "privateWorkingDirectory"} {
 		if checks[name] != true {
 			t.Fatal("native guest packet check failed")
 		}
