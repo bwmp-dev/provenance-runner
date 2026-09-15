@@ -58,6 +58,15 @@ jobs:
           [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
           python3 -B scripts/network-policy/namespace_acceptance.py --image "$image" \
             2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/namespace-acceptance.log"
+      - name: Verify exclusive job cgroup descendant cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(< "${PROVENANCE_NETWORK_EVIDENCE}/fixture-image.txt")
+          [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
+          python3 -B -m unittest scripts/test_job_cgroup_acceptance.py
+          python3 -B scripts/network-policy/job_cgroup_acceptance.py --image "$image" \
+            2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/job-cgroup-acceptance.log"
       - name: Exercise caller-mapped Sentry through isolated routed policy
         shell: bash
         run: |
