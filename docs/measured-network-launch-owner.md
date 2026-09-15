@@ -14,6 +14,13 @@ identity and verifies its actual resource boundary. The launch pipe remains
 closed to execution until `Release` revalidates measurement, resource membership
 and the authorized native route for that exact retained child.
 
+An independent write-only child readiness pipe reports exactly `r` then EOF
+after initialization and mapping checks, before the child waits on the launch
+pipe. The controller bounds this wait to five seconds and observes resources
+only afterward. This prevents Go's startup adjustment of the open-file limit
+from racing the observation; it does not ignore changes, retry failed proofs,
+or treat readiness as permission to launch. Missing readiness fails closed.
+
 Cancellation or authority loss triggers whole-scope cleanup independently of a
 caller polling `Wait`. Main-process exit triggers cleanup as well, without the
 process owner itself withdrawing authority and manufacturing an authority-loss
@@ -33,6 +40,10 @@ live renewal and termination after authority loss; a separate normal-exit case
 checks successful completion without self-induced withdrawal. Existing explicit
 packet withdrawal, expiry and wrong-child cases remain mandatory. Missing cases
 or exclusive-scope/image cleanup evidence fail acceptance.
+
+Thirty additional gated-startup subcases exercise early resource observation
+and whole-scope cleanup without ever permitting guest execution. Resource
+refusals report only fixed observation-stage labels, never procfs contents.
 
 Production activation remains blocked on trusted OCI construction/provisioning,
 durable controller recovery, provider/result integration and hosted acceptance.

@@ -106,3 +106,33 @@ func TestMeasuredNetworkLaunchGateIsBoundedAndExact(t *testing.T) {
 		t.Fatal("regular file substituted for launch gate")
 	}
 }
+
+func TestMeasuredNetworkReadinessCannotAuthorizeLaunch(t *testing.T) {
+	for _, message := range []string{"r", "", "s", "rr"} {
+		read, write, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := write.Write([]byte(message)); err != nil {
+			t.Fatal(err)
+		}
+		write.Close()
+		got := awaitMeasuredNetworkToken(read, time.Now().Add(time.Second), 'r')
+		read.Close()
+		if got != (message == "r") {
+			t.Fatal("ambiguous readiness accepted", message)
+		}
+	}
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	defer write.Close()
+	if _, err := write.Write([]byte{'r'}); err != nil {
+		t.Fatal(err)
+	}
+	if awaitMeasuredNetworkToken(read, time.Now().Add(20*time.Millisecond), 'r') {
+		t.Fatal("readiness without EOF accepted")
+	}
+}

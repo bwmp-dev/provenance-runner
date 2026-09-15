@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -153,8 +154,11 @@ func (r *RetainedRoute) execute(ctx context.Context, tool ProtectedRouteTool, in
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	cmd.WaitDelay = time.Second
-	if cmd.Run() != nil || ctx.Err() != nil {
-		return nil, ErrActuation
+	if err := cmd.Run(); err != nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: command deadline or cancellation", ErrActuation)
+		}
+		return nil, fmt.Errorf("%w: command refused", ErrActuation)
 	}
 	return output.Bytes(), nil
 }
@@ -215,8 +219,11 @@ func (r *RetainedRoute) Apply(ctx context.Context, change FirewallChange) error 
 		}
 		if change.kind == routeRefresh {
 			identity, err := r.readKernelIdentity(ctx)
-			if err != nil || identity != r.kernelIdentity {
-				return ErrActuation
+			if err != nil {
+				return fmt.Errorf("%w: pre-refresh readback", err)
+			}
+			if identity != r.kernelIdentity {
+				return fmt.Errorf("%w: pre-refresh identity changed", ErrActuation)
 			}
 		}
 		if change.kind == routeInstall {
@@ -255,7 +262,7 @@ func (r *RetainedRoute) Apply(ctx context.Context, change FirewallChange) error 
 	if change.kind == routeInstall || change.kind == routeRefresh {
 		identity, err := r.readKernelIdentity(ctx)
 		if err != nil {
-			return ErrActuation
+			return fmt.Errorf("%w: post-actuation readback", err)
 		}
 		r.kernelIdentity = identity
 	}

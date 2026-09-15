@@ -47,7 +47,10 @@ launch case checks actual whole-scope termination after authority withdrawal;
 the normal case checks successful process exit, cleanup and no self-induced
 authority withdrawal. The original packet-level withdrawal cases remain intact.
 
-The CI driver requires all fifteen real test results, no skipped or failed cases and
+Gated startup is also repeated three times with ten subcases each. Each child
+must be successfully retained and cleaned up without release or guest output.
+
+The CI driver requires all eighteen real test results, no skipped or failed cases and
 the explicit successful loop-detach and exclusive-scope cleanup observations. Checker unit tests require
 missing cases or cleanup evidence to fail. Evidence includes the exact source,
 fixture image, builder hash, root image hash, test binary hash and captured test

@@ -31,6 +31,8 @@ var measuredNetworkJobID = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]
 // network and mount namespaces, used only to refuse inherited ambient execution.
 // FD 10 is a read-only launch pipe: the controller writes exactly 's' and closes
 // it only after ownership, aggregate limits and current route enforcement pass.
+// FD 11 is a separate write-only readiness pipe. The initialized child writes
+// exactly 'r' then closes it before waiting for launch. Readiness is not authority.
 func RunMeasuredNetworkChild(arguments []string, stderr io.Writer) int {
 	inputs, run, ok := measuredNetworkInputs(arguments)
 	if !ok {
@@ -83,6 +85,19 @@ func RunMeasuredNetworkChild(arguments []string, stderr io.Writer) int {
 		}
 		gate := os.NewFile(10, "measured-network-launch-gate")
 		defer gate.Close()
+		readyFlags, err := unix.FcntlInt(11, unix.F_GETFL, 0)
+		var readyStat unix.Stat_t
+		if err != nil || readyFlags&unix.O_ACCMODE != unix.O_WRONLY || unix.Fstat(11, &readyStat) != nil || readyStat.Mode&unix.S_IFMT != unix.S_IFIFO || unix.SetNonblock(11, true) != nil {
+			return false
+		}
+		ready := os.NewFile(11, "measured-network-child-ready")
+		defer ready.Close()
+		if ready.SetWriteDeadline(time.Now().Add(5*time.Second)) != nil {
+			return false
+		}
+		if n, err := ready.Write([]byte{'r'}); err != nil || n != 1 || ready.Close() != nil {
+			return false
+		}
 		return awaitMeasuredNetworkGate(gate, time.Now().Add(30*time.Second))
 	}
 	return runMeasuredChild(inputs, stderr, mapped, func(value []string) bool {
@@ -91,6 +106,10 @@ func RunMeasuredNetworkChild(arguments []string, stderr io.Writer) int {
 }
 
 func awaitMeasuredNetworkGate(gate *os.File, deadline time.Time) bool {
+	return awaitMeasuredNetworkToken(gate, deadline, 's')
+}
+
+func awaitMeasuredNetworkToken(gate *os.File, deadline time.Time, expected byte) bool {
 	if gate == nil {
 		return false
 	}
@@ -99,7 +118,7 @@ func awaitMeasuredNetworkGate(gate *os.File, deadline time.Time) bool {
 		return false
 	}
 	var token [1]byte
-	if _, err := io.ReadFull(gate, token[:]); err != nil || token[0] != 's' {
+	if _, err := io.ReadFull(gate, token[:]); err != nil || token[0] != expected {
 		return false
 	}
 	n, err := gate.Read(token[:])

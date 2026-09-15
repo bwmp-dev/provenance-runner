@@ -20,7 +20,7 @@ def validate_report(stdout, stderr, status):
     assert '{"measuredRoutedOwnedLoopDetached": true}' in stdout
     assert '{"exclusiveMeasuredJobScopesRemoved": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
 
 

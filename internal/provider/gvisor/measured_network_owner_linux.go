@@ -107,6 +107,12 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 	}
 	files = append(files, gate)
 	s.gate = writer
+	ready, readyWriter, err := os.Pipe()
+	if err != nil {
+		return fail(err)
+	}
+	defer ready.Close()
+	files = append(files, readyWriter)
 	cmd := exec.Command("/proc/self/fd/5", append([]string{MeasuredNetworkChildCommand}, args...)...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	cmd.Stdin = config.Stdin
@@ -120,12 +126,22 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 	if err := cmd.Start(); err != nil {
 		return fail(err)
 	}
+	_ = readyWriter.Close()
 	s.cmd = cmd
 	s.started = true
 	go func() { s.exitErr = cmd.Wait(); close(s.done) }()
 	s.child, err = np.RetainMappedChild(job.Lease.JobId, cmd.Process, m)
 	if err != nil {
 		return fail(err)
+	}
+	// exec returning does not mean Go initialization has finished: the runtime
+	// may still adjust process limits. Wait for the owned child's separate ready
+	// signal before observing them, without weakening or retrying observations.
+	stopReady := context.AfterFunc(ctx, func() { _ = ready.Close() })
+	readyOK := awaitMeasuredNetworkToken(ready, time.Now().Add(5*time.Second), 'r')
+	stopReady()
+	if !readyOK || ctx.Err() != nil {
+		return fail(ErrMeasuredNetworkLaunch)
 	}
 	s.resources, err = np.RetainResources(job, s.child, scope)
 	if err != nil || ctx.Err() != nil {

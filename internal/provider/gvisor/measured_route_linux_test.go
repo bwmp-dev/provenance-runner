@@ -138,9 +138,19 @@ func TestMeasuredAuthorityRouteSentryOwnedNormal(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "owned-normal")
 }
 
+func TestMeasuredAuthorityRouteSentryOwnedGatedStartup(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		if !t.Run(strconv.Itoa(i), func(t *testing.T) {
+			testMeasuredAuthorityRouteSentry(t, "owned-gated-startup")
+		}) {
+			return
+		}
+	}
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -300,7 +310,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
-		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal") {
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup") {
 			inputRead, inputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -351,6 +361,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMeasuredRouteFixtureHelper$")
 		cmd.Env = []string{"PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1", "PROVENANCE_RETAINED_HELPER=holder"}
+		var ready, readyWriter *os.File
 		if sentry {
 			cmd = exec.CommandContext(ctx, "/proc/self/fd/5", MeasuredNetworkChildCommand, job, strconv.Itoa(int(uid)), strconv.Itoa(int(uid)), strconv.Itoa(int(uid+1)), strconv.Itoa(int(uid+1)), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable")
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
@@ -373,6 +384,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 			release = writer
 			t.Cleanup(func() { gate.Close(); writer.Close() })
 			cmd.ExtraFiles = append(cmd.ExtraFiles, gate)
+			ready, readyWriter, err = os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ready.Close(); readyWriter.Close() })
+			cmd.ExtraFiles = append(cmd.ExtraFiles, readyWriter)
 		}
 		input, err := cmd.StdinPipe()
 		if err != nil {
@@ -403,6 +420,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 				t.Logf("disposable child diagnostic: %.4096s", diagnostics.Bytes())
 			}
 		})
+		if sentry {
+			readyWriter.Close()
+			if !awaitMeasuredNetworkToken(ready, time.Now().Add(5*time.Second), 'r') {
+				t.Fatal("measured child initialization readiness missing")
+			}
+		}
 		reader := bufio.NewReaderSize(output, 4096)
 		if !sentry {
 			line, err := reader.ReadString('\n')
@@ -424,6 +447,18 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	router, _, _, _, routerFD := child(65530, false)
 	workload, guest, guestInput, guestOutput, jobFD := child(65532, true)
+	if authorityMode == "owned-gated-startup" {
+		if err := launchOwner.Close(ctx); err != nil {
+			t.Fatal("gated startup cleanup", err)
+		}
+		if err := launchOwner.Wait(ctx); err == nil || ctx.Err() != nil {
+			t.Fatal("unreleased child reported success or timed out", err)
+		}
+		if _, err := guestOutput.ReadByte(); err != io.EOF {
+			t.Fatal("unreleased child produced guest output", err)
+		}
+		return
+	}
 	_, wan, _, _, wanFD := child(65528, false)
 	scoped := func(fd *os.File, args ...string) []byte {
 		t.Helper()
@@ -698,6 +733,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	{
 		err = guard.RefreshDNS(ctx, []np.Binding{binding})
+		if err != nil {
+			t.Fatal("native DNS renewal failed", err)
+		}
 		if err == nil {
 			// Real installed forwarding/DNS deadlines must shorten without
 			// replenishing accounting or interrupting still-authorized flows.
