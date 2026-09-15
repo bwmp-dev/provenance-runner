@@ -173,6 +173,14 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	bundle := fixtureRoot + "/work/" + job
 	privateRoot := bundle + "/.measured-root"
 	var release *os.File
+	cgroup, err := os.OpenFile("/sys/fs/cgroup", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cgroup.Close() })
+	if uint64(gvisorRuntimePIDReserve) != np.MappedRuntimeProcessReserve {
+		t.Fatal("resource profile reserve drift")
+	}
 	load := func(path string) np.ProtectedRouteTool {
 		t.Helper()
 		resolved, err := exec.LookPath(path)
@@ -251,7 +259,8 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWUSER | unix.CLONE_NEWNET | unix.CLONE_NEWNS,
 			UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(uid), Size: 1}, {ContainerID: 65534, HostID: int(uid + 1), Size: 1}},
 			GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: int(uid), Size: 1}, {ContainerID: 65534, HostID: int(uid + 1), Size: 1}},
-			GidMappingsEnableSetgroups: false, Credential: &syscall.Credential{Uid: 0, Gid: 0, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
+			GidMappingsEnableSetgroups: false, Credential: &syscall.Credential{Uid: 0, Gid: 0, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL,
+			UseCgroupFD: true, CgroupFD: int(cgroup.Fd())}
 		if err := cmd.Start(); err != nil {
 			t.Fatal("native fixture child unavailable", err)
 		}
@@ -468,6 +477,48 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := lease.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	resources, err := np.RetainResources(specification, workload, cgroup)
+	if err != nil {
+		t.Fatal("actual pre-launch cgroup enforcement", err)
+	}
+	t.Cleanup(func() { resources.Close() })
+	if err := resources.Validate(specification); err != nil {
+		t.Fatal(err)
+	}
+	// Refuse real kernel limits above a frozen policy, without modifying even
+	// this disposable container's cgroup controls.
+	for _, kind := range []string{"cpu", "memory", "processes"} {
+		lower := proto.Clone(specification).(*runnerv1.JobSpecification)
+		switch kind {
+		case "cpu":
+			lower.EffectivePolicy.Resources.CpuMillis = 1000
+		case "memory":
+			lower.EffectivePolicy.Resources.MemoryBytes = 512 << 20
+		case "processes":
+			lower.EffectivePolicy.Resources.ProcessCount = 128
+		}
+		digest, err := np.EffectivePolicyV2SHA256(lower.EffectivePolicy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lower.Hashes.Policy.Value = digest[:]
+		if unexpected, err := np.RetainResources(lower, workload, cgroup); err == nil {
+			unexpected.Close()
+			t.Fatal("kernel resource limit above original policy accepted", kind)
+		}
+	}
+	probe, err := np.RetainResources(specification, workload, cgroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := proto.Clone(specification).(*runnerv1.JobSpecification)
+	wrong.Attempt.AttemptId = "70000000-0000-4000-8000-000000000001"
+	if probe.Validate(wrong) == nil || probe.Validate(specification) == nil {
+		t.Fatal("resource proof resumed after owner mismatch")
+	}
+	if probe.Close() != nil || workload.Validate(job) != nil {
+		t.Fatal("closing resource proof killed or invalidated owned child")
+	}
 	if err := guard.ObserveInstalled(ctx, specification); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
@@ -488,6 +539,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if read(guestOutput)["phase"] != "flows-ready" {
 		t.Fatal("native persistent guest flows unavailable")
+	}
+	if err := resources.Validate(specification); err != nil {
+		t.Fatal("live runtime left original resource boundary", err)
 	}
 	if guard != nil {
 		if err := guard.ObserveInstalled(ctx, specification); err != nil {
