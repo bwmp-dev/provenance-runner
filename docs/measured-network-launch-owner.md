@@ -24,6 +24,10 @@ inside its owned cgroup. Before returning, it retains the direct child's kernel
 identity and verifies its actual resource boundary. The launch pipe remains
 closed to execution until `Release` revalidates measurement, resource membership
 and the authorized native route for that exact retained child.
+`Release` also requires the [owned private link](private-job-link-owner.md) for
+that native route's exact router and workload. The process borrows this proof;
+outer teardown must close the route and link before releasing their namespace
+and capacity reservations.
 Resource validation also requires the exact retained child object, not just
 matching job/attempt labels. Nil or foreign owners permanently invalidate that
 resource proof; retrying with the original child cannot revive it. Refusal does

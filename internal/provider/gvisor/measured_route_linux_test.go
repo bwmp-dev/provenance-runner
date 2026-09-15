@@ -162,9 +162,13 @@ func TestMeasuredAuthorityRouteSentryPreparedRefusal(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "prepared-refusal")
 }
 
+func TestMeasuredAuthorityRouteSentryLinkRefusal(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "link-refusal")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -389,7 +393,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	child := func(uid uint32, sentry bool) (*np.ChildNamespaces, *exec.Cmd, io.WriteCloser, *bufio.Reader, *os.File) {
 		t.Helper()
-		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal") {
+		if sentry && (authorityMode == "owned-launch" || authorityMode == "owned-normal" || authorityMode == "owned-gated-startup" || authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal") {
 			inputRead, inputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -570,6 +574,55 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		return
 	}
 	_, wan, _, _, wanFD := child(65528, false)
+	if authorityMode == "owned-launch" {
+		probe, err := np.CreatePrivateJobLink(ctx, job, router, workload, tools)
+		if probe != nil {
+			t.Cleanup(func() {
+				if probe.Close(context.Background()) != nil {
+					t.Error("link refusal probe cleanup")
+				}
+			})
+		}
+		if err != nil {
+			t.Fatal("link refusal probe", err)
+		}
+		raw, err := execute(routerFD, tools.IP, "-j", "link", "show", "dev", "job0")
+		var rows []struct {
+			Alias string `json:"ifalias"`
+		}
+		if err != nil || json.Unmarshal(raw, &rows) != nil || len(rows) != 1 || rows[0].Alias == "" {
+			t.Fatal("link alias fixture")
+		}
+		if _, err := execute(routerFD, tools.IP, "link", "set", "dev", "job0", "alias", "foreign-fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if probe.Validate(ctx) == nil || probe.Close(ctx) == nil {
+			t.Fatal("changed link granted validation or deletion")
+		}
+		if _, err := execute(routerFD, tools.IP, "link", "set", "dev", "job0", "alias", rows[0].Alias); err != nil {
+			t.Fatal("foreign link was deleted")
+		}
+		if probe.Validate(ctx) == nil || probe.Close(ctx) != nil {
+			t.Fatal("link refusal resumed or could not clean original identity")
+		}
+	}
+	privateLink, err := np.CreatePrivateJobLink(ctx, job, router, workload, tools)
+	if privateLink != nil {
+		t.Cleanup(func() {
+			if privateLink.Close(context.Background()) != nil {
+				t.Error("owned private link cleanup")
+			}
+		})
+	}
+	if err != nil {
+		t.Fatal("owned private link creation", err)
+	}
+	if err := privateLink.Validate(ctx); err != nil {
+		t.Fatal("private link identity", err)
+	}
+	if unexpected, err := np.CreatePrivateJobLink(ctx, job, router, workload, tools); unexpected != nil || err == nil {
+		t.Fatal("existing link adopted")
+	}
 	scoped := func(fd *os.File, args ...string) []byte {
 		t.Helper()
 		raw, err := execute(fd, tools.IP, args...)
@@ -578,16 +631,10 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		}
 		return raw
 	}
-	var guestPID int
-	if launchOwner != nil {
-		guestPID = launchOwner.cmd.Process.Pid
-	} else {
-		guestPID = guest.Process.Pid
-	}
 	for _, pair := range []struct {
 		name, peer string
 		pid        int
-	}{{"job0", "eth0", guestPID}, {"wan0", "eth0", wan.Process.Pid}} {
+	}{{"wan0", "eth0", wan.Process.Pid}} {
 		scoped(routerFD, "link", "add", pair.name, "type", "veth", "peer", "name", "newpeer")
 		scoped(routerFD, "link", "set", "newpeer", "netns", strconv.Itoa(pair.pid))
 		peerFD := jobFD
@@ -745,8 +792,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
-	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" {
-		if authorityMode == "prepared-refusal" {
+	if authorityMode == "journal-refusal" || authorityMode == "bundle-refusal" || authorityMode == "prepared-refusal" || authorityMode == "link-refusal" {
+		if authorityMode == "link-refusal" {
+			if launchOwner.Release(ctx, nil) == nil {
+				t.Fatal("missing link proof opened gate")
+			}
+		} else if authorityMode == "prepared-refusal" {
 			if os.Chmod(filepath.Join(bundle, "config.json"), 0644) != nil {
 				t.Fatal("prepared configuration drift fixture")
 			}
@@ -786,7 +837,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 				t.Fatal("expected one owned synthetic journal record")
 			}
 		}
-		if launchOwner.Release(ctx) == nil {
+		if launchOwner.Release(ctx, privateLink) == nil {
 			t.Fatal("corrupt journal opened gate")
 		}
 		if err := launchOwner.Wait(ctx); err == nil || ctx.Err() != nil {
@@ -801,7 +852,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		return
 	}
 	if launchOwner != nil {
-		if err := launchOwner.Release(ctx); err != nil {
+		if err := launchOwner.Release(ctx, privateLink); err != nil {
 			t.Fatal("owned launch gate", err)
 		}
 	} else {
@@ -850,6 +901,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if read(guestOutput)["phase"] != "flows-ready" {
 		t.Fatal("native persistent guest flows unavailable")
 	}
+	if err := privateLink.Validate(ctx); err != nil {
+		t.Fatal("live private link changed", err)
+	}
 	if err := lease.ValidateChildObjects(workload, job, privateRoot); err != nil {
 		t.Fatal("live sandbox objects do not match measured lease", err)
 	}
@@ -859,7 +913,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := resources.ValidateForChild(specification, workload); err != nil {
 		t.Fatal("live runtime left original resource boundary", err)
 	}
-	observation, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard)
+	observation, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard, privateLink)
 	if launchOwner != nil {
 		observation, err = launchOwner.ObserveRuntime(ctx)
 	}
@@ -998,7 +1052,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := guard.CheckJob(specification); err == nil {
 		t.Fatal("native withdrawn authority accepted job")
 	}
-	if resumed, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard); resumed != nil || err == nil {
+	if resumed, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard, privateLink); resumed != nil || err == nil {
 		t.Fatal("withdrawn runtime produced a fresh observation")
 	}
 	historical, err := terminalevidence.BuildObservedNetwork(evidenceContext, "runner-fixture", nil, observation)
@@ -1027,6 +1081,9 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if router.Validate(job) != nil {
 		t.Fatal("workload cleanup killed independent router")
+	}
+	if privateLink.Close(context.Background()) != nil || privateLink.Close(context.Background()) != nil {
+		t.Fatal("private link retirement")
 	}
 	if err := routerOwner.Close(context.Background()); err != nil {
 		t.Fatal("journaled router cleanup", err)
