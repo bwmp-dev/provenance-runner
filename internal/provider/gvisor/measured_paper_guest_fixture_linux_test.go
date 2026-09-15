@@ -125,6 +125,9 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	c.Launch.Stdin.Close()
 	out.Close()
 	assertRouterThreadsUnprivileged(t, owned.session.router)
+	if _, err := owned.completedProcessExit(); err == nil {
+		t.Fatal("unretired process supplied a completed exit")
+	}
 	if owned.Release(ctx) != nil {
 		t.Fatal("Paper gate release")
 	}
@@ -146,6 +149,10 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	}
 	claimedExit, claimedInfrastructure := transcript.ClaimedExit()
 	waitErr := owned.Wait(ctx)
+	actualExit, exitErr := owned.completedProcessExit()
+	if exitErr != nil || actualExit != claimedExit {
+		t.Fatal("Paper guest claim differs from retired owned process exit", exitErr)
+	}
 	if ctx.Err() != nil {
 		t.Fatal("Paper completion missing")
 	}
