@@ -107,6 +107,23 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if os.Chmod(root, 0711) != nil {
 		t.Fatal("service root")
 	}
+	var fixtureFiles []string
+	t.Cleanup(func() {
+		// Every owner and input descriptor closes before this last cleanup.
+		// Preserve failed-case diagnostics; successful repetitions must not
+		// accumulate executable/input copies in the bounded fixture tmpfs.
+		if t.Failed() {
+			return
+		}
+		for _, path := range fixtureFiles {
+			if err := os.Remove(path); err != nil {
+				t.Error("fixture input retirement", err)
+			}
+		}
+		if err := os.Remove(root); err != nil {
+			t.Error("fixture directory retirement", err)
+		}
+	})
 	state, err := os.MkdirTemp("/state-input", "service-journals-")
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +282,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	contents := map[string][]byte{"java.tar.gz": java, "paper.jar": []byte("synthetic paper"), "provenance-probe.jar": probe, "prepared-runtime.tar.gz": prepared, "target.jar": []byte("synthetic target"), "provenance-test-plan.json": plan.ProbePlan()}
 	write := func(name string, raw []byte) *os.File {
 		path := filepath.Join(root, name)
+		fixtureFiles = append(fixtureFiles, path)
 		if os.WriteFile(path, raw, 0600) != nil {
 			t.Fatal("fixture input")
 		}
@@ -285,6 +303,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		files = append(files, write(fmt.Sprintf("input-%d", i), contents[role.Name]))
 	}
 	clientPath := filepath.Join(root, "client")
+	fixtureFiles = append(fixtureFiles, clientPath)
 	if os.WriteFile(clientPath, executable, 0555) != nil {
 		t.Fatal("fixture client")
 	}
