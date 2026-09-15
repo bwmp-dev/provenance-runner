@@ -31,6 +31,12 @@ import (
 // Supplied JAR bytes are data; the fixed synthetic stand-in executes in gVisor.
 func TestMeasuredWorkerRootFixture(t *testing.T) {
 	endpoint := os.Getenv("PROVENANCE_DISPOSABLE_WORKER_ROOT_SOCKET")
+	realPaper := os.Getenv("PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE") == "1"
+	maximumArtifact, maximumPreparation, maximumCache := int64(64<<20), int64(128<<20), int64(128<<20)
+	budget := 35 * time.Second
+	if realPaper {
+		maximumArtifact, maximumPreparation, maximumCache, budget = 256<<20, 512<<20, 768<<20, 280*time.Second
+	}
 	if endpoint == "" {
 		t.Skip("explicit disposable root fixture required")
 	}
@@ -80,7 +86,7 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assets[u.Path] = read(uintptr(5+index), 64<<20)
+		assets[u.Path] = read(uintptr(5+index), maximumArtifact)
 	}
 	assets["/target"] = read(9, 64<<20)
 	_ = read(10, 64<<10) // Worker independently regenerates the exact probe plan.
@@ -107,16 +113,16 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 	client.Transport.(*http.Transport).DialContext = dialer.DialContext
 	client.Transport.(*http.Transport).TLSClientConfig.ServerName = "example.com"
 	source.Client = client
-	cache, err := artifact.NewCache(t.TempDir(), artifact.CacheOptions{MaximumEntryBytes: 64 << 20, MaximumTotalBytes: 128 << 20})
+	cache, err := artifact.NewCache(t.TempDir(), artifact.CacheOptions{MaximumEntryBytes: maximumArtifact, MaximumTotalBytes: maximumCache})
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider, err := NewMeasured(Config{RuntimeSource: source, HTTPClient: client, ArtifactCache: cache, JavaCache: cache, PaperCache: cache, ProbeCache: cache, RuntimeCache: cache, ArtifactHosts: []string{u.Hostname()}, MaximumArtifactBytes: 64 << 20, MaximumDependencyBytes: 64 << 20, MaximumPreparationBytes: 128 << 20,
+	provider, err := NewMeasured(Config{RuntimeSource: source, HTTPClient: client, ArtifactCache: cache, JavaCache: cache, PaperCache: cache, ProbeCache: cache, RuntimeCache: cache, ArtifactHosts: []string{u.Hostname()}, MaximumArtifactBytes: maximumArtifact, MaximumDependencyBytes: maximumArtifact, MaximumPreparationBytes: maximumPreparation,
 		sourceResolver: staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}, sourceDialer: dialer})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	if provider.CheckMeasuredService(ctx, endpoint) != nil {
 		t.Fatal("startup root idle barrier refused")
@@ -131,8 +137,31 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 	if guard.Reconcile(ctx, update.Reconciliation, update.Features, update.CredentialExpiry) != nil {
 		t.Fatal("fixture authority refused")
 	}
+	renewCtx, stopRenew := context.WithCancel(ctx)
+	renewDone := make(chan struct{})
+	go func() {
+		defer close(renewDone)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				update.Reconciliation.NetworkAuthorityV2.CheckedAt = timestamppb.New(now)
+				update.Reconciliation.NetworkAuthorityV2.ExpiresAt = timestamppb.New(now.Add(40 * time.Second))
+				if guard.Reconcile(renewCtx, update.Reconciliation, update.Features, update.CredentialExpiry) != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	defer func() { stopRenew(); <-renewDone }()
 	starts := 0
 	result := execution.SuperviseNetworkAuthority(ctx, job, guard, func(ctx context.Context) execution.Result {
+		defer func() { stopRenew(); <-renewDone }()
 		return provider.ExecuteMeasured(ctx, job, endpoint, func(context.Context, execution.ExecutionStart) error { starts++; return nil })
 	})
 	if result.CompleteLog != nil && result.CompleteLog.Archive != nil {
@@ -140,7 +169,21 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 	}
 	// The deliberately non-Protocol probe event MUST fail Paper validation,
 	// despite a successful root process and authenticated runtime observation.
-	if starts != 1 || result.Classification != execution.ClassificationWorkloadFailure || result.Cleanup == nil || !result.Cleanup.Succeeded || result.MeasuredNetwork == nil || result.Logs == nil || !strings.Contains(result.Logs.Stdout, "ROOT_SERVICE_OK") {
+	wantClassification, marker := execution.ClassificationWorkloadFailure, "ROOT_SERVICE_OK"
+	if realPaper {
+		wantClassification, marker = execution.ClassificationPassed, "Paper"
+	}
+	if starts != 1 || result.Classification != wantClassification || result.Cleanup == nil || !result.Cleanup.Succeeded || result.MeasuredNetwork == nil || result.Logs == nil || !strings.Contains(result.Logs.Stdout, marker) {
+		if realPaper && result.Logs != nil {
+			out, diagnostic := result.Logs.Stdout, result.Logs.Stderr
+			if len(out) > 4096 {
+				out = out[len(out)-4096:]
+			}
+			if len(diagnostic) > 4096 {
+				diagnostic = diagnostic[len(diagnostic)-4096:]
+			}
+			t.Logf("bounded fixture diagnostics: stdout=%s stderr=%s", out, diagnostic)
+		}
 		t.Fatalf("worker composition: starts=%d classification=%s phase=%s failure=%v cleanup=%v", starts, result.Classification, result.Phase, result.Failure, result.Cleanup)
 	}
 	frozen, err := result.FreezeTerminalEvidence("fixture-runner")

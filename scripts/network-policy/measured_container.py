@@ -13,6 +13,37 @@ def run(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=15).stdout.strip()
 
 
+def real_paper(jobs, state, bundle_state, bundles):
+    result = subprocess.run(['/tmp/measured-service.test', '-test.v',
+                             '-test.run=^TestMeasuredPaperRealKernel$', '-test.count=3', '-test.timeout=900s'],
+                            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
+                                 'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1',
+                                 'PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE': '1'},
+                            capture_output=True, text=True, timeout=910)
+    assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
+    print(result.stdout, end='', flush=True)
+    assert result.returncode == 0, result.stderr[-4096:]
+    assert '--- FAIL:' not in result.stdout and '--- SKIP:' not in result.stdout
+    for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
+        assert result.stdout.count('--- PASS: TestMeasuredPaperRealKernel'+suffix+' ') == 3
+    journals = list(Path('/state-input').glob('service-journals-*'))
+    assert len(journals) == 3
+    for parent in journals:
+        assert sorted(p.name for p in parent.iterdir()) == ['bundles', 'cgroups', 'uplinks']
+        for journal in parent.iterdir():
+            assert [p.name for p in journal.iterdir()] == ['.lock']
+    assert not [p for p in jobs.iterdir() if p.is_dir()]
+    assert not list(state.iterdir()) and not list(bundle_state.iterdir()) and not list(bundles.iterdir())
+    jobs.rmdir()
+    state.rmdir()
+    bundle_state.rmdir()
+    print('{"measuredRealPaperCompatibility": true}')
+    print('{"measuredHostUplinkJournalRetired": true}')
+    print('{"measuredBundleJournalRetired": true}')
+    print('{"measuredJobJournalRetired": true}')
+    print('{"exclusiveMeasuredJobScopesRemoved": true}')
+
+
 def main():
     assert os.getuid() == 0 and Path('/.dockerenv').is_file()
     assert sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo']
@@ -76,6 +107,9 @@ def main():
         os.chmod(loop, 0o444)
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
+        if os.environ.get('PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE') == '1':
+            real_paper(jobs, state, bundle_state, bundles)
+            return
         # Exercise the new composed service before the longer regression suite
         # so provisioning failures surface promptly. Both remain mandatory.
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',

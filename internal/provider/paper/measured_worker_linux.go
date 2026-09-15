@@ -198,7 +198,14 @@ func (s *measuredWorkerSession) Collect(ctx context.Context) (execution.Collecte
 		},
 	}
 	for _, event := range bundle.Events {
-		output.StructuredEvents = append(output.StructuredEvents, execution.StructuredEvent{Sequence: event.Sequence, Kind: event.Kind, Payload: append([]byte(nil), event.Payload...)})
+		kind := event.Kind
+		// The framed guest collector uses a provider-neutral channel label.
+		// Only this channel is projected into Paper's existing validator;
+		// payloads remain untrusted and all lifecycle checks still apply.
+		if kind == "probe" {
+			kind = probeEventKind
+		}
+		output.StructuredEvents = append(output.StructuredEvents, execution.StructuredEvent{Sequence: event.Sequence, Kind: kind, Payload: append([]byte(nil), event.Payload...)})
 	}
 	if s.accepted != nil {
 		output.MeasuredNetwork = s.accepted.Observation()
