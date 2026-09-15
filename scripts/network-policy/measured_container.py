@@ -94,6 +94,8 @@ def main():
             assert result.stdout.count('--- PASS: TestMeasuredNetworkSession'+case+' ') == 3
         for case in ('local-maximum-refusal', 'local-identity-refusal'):
             assert result.stdout.count('--- PASS: TestMeasuredNetworkSessionNormal/'+case+' ') == 3
+        for case in ('controller-occupied-refusal', 'controller-exclusive-admission', 'controller-staging-failure', 'controller-busy-refusal', 'controller-cleanup-refusal', 'controller-slot-retirement'):
+            assert result.stdout.count('--- PASS: TestMeasuredNetworkSessionNormal/'+case+' ') == 3
         uplink_state = Path('/state-input/uplink-journal')
         assert [p.name for p in uplink_state.iterdir()] == ['.lock']
         (uplink_state/'.lock').unlink()

@@ -55,6 +55,10 @@ type measuredNetworkSession struct {
 // A non-nil result owns the bundle, authority and every created component,
 // including on partial failure. Cleanup must succeed before capacity reuse.
 func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measuredNetworkSession, error) {
+	return startMeasuredSessionWithBudget(ctx, c, nil)
+}
+
+func startMeasuredSessionWithBudget(ctx context.Context, c measuredSessionConfig, budget *measuredSessionBudget) (*measuredNetworkSession, error) {
 	groups, err := os.Getgroups()
 	l := c.Launch
 	if ctx == nil || ctx.Err() != nil || os.Getuid() != 0 || os.Geteuid() != 0 || err != nil || len(groups) != 0 || l.Job == nil || l.Bundle == nil || l.Bundle.owner == nil || l.Scope != l.Bundle.scope || l.Journal != l.Bundle.owner.cgroups || l.Authority == nil || l.Measurement == nil || c.Uplinks == nil || !validPreparationMapping(l.Mapping) || !validPreparationMapping(c.RouterMapping) {
@@ -78,9 +82,15 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 	if l.Bundle.owner.check(l.Bundle, l.Job) != nil || l.Bundle.checkPrepared(l.Mapping) != nil || l.Authority.CheckJob(l.Job) != nil {
 		return nil, errMeasuredSession
 	}
-	budget, err := newMeasuredSessionBudget(ctx, l.Job.EffectivePolicy.PreparationTimeout.AsDuration(), l.Job.EffectivePolicy.ExecutionTimeout.AsDuration())
-	if err != nil {
-		return nil, err
+	if budget == nil {
+		budget, err = newMeasuredSessionBudget(ctx, l.Job.EffectivePolicy.PreparationTimeout.AsDuration(), l.Job.EffectivePolicy.ExecutionTimeout.AsDuration())
+		if err != nil {
+			return nil, err
+		}
+	}
+	if budget.claim(l.Job.EffectivePolicy.PreparationTimeout.AsDuration(), l.Job.EffectivePolicy.ExecutionTimeout.AsDuration()) != nil {
+		budget.close()
+		return nil, errMeasuredSession
 	}
 	ctx = budget.ctx
 	s := &measuredNetworkSession{authority: l.Authority, bundle: l.Bundle, done: make(chan struct{}), budget: budget}
