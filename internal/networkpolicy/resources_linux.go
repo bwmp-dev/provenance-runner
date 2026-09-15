@@ -3,6 +3,7 @@
 package networkpolicy
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -47,7 +48,7 @@ func RetainResources(job *p.JobSpecification, child *ChildNamespaces, scope *os.
 	r.mu.Unlock()
 	if err != nil {
 		r.Close()
-		return nil, ErrResources
+		return nil, err
 	}
 	return r, nil
 }
@@ -135,15 +136,18 @@ func (r *RetainedResources) observeLocked() (resourceState, error) {
 	child.mu.Lock()
 	defer child.mu.Unlock()
 	if child.validateLocked(r.owner.lease.JobId) != nil {
-		return resourceState{}, ErrResources
+		return resourceState{}, fmt.Errorf("%w: initial child identity", ErrResources)
 	}
 	processStat, err := child.read("stat")
 	if err != nil {
-		return resourceState{}, ErrResources
+		return resourceState{}, fmt.Errorf("%w: leader scheduling read", ErrResources)
 	}
 	processLimits, err := child.read("limits")
-	if err != nil || !fairScheduler(processStat, processLimits) || !fairChildThreads(child, processLimits, r.ceiling.processes) {
-		return resourceState{}, ErrResources
+	if err != nil || !fairScheduler(processStat, processLimits) {
+		return resourceState{}, fmt.Errorf("%w: leader scheduling policy", ErrResources)
+	}
+	if !fairChildThreads(child, processLimits, r.ceiling.processes) {
+		return resourceState{}, fmt.Errorf("%w: thread scheduling observation", ErrResources)
 	}
 	raw, err := child.read("cgroup")
 	path, ok := unifiedCgroupPath(raw)
@@ -197,17 +201,17 @@ func (r *RetainedResources) observeLocked() (resourceState, error) {
 	}
 	state, err := readResourceState(values, r.ceiling)
 	if err != nil || child.validateLocked(r.owner.lease.JobId) != nil {
-		return resourceState{}, ErrResources
+		return resourceState{}, fmt.Errorf("%w: limits or final child identity", ErrResources)
 	}
 	// A concurrent trusted-controller migration must not be mistaken for the
 	// originally observed membership. The retained directory never follows names.
 	final, err := child.read("cgroup")
 	if err != nil || final != raw {
-		return resourceState{}, ErrResources
+		return resourceState{}, fmt.Errorf("%w: cgroup membership changed", ErrResources)
 	}
 	finalLimits, err := child.read("limits")
 	if err != nil || finalLimits != processLimits {
-		return resourceState{}, ErrResources
+		return resourceState{}, fmt.Errorf("%w: process limits changed", ErrResources)
 	}
 	return state, nil
 }
