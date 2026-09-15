@@ -84,6 +84,9 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		t.Fatal("session local boundary")
 	}
 	resolver := &sessionDNSResolverFixture{}
+	if mode == "session-preparation-timeout" {
+		resolver.blocked.Store(true)
+	}
 	c.Resolver = resolver
 	if mode == "session-normal" {
 		for _, name := range []string{"local-maximum-refusal", "local-identity-refusal"} {
@@ -170,9 +173,12 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 	}
 	in.Close()
 	out.Close()
-	if mode == "session-startup-refusal" {
+	if mode == "session-startup-refusal" || mode == "session-preparation-timeout" {
 		if session == nil || err == nil || !c.Launch.Bundle.retired || session.Close(ctx) != nil || session.Wait(ctx) == nil {
 			t.Fatal("partial startup not retired")
+		}
+		if mode == "session-preparation-timeout" && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("preparation timeout cause lost")
 		}
 		return
 	}
@@ -251,7 +257,7 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 			t.Fatal("owned DNS check failed")
 		}
 	}
-	if mode == "session-router-loss" || mode == "session-dns-loss" || mode == "session-dns-refresh-failure" {
+	if mode == "session-router-loss" || mode == "session-dns-loss" || mode == "session-dns-refresh-failure" || mode == "session-execution-timeout" {
 		if read(reader)["phase"] != "flows-ready" {
 			t.Fatal("session flows unavailable")
 		}
@@ -267,8 +273,12 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		if mode == "session-dns-refresh-failure" {
 			resolver.fail.Store(true)
 		}
-		if session.Wait(ctx) == nil || ctx.Err() != nil {
+		waitErr := session.Wait(ctx)
+		if waitErr == nil || ctx.Err() != nil {
 			t.Fatal("router loss not propagated")
+		}
+		if mode == "session-execution-timeout" && !errors.Is(waitErr, context.DeadlineExceeded) {
+			t.Fatal("execution timeout cause lost")
 		}
 	} else if session.Wait(ctx) != nil {
 		t.Fatal("normal session completion")

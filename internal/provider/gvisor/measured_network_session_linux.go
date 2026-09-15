@@ -46,6 +46,7 @@ type measuredNetworkSession struct {
 	dnsRefreshDone   chan struct{}
 	dnsRefreshCancel context.CancelFunc
 	dns              *measuredSessionDNS
+	budget           *measuredSessionBudget
 	reason           error
 	outcomeSet       bool
 	stopping, closed bool
@@ -77,10 +78,15 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 	if l.Bundle.owner.check(l.Bundle, l.Job) != nil || l.Bundle.checkPrepared(l.Mapping) != nil || l.Authority.CheckJob(l.Job) != nil {
 		return nil, errMeasuredSession
 	}
-	s := &measuredNetworkSession{authority: l.Authority, bundle: l.Bundle, done: make(chan struct{})}
+	budget, err := newMeasuredSessionBudget(ctx, l.Job.EffectivePolicy.PreparationTimeout.AsDuration(), l.Job.EffectivePolicy.ExecutionTimeout.AsDuration())
+	if err != nil {
+		return nil, err
+	}
+	ctx = budget.ctx
+	s := &measuredNetworkSession{authority: l.Authority, bundle: l.Bundle, done: make(chan struct{}), budget: budget}
 	fail := func(err error) (*measuredNetworkSession, error) {
-		s.reason, s.outcomeSet = errors.Join(errMeasuredSession, err), true
-		return s, errors.Join(errMeasuredSession, err, s.Close(context.Background()))
+		s.reason, s.outcomeSet = errors.Join(errMeasuredSession, err, context.Cause(ctx)), true
+		return s, errors.Join(s.reason, s.Close(context.Background()))
 	}
 	s.dns, err = newMeasuredSessionDNS(l.Job, c.Boundary.dns, c.Resolver)
 	if err != nil {
@@ -138,7 +144,7 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 		var reason error
 		select {
 		case <-ctx.Done():
-			reason = ctx.Err()
+			reason = context.Cause(ctx)
 		case <-routerDone:
 			reason = ErrRouterOwner
 		case <-authorityDone:
@@ -158,10 +164,13 @@ func startMeasuredSession(ctx context.Context, c measuredSessionConfig) (*measur
 			default:
 			}
 			if ctx.Err() != nil {
-				reason = ctx.Err()
+				reason = context.Cause(ctx)
 			}
 		case <-s.done:
 			return
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			reason = cause
 		}
 		s.mu.Lock()
 		if !s.stopping {
@@ -191,7 +200,20 @@ func (s *measuredNetworkSession) Release(ctx context.Context) error {
 		return errMeasuredSession
 	default:
 	}
-	return s.process.Release(ctx, s.link, s.uplink)
+	if ctx == nil || ctx.Err() != nil || s.budget.beginExecution() != nil {
+		if s.budget != nil {
+			s.budget.cancel(errMeasuredSession)
+		}
+		return errMeasuredSession
+	}
+	release, cancel := context.WithCancel(s.budget.ctx)
+	stop := context.AfterFunc(ctx, cancel)
+	defer func() { stop(); cancel() }()
+	if err := s.process.Release(release, s.link, s.uplink); err != nil {
+		s.budget.cancel(err)
+		return err
+	}
+	return nil
 }
 
 func (s *measuredNetworkSession) ObserveRuntime(ctx context.Context) (*runtimeidentity.NetworkObservation, error) {
@@ -200,7 +222,7 @@ func (s *measuredNetworkSession) ObserveRuntime(ctx context.Context) (*runtimeid
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.stopping || s.closed || s.process == nil || s.router == nil || s.router.dns.validate() != nil {
+	if s.stopping || s.closed || !s.budget.active() || s.process == nil || s.router == nil || s.router.dns.validate() != nil {
 		return nil, errMeasuredSession
 	}
 	return s.process.ObserveRuntime(ctx)
@@ -225,6 +247,7 @@ func (s *measuredNetworkSession) Close(ctx context.Context) error {
 	if !s.outcomeSet {
 		s.reason, s.outcomeSet = context.Canceled, true
 	}
+	s.budget.close()
 	var result error
 	if s.dnsRefreshCancel != nil {
 		s.dnsRefreshCancel()

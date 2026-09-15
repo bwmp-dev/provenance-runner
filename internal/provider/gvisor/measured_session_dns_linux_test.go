@@ -13,9 +13,13 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-type sessionDNSResolverFixture struct{ fail, changed atomic.Bool }
+type sessionDNSResolverFixture struct{ fail, changed, blocked atomic.Bool }
 
 func (r *sessionDNSResolverFixture) Exchange(ctx context.Context, raw []byte) ([]byte, error) {
+	if r.blocked.Load() {
+		<-ctx.Done()
+		return nil, np.ErrDNS
+	}
 	if ctx.Err() != nil || r.fail.Load() {
 		return nil, np.ErrDNS
 	}

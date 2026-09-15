@@ -26,7 +26,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['{"measuredBundleJournalRetired": true}']
         rows += ['{"measuredHostUplinkJournalRetired": true}']
         rows += ['--- PASS: TestMeasuredHostUplinkColdRecovery (1s)' for _ in range(3)]
-        rows += ['--- PASS: TestMeasuredNetworkSession'+case+' (1s)' for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredNetworkSession'+case+' (1s)' for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSessionNormal/'+case+' (1s)' for case in ('local-maximum-refusal', 'local-identity-refusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredAuthorityRouteSentryOwnedLaunch/'+case+' (1s)' for case in ('uplink-alias-refusal', 'uplink-journal-refusal', 'uplink-prefix-refusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' (1s)' for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal') for _ in range(3)]

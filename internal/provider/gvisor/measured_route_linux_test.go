@@ -197,10 +197,16 @@ func TestMeasuredNetworkSessionDNSLoss(t *testing.T) {
 func TestMeasuredNetworkSessionDNSRefreshFailure(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "session-dns-refresh-failure")
 }
+func TestMeasuredNetworkSessionPreparationTimeout(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-preparation-timeout")
+}
+func TestMeasuredNetworkSessionExecutionTimeout(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "session-execution-timeout")
+}
 
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "session-dns-refresh-failure" && authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
+	if authorityMode != "session-preparation-timeout" && authorityMode != "session-execution-timeout" && authorityMode != "session-dns-refresh-failure" && authorityMode != "session-dns-loss" && authorityMode != "session-normal" && authorityMode != "session-router-loss" && authorityMode != "session-startup-refusal" && authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" && authorityMode != "owned-launch" && authorityMode != "owned-normal" && authorityMode != "owned-gated-startup" && authorityMode != "journal-refusal" && authorityMode != "bundle-refusal" && authorityMode != "prepared-refusal" && authorityMode != "link-refusal" && authorityMode != "layout-refusal" && authorityMode != "uplink-refusal" && authorityMode != "uplink-crash" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -254,6 +260,12 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	policy := &runnerv1.EffectivePolicy{Sandbox: runnerv1.SandboxKind_SANDBOX_KIND_GVISOR, Requirement: runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_REQUIRED,
 		Resources: &runnerv1.ResourceLimits{CpuMillis: 2000, MemoryBytes: 1 << 30, DiskBytes: 2 << 20, ProcessCount: 256}, PreparationTimeout: durationpb.New(time.Minute), ExecutionTimeout: durationpb.New(time.Minute), GracefulShutdownTimeout: durationpb.New(10 * time.Second),
 		NetworkV2: &runnerv1.NetworkPolicyV2{Mode: runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST, MaximumConnections: 16, MaximumBytesPerSecond: 65536, Permissions: []*runnerv1.NetworkPermissionV2{{Hostname: "fixture.example.com", Port: 8080, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_TCP}, {Hostname: "fixture.example.com", Port: 8081, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_UDP}}}}
+	if authorityMode == "session-preparation-timeout" {
+		policy.PreparationTimeout = durationpb.New(10 * time.Millisecond)
+	}
+	if authorityMode == "session-execution-timeout" {
+		policy.ExecutionTimeout = durationpb.New(7 * time.Second)
+	}
 	policyRaw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
 	if err != nil {
 		t.Fatal(err)
