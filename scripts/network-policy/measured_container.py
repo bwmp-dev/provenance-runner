@@ -30,6 +30,13 @@ def main():
     state = Path('/state-input/journal')
     assert not state.exists()
     state.mkdir(mode=0o700)
+    bundle_state = Path('/state-input/bundle-journal')
+    bundle_state.mkdir(mode=0o700)
+    bundle_source = Path('/state-input/bundles')
+    bundle_source.mkdir(mode=0o711)
+    bundles = Path('/tmp/bundle-input')
+    bundles.mkdir(mode=0o711)
+    run('mount', '--bind', str(bundle_source), str(bundles))
     assert len(sys.argv) == 3
     root = Path('/tmp/provenance-runtime-fixture')
     assert not root.exists()
@@ -68,7 +75,7 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^TestMeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal)$',
+                                 '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal)|MeasuredBundleJournalKernelRecovery)$',
                                  '-test.count=3', '-test.timeout=200s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
@@ -79,13 +86,19 @@ def main():
         if result.returncode:
             raise RuntimeError('measured routed fixture failed: '+result.stderr[-4096:])
         assert '--- SKIP:' not in result.stdout
-        for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal'):
+        for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal'):
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
+        assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery ') == 3
         assert not [p for p in jobs.iterdir() if p.is_dir()]
         jobs.rmdir()
         assert [p.name for p in state.iterdir()] == ['.lock']
         (state/'.lock').unlink()
         state.rmdir()
+        assert not list(bundles.iterdir())
+        assert [p.name for p in bundle_state.iterdir()] == ['.lock']
+        (bundle_state/'.lock').unlink()
+        bundle_state.rmdir()
+        print('{"measuredBundleJournalRetired": true}')
         print('{"measuredJobJournalRetired": true}')
         print('{"exclusiveMeasuredJobScopesRemoved": true}')
     finally:
@@ -96,6 +109,7 @@ def main():
             run('losetup', '-d', loop)
             assert not backing.exists(), 'owned image loop remains associated'
             print('{"measuredRoutedOwnedLoopDetached": true}')
+        run('umount', str(bundles))
 
 
 if __name__ == '__main__':

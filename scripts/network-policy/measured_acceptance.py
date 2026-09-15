@@ -33,9 +33,12 @@ def validate_report(stdout, stderr, status):
     assert '{"measuredRoutedOwnedLoopDetached": true}' in stdout
     assert '{"exclusiveMeasuredJobScopesRemoved": true}' in stdout
     assert '{"measuredJobJournalRetired": true}' in stdout
+    assert '{"measuredBundleJournalRetired": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
+    for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal'):
+        assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' ') == 3
 
 
 def main():
@@ -99,6 +102,7 @@ def main():
                               'exclusiveMeasuredJobScopeCleanup': True,
                               'ownedMeasuredLaunchAndAuthorityTermination': True,
                               'durableMeasuredJobScopeRetirement': True,
+                              'durableMeasuredBundleRecoveryAndRetirement': True,
                               'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,
