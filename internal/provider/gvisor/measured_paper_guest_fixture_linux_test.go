@@ -9,7 +9,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -133,45 +132,30 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if output.SetReadDeadline(deadline) != nil {
 		t.Fatal("fixture output deadline")
 	}
-	var stdout, stderr, events bytes.Buffer
-	var outcome struct {
-		ExitCode              int  `json:"exitCode"`
-		InfrastructureFailure bool `json:"infrastructureFailure"`
+	var stdout, stderr bytes.Buffer
+	transcript, err := guestoutput.ReadStream(ctx, output, 1<<20, func(kind guestoutput.Kind, data []byte) error {
+		if kind == guestoutput.Stdout {
+			_, err := stdout.Write(data)
+			return err
+		}
+		_, err := stderr.Write(data)
+		return err
+	})
+	if err != nil {
+		t.Fatal("Paper frame stream", err)
 	}
-	seenOutcome := false
-	for count := 0; ; count++ {
-		kind, data, err := guestoutput.Read(output)
-		if err == io.EOF {
-			break
-		}
-		if err != nil || count >= 16 || seenOutcome {
-			t.Fatal("Paper frame stream", err)
-		}
-		switch kind {
-		case guestoutput.Stdout:
-			stdout.Write(data)
-		case guestoutput.Stderr:
-			stderr.Write(data)
-		case guestoutput.Events:
-			events.Write(data)
-		case guestoutput.Outcome:
-			if json.Unmarshal(data, &outcome) != nil {
-				t.Fatal("Paper outcome")
-			}
-			seenOutcome = true
-		}
-	}
+	claimedExit, claimedInfrastructure := transcript.ClaimedExit()
 	waitErr := owned.Wait(ctx)
-	if !seenOutcome || ctx.Err() != nil {
+	if ctx.Err() != nil {
 		t.Fatal("Paper completion missing")
 	}
 	if mode == "session-paper-guest-refusal" {
-		if waitErr == nil || outcome.ExitCode != 125 || !outcome.InfrastructureFailure || stdout.Len() != 0 || events.Len() != 0 {
+		if waitErr == nil || claimedExit != 125 || !claimedInfrastructure || stdout.Len() != 0 || len(transcript.EventBytes()) != 0 {
 			t.Fatal("Paper preparation failure not closed", waitErr)
 		}
 	} else {
-		if waitErr != nil || outcome.ExitCode != 0 || outcome.InfrastructureFailure || !strings.Contains(stdout.String(), "synthetic Paper guest prepared") || !strings.Contains(stderr.String(), "synthetic Paper guest stderr") || events.String() != "{\"syntheticPaperEvent\":true}\n" {
-			t.Fatal("Paper preparation or framed result failed", waitErr, outcome)
+		if waitErr != nil || claimedExit != 0 || claimedInfrastructure || !strings.Contains(stdout.String(), "synthetic Paper guest prepared") || !strings.Contains(stderr.String(), "synthetic Paper guest stderr") || string(transcript.EventBytes()) != "{\"syntheticPaperEvent\":true}\n" {
+			t.Fatal("Paper preparation or framed result failed", waitErr)
 		}
 	}
 	if !owned.bundle.retired || owned.Release(ctx) == nil || controller.Close(ctx) != nil || c.Uplinks.Recover(ctx) != nil {
