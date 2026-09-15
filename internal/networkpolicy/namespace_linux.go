@@ -241,8 +241,8 @@ func (s *ChildNamespaces) NetworkForJob(job string) (*os.File, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.validateLocked(job) != nil {
-		return nil, ErrNamespace
+	if err := s.validateLocked(job); err != nil {
+		return nil, err
 	}
 	fd, err := unix.FcntlInt(s.network.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
