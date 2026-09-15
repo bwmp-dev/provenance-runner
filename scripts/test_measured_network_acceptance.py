@@ -29,6 +29,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['--- PASS: TestMeasuredControlListener (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperServiceKernel (1s)' for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredInputDownloadFixture (1s)' for _ in range(3)]
         for case in ('TestMeasuredNetworkSessionPaperGuest', 'TestMeasuredNetworkSessionPaperGuestRefusal'):
             rows += [f'--- PASS: {case}/root-result-transfer (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSession'+case+' (1s)' for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss', 'PaperGuest', 'PaperGuestRefusal') for _ in range(3)]

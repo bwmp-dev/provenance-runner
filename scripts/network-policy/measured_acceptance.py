@@ -42,6 +42,7 @@ def validate_report(stdout, stderr, status):
     assert stdout.count('--- PASS: TestMeasuredControlListener ') == 3
     assert stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperServiceKernel ') == 3
+    assert stdout.count('--- PASS: TestMeasuredInputDownloadFixture ') == 3
     for case in ('TestMeasuredNetworkSessionPaperGuest', 'TestMeasuredNetworkSessionPaperGuestRefusal'):
         assert stdout.count(f'--- PASS: {case}/root-result-transfer ') == 3
     for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss', 'PaperGuest', 'PaperGuestRefusal'):
@@ -81,6 +82,9 @@ def main():
                         '-X github.com/bwmp-dev/provenance-runner/internal/buildinfo.Version=0.1.0-alpha',
                         '-o', str(work/'service.test'), './internal/measuredservice'],
                        cwd=repo, env=environment, check=True, timeout=180)
+        subprocess.run([args.go, 'test', '-c', '-o', str(work/'download.test'),
+                        './internal/provider/paper'], cwd=repo, env=environment,
+                       check=True, timeout=180)
         subprocess.run([args.go, 'build', '-o', str(work/'guest'), './scripts/network-policy/sentry'],
                        cwd=repo, env=environment, check=True, timeout=180)
         subprocess.run([args.go, 'build', '-o', str(work/'paper-helper'), './cmd/provenance-measured-paper'],
@@ -89,6 +93,25 @@ def main():
         runtime_name = 'provenance-measured-route-'+uuid.uuid4().hex
         created = []
         try:
+            download_name = 'provenance-measured-download-'+uuid.uuid4().hex
+            subprocess.run(['docker', 'create', '--name', download_name,
+                            '--network', 'none', '--read-only', '--memory', '512m',
+                            '--memory-swap', '512m', '--cpus', '1', '--pids-limit', '64',
+                            '--user', '65532:65532', '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m,mode=1777',
+                            '--mount', f'type=bind,src={work}/download.test,dst=/download.test,readonly',
+                            '--env', 'PROVENANCE_DISPOSABLE_DOWNLOAD_FIXTURE=1',
+                            '--entrypoint', '/download.test', args.image, '-test.v',
+                            '-test.run=^TestMeasuredInputDownloadFixture$', '-test.count=3',
+                            '-test.timeout=60s'], check=True, capture_output=True, timeout=60)
+            created.append(download_name)
+            download = subprocess.run(['docker', 'start', '--attach', download_name],
+                                      capture_output=True, text=True, timeout=75)
+            assert len(download.stdout) <= 65536 and len(download.stderr) <= 65536
+            assert download.returncode == 0, download.stderr[-4096:]
+            assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', download_name], text=True).strip() == '0', download.stdout[-4096:]
+            assert download.stdout.count('--- PASS: TestMeasuredInputDownloadFixture ') == 3
+            assert '--- SKIP:' not in download.stdout and '--- FAIL:' not in download.stdout
+            print(download.stdout, end='', flush=True)
             command = ['docker', 'create', '--name', build_name, '--network', 'none', '--read-only',
                        '--memory', '512m', '--cpus', '1', '--pids-limit', '64',
                        '--tmpfs', '/tmp:rw,exec,nosuid,size=128m',
@@ -116,9 +139,11 @@ def main():
                                     capture_output=True, text=True, timeout=560)
             assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
             print(result.stdout, end='')
-            validate_report(result.stdout, result.stderr, result.returncode)
+            validate_report(download.stdout + result.stdout, download.stderr + result.stderr, result.returncode)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]
             print(json.dumps({'measuredRoutedSentry': True, 'measuredRootService': True,
+                              'measuredWorkerDownloads': True,
+                              'downloadBinarySHA256': hashlib.sha256((work/'download.test').read_bytes()).hexdigest(),
                               'serviceBinarySHA256': hashlib.sha256((work/'service.test').read_bytes()).hexdigest(),
                               'preLaunchKernelPolicyObserved': True,
                               'closedMeasuredOCIAndGuestStorageQuotas': True,
