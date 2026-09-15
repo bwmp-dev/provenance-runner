@@ -3,6 +3,7 @@
 package controlchannel
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -29,5 +30,20 @@ func TestRootObservationReceiptCannotBeDecodedOrUseNonRootPeer(t *testing.T) {
 	}
 	if receipt, err := channel.ReceiveRootObservation(time.Now().Add(time.Second)); receipt != nil || err == nil {
 		t.Fatal("non-root peer supplied root observation")
+	}
+}
+
+func TestAwaitObservationRequiresBoundedLiveContext(t *testing.T) {
+	left, _ := pair(t, unix.SOCK_SEQPACKET)
+	channel, err := New(left, uint32(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet, err := channel.AwaitRootObservation(context.Background()); err == nil || packet != nil {
+		t.Fatal("unbounded preparation wait")
+	}
+	var absent *Channel
+	if packet, err := absent.AwaitRootObservation(nil); err == nil || packet != nil {
+		t.Fatal("absent preparation channel")
 	}
 }

@@ -127,9 +127,12 @@ func measuredRootTransferFixture(t *testing.T, job *p.JobSpecification, observat
 		if mode == "wrong-kind" {
 			kind = controlchannel.Result
 		}
-		sendErr := peer.Send(controlchannel.Packet{Kind: kind, Sequence: 1, Payload: payload}, time.Now().Add(3*time.Second))
+		sendErr := peer.Send(controlchannel.Packet{Kind: controlchannel.Preparing, Sequence: 1}, time.Now().Add(3*time.Second))
+		if sendErr == nil {
+			sendErr = peer.Send(controlchannel.Packet{Kind: kind, Sequence: 2, Payload: payload}, time.Now().Add(3*time.Second))
+		}
 		if sendErr == nil && mode == "result" {
-			sequence := uint64(2)
+			sequence := uint64(3)
 			for offset := 0; offset < len(result) && sendErr == nil; {
 				end := min(offset+controlchannel.MaximumPayload, len(result))
 				sendErr = peer.Send(controlchannel.Packet{Kind: controlchannel.Result, Sequence: sequence, Payload: result[offset:end]}, time.Now().Add(3*time.Second))

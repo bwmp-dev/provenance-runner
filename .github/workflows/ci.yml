@@ -76,6 +76,7 @@ jobs:
           if-no-files-found: error
 
   gvisor-smoke:
+    timeout-minutes: 15
     runs-on: [self-hosted, linux, x64]
     concurrency:
       group: "${{ github.repository }}-privileged-gvisor"

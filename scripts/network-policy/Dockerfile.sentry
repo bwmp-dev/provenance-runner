@@ -5,6 +5,13 @@ RUN CGO_ENABLED=0 GO111MODULE=off go build -trimpath -o /network-sentry-fixture 
 
 FROM python:3.13.7-alpine@sha256:9ba6d8cbebf0fb6546ae71f2a1c14f6ffd2fdab83af7fa5669734ef30ad48844
 RUN apk add --no-cache nftables iproute2 conntrack-tools curl
+RUN mkdir /opt/provenance-fixture \
+    && curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
+       --max-time 60 --max-filesize 478853 \
+       https://github.com/bwmp-dev/provenance/releases/download/testkit-v0.1.0-alpha.1/provenance-testkit-v0.1.0-alpha.1-f82dcbf8244354059731ba533f73909ed5528bbd-paper-probe-0.1.0.jar \
+       -o /opt/provenance-fixture/paper-probe.jar \
+    && echo '040062e4ea15fdffe3c37e4402b978527dd4864870edefe2c662209e12d63868  /opt/provenance-fixture/paper-probe.jar' | sha256sum -c - \
+    && chmod 0444 /opt/provenance-fixture/paper-probe.jar
 RUN curl --fail --location --silent --show-error \
     https://storage.googleapis.com/gvisor/releases/nightly/2026-08-30/x86_64/gvisor.tar.bz2 \
     -o /tmp/gvisor.tar.bz2 \

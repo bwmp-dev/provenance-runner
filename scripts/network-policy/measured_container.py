@@ -44,6 +44,7 @@ def main():
     (root/'mount').mkdir(mode=0o755)
     (root/'work').mkdir(mode=0o711)
     for source, target, mode in ((sys.argv[1], '/tmp/measured-route.test', 0o555),
+                                  ('/state-input/service.test', '/tmp/measured-service.test', 0o555),
                                   (sys.argv[2], str(root/'image.squashfs'), 0o444),
                                   ('/opt/gvisor/runsc', str(root/'runsc'), 0o555)):
         shutil.copyfile(source, target)
@@ -74,6 +75,20 @@ def main():
         os.chmod(loop, 0o444)
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
+        # Exercise the new composed service before the longer regression suite
+        # so provisioning failures surface promptly. Both remain mandatory.
+        service = subprocess.run(['/tmp/measured-service.test', '-test.v',
+                                  '-test.run=^TestMeasuredPaperServiceKernel$',
+                                  '-test.count=3', '-test.timeout=90s'],
+                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
+                                      'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
+                                 capture_output=True, text=True, timeout=100)
+        assert len(service.stdout) <= 65536 and len(service.stderr) <= 65536
+        print(service.stdout, end='', flush=True)
+        if service.returncode:
+            raise RuntimeError('measured root service fixture failed: '+service.stderr[-4096:])
+        assert '--- SKIP:' not in service.stdout
+        assert service.stdout.count('--- PASS: TestMeasuredPaperServiceKernel ') == 3
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
                                  '-test.run=^Test(MeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch|OwnedLaunch|OwnedNormal|OwnedGatedStartup|JournalRefusal|BundleRefusal|PreparedRefusal|LinkRefusal|LayoutRefusal|UplinkRefusal)|MeasuredBundleJournalKernelRecovery|MeasuredHostUplinkColdRecovery|MeasuredControlListener|MeasuredNetworkSession(Normal|RouterLoss|StartupRefusal|DNSLoss|DNSRefreshFailure|PreparationTimeout|ExecutionTimeout|ControllerResourceLoss|PaperGuest|PaperGuestRefusal))$',
                                  '-test.count=3', '-test.timeout=410s'],
@@ -81,7 +96,7 @@ def main():
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
                                      'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
                                 capture_output=True, text=True, timeout=420)
-        assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
+        assert len(result.stdout) + len(service.stdout) <= 65536 and len(result.stderr) <= 65536
         print(result.stdout, end='')
         if result.returncode:
             raise RuntimeError('measured routed fixture failed: '+result.stderr[-4096:])
