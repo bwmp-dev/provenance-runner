@@ -164,6 +164,9 @@ func archivePath(root, name string) (string, error) {
 }
 
 func materializeArchiveLink(root string, link pendingLink) error {
+	if err := ensureDescendant(root, link.path); err != nil {
+		return err
+	}
 	if link.target == "" || strings.ContainsRune(link.target, '\x00') || strings.Contains(link.target, `\`) || strings.HasPrefix(link.target, "/") {
 		return errors.New("link target is not a safe relative POSIX path")
 	}
@@ -180,10 +183,17 @@ func materializeArchiveLink(root string, link pendingLink) error {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(link.path), 0o700); err != nil {
+	if err := archiveLinkParent(root, filepath.Dir(link.path), true); err != nil {
 		return err
 	}
 	if link.typeflag == tar.TypeLink {
+		if err := archiveLinkParent(root, filepath.Dir(target), false); err != nil {
+			return err
+		}
+		info, err := os.Lstat(target)
+		if err != nil || !info.Mode().IsRegular() {
+			return errors.New("hardlink target is not a regular archive file")
+		}
 		return os.Link(target, link.path)
 	}
 	relativeTarget, err := filepath.Rel(filepath.Dir(link.path), target)
@@ -191,4 +201,36 @@ func materializeArchiveLink(root string, link pendingLink) error {
 		return err
 	}
 	return os.Symlink(relativeTarget, link.path)
+}
+
+// Extraction owns this unpublished temporary tree exclusively. Links are
+// materialized after files, but a prior link must never become a later link's
+// parent: lexical depth no longer describes a symlink-substituted directory.
+func archiveLinkParent(root, parent string, create bool) error {
+	relative, err := filepath.Rel(root, parent)
+	if err != nil || (relative != "." && ensureDescendant(root, parent) != nil) {
+		return errors.New("archive link parent outside root")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("archive root is not a real directory")
+	}
+	if relative == "." {
+		return nil
+	}
+	path := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		path = filepath.Join(path, component)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) && create {
+			if err := os.Mkdir(path, 0700); err != nil {
+				return err
+			}
+			info, err = os.Lstat(path)
+		}
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("archive link parent is not a real directory")
+		}
+	}
+	return nil
 }

@@ -32,3 +32,10 @@ dispatch, protected descriptor ownership, measured guest archive materialization
 secret/event handoff and real Paper acceptance remain required integration work.
 Tests verify signed-runtime identity, input roles/hashes, aggregate limits,
 immutable copies and malformed or swapped job inventories without running JARs.
+
+The shared runtime archive extractor also rejects link parents that are earlier
+symlinks, and requires hardlinks to reference regular files through real directory
+parents. This preserves the lexical containment assumption in its exclusively
+owned, unpublished temporary tree. Regression tests reproduced both old refusals
+being missing before the fix, then passed with the fix; a complete archive test
+also requires that failure publish no destination and leave no temporary tree.
