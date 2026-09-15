@@ -61,7 +61,7 @@ def main():
             subprocess.run(['docker', 'start', '--attach', build_name], check=True, timeout=60)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', build_name], text=True).strip() == '0'
             command = ['docker', 'create', '--name', runtime_name, '--privileged', '--network', 'none',
-                       '--read-only', '--memory', '1g', '--cpus', '2', '--pids-limit', '512',
+                       '--read-only', '--memory', '1g', '--memory-swap', '1g', '--cpus', '2', '--pids-limit', '273',
                        '--tmpfs', '/tmp:rw,exec,nosuid,size=768m',
                        '--mount', f'type=bind,src={repo},dst=/repo,readonly',
                        '--mount', f'type=bind,src={work}/gvisor.test,dst=/test-input,readonly',
@@ -76,6 +76,7 @@ def main():
             validate_report(result.stdout, result.stderr, result.returncode)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]
             print(json.dumps({'measuredRoutedSentry': True, 'preLaunchKernelPolicyObserved': True,
+                              'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,
                               'fixtureImage': args.image, 'builderSHA256': BUILDER_SHA,
