@@ -4,6 +4,7 @@ package gvisor
 
 import (
 	"context"
+	"crypto/sha256"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
+	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/proto"
 )
 
 func requireMeasuredBundleFixture(t *testing.T) {
@@ -310,6 +313,106 @@ func TestMeasuredBundleJournalKernelRecovery(t *testing.T) {
 			t.Fatal("bounded cleanup did not remain retryable")
 		}
 	})
+	t.Run("preparation-failure-is-job-local", func(t *testing.T) {
+		j, cgroups := openBundleFixture(t)
+		defer cgroups.Close()
+		defer j.close()
+		if j.recover(ctx) != nil {
+			t.Fatal("initial recovery")
+		}
+		b, err := j.create(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer j.cleanup(context.Background(), b)
+		input, _ := measuredFixtureInput(t, ctx)
+		bad := input
+		bad.SHA256 = sha256.Sum256([]byte("wrong"))
+		mapping := np.MappedIdentity{UID: 65532, GID: 65532, OverflowUID: 65533, OverflowGID: 65533}
+		root := filepath.Join("/tmp/bundle-input", job.Lease.JobId, ".measured-root")
+		command := measuredGuestCommand{Command: "/smoke"}
+		if b.prepare(ctx, job, command, root, mapping, []measuredInput{bad}, 2<<20) == nil || b.checkPrepared(mapping) == nil {
+			t.Fatal("bad input prepared or launched")
+		}
+		if b.prepare(ctx, job, command, root, mapping, []measuredInput{input}, 2<<20) == nil {
+			t.Fatal("failed preparation resumed")
+		}
+		otherJob := proto.Clone(job).(*runnerv1.JobSpecification)
+		otherJob.Lease.JobId = "80000000-0000-4000-8000-000000000001"
+		otherJob.Lease.LeaseId = "90000000-0000-4000-8000-000000000001"
+		otherJob.Attempt.AttemptId = "a0000000-0000-4000-8000-000000000001"
+		other, err := j.create(otherJob)
+		if err != nil {
+			t.Fatal("bad input poisoned unrelated admission")
+		}
+		defer j.cleanup(context.Background(), other)
+		otherMapping := np.MappedIdentity{UID: 65528, GID: 65528, OverflowUID: 65529, OverflowGID: 65529}
+		otherRoot := filepath.Join("/tmp/bundle-input", otherJob.Lease.JobId, ".measured-root")
+		if other.prepare(ctx, otherJob, command, otherRoot, otherMapping, []measuredInput{input}, 2<<20) != nil || other.checkPrepared(otherMapping) != nil {
+			t.Fatal("unrelated preparation failed")
+		}
+		if j.cleanup(ctx, b) != nil || other.checkPrepared(otherMapping) != nil {
+			t.Fatal("failed-job cleanup affected unrelated prepared job")
+		}
+	})
+	for _, kind := range []string{"configuration", "input", "identity", "private-root"} {
+		t.Run("prepared-drift-"+kind, func(t *testing.T) {
+			j, cgroups := openBundleFixture(t)
+			defer cgroups.Close()
+			defer j.close()
+			if j.recover(ctx) != nil {
+				t.Fatal("initial recovery")
+			}
+			b, err := j.create(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer j.cleanup(context.Background(), b)
+			input, _ := measuredFixtureInput(t, ctx)
+			mapping := np.MappedIdentity{UID: 65532, GID: 65532, OverflowUID: 65533, OverflowGID: 65533}
+			base := filepath.Join("/tmp/bundle-input", job.Lease.JobId)
+			if b.prepare(ctx, job, measuredGuestCommand{Command: "/smoke"}, filepath.Join(base, ".measured-root"), mapping, []measuredInput{input}, 2<<20) != nil || b.checkPrepared(mapping) != nil {
+				t.Fatal("positive preparation")
+			}
+			switch kind {
+			case "configuration":
+				if os.Chmod(filepath.Join(base, "config.json"), 0644) != nil {
+					t.Fatal("configuration drift fixture")
+				}
+			case "input":
+				if os.Chmod(filepath.Join(base, "inputs", "sample"), 0644) != nil {
+					t.Fatal("input drift fixture")
+				}
+			case "identity":
+				wrong := mapping
+				wrong.UID = 65530
+				if b.checkPrepared(wrong) == nil {
+					t.Fatal("foreign mapping accepted")
+				}
+			case "private-root":
+				path := filepath.Join(base, ".measured-root")
+				if os.Rename(path, path+"-old") != nil || os.Mkdir(path, 0700) != nil || os.Chown(path, int(mapping.UID), int(mapping.GID)) != nil {
+					t.Fatal("private root replacement fixture")
+				}
+			}
+			if b.checkPrepared(mapping) == nil {
+				t.Fatal("prepared identity drift accepted")
+			}
+			if kind == "configuration" {
+				if os.Chmod(filepath.Join(base, "config.json"), 0444) != nil {
+					t.Fatal("restore fixture mode")
+				}
+			}
+			if kind == "input" {
+				if os.Chmod(filepath.Join(base, "inputs", "sample"), 0444) != nil {
+					t.Fatal("restore fixture mode")
+				}
+			}
+			if b.checkPrepared(mapping) == nil {
+				t.Fatal("failed prepared proof resumed")
+			}
+		})
+	}
 }
 
 func bundleFixtureExited(fd int) (bool, error) {

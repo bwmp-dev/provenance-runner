@@ -14,6 +14,10 @@ checked before starting and again at gate release. Process-owner cleanup still
 retires only the process scope; the outer bundle journal preserves independent
 file ownership until subsequent bundle cleanup or cold recovery completes.
 
+The bundle must also have completed [closed preparation](measured-bundle-preparation.md).
+Startup and gate release recheck the sealed configuration/input identities and
+the exact prepared mapped identity; caller-provided OCI files are not accepted.
+
 The process independently retains the measured objects, uses the closed measured
 network-child command, creates private user/network/mount namespaces, and is born
 inside its owned cgroup. Before returning, it retains the direct child's kernel

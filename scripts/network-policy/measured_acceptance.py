@@ -35,10 +35,12 @@ def validate_report(stdout, stderr, status):
     assert '{"measuredJobJournalRetired": true}' in stdout
     assert '{"measuredBundleJournalRetired": true}' in stdout
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
-    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal'):
+    for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
     for suffix in ('', '/live-scope', '/retired-scope', '/bounded-no-follow-cleanup', '/foreign-directory-and-record-refusal', '/replaced-directory-refusal', '/mount-boundary-refusal'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery'+suffix+' ') == 3
+    for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root'):
+        assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/'+suffix+' ') == 3
 
 
 def main():
@@ -103,6 +105,7 @@ def main():
                               'ownedMeasuredLaunchAndAuthorityTermination': True,
                               'durableMeasuredJobScopeRetirement': True,
                               'durableMeasuredBundleRecoveryAndRetirement': True,
+                              'closedControllerBundlePreparation': True,
                               'bornInsideCgroup': True, 'retainedKernelResourceLimits': True,
                               'realProtectedSquashFS': True, 'authorityWithdrawalAndExpiry': True,
                               'liveEndpointsDuringDenial': True, 'noResume': True, 'repetitions': 3,
