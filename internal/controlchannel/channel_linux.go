@@ -33,6 +33,7 @@ const (
 	Result
 	Observation
 	Completion
+	Preparing
 )
 
 // Packet files are borrowed for Send and owned by the recipient after Receive.
@@ -101,7 +102,16 @@ func validDeadline(deadline time.Time) bool {
 	return remaining > 0 && remaining <= 30*time.Second
 }
 
-func validKind(k Kind) bool { return k >= Start && k <= Completion }
+func validKind(k Kind) bool { return k >= Start && k <= Preparing }
+
+// PeerUID reports the provisioned identity only while kernel peer validation
+// still succeeds. It is never taken from a request payload.
+func (c *Channel) PeerUID() (uint32, error) {
+	if c == nil || !c.validPeer() {
+		return 0, ErrChannel
+	}
+	return c.peer, nil
+}
 
 func readonlyRegular(fd int) bool {
 	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)

@@ -47,7 +47,9 @@ func controlObservationFixture(path, mode string) {
 		panic(err)
 	}
 	defer channel.Close()
-	packet, err := channel.ReceiveRootObservation(time.Now().Add(3 * time.Second))
+	preparation, stopPreparation := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopPreparation()
+	packet, err := channel.AwaitRootObservation(preparation)
 	if mode == "wrong-kind" {
 		if err == nil || packet != nil {
 			panic("guest result kind became observation")

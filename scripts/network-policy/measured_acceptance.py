@@ -41,6 +41,7 @@ def validate_report(stdout, stderr, status):
     assert stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
     assert stdout.count('--- PASS: TestMeasuredControlListener ') == 3
     assert stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
+    assert stdout.count('--- PASS: TestMeasuredPaperServiceKernel ') == 3
     for case in ('TestMeasuredNetworkSessionPaperGuest', 'TestMeasuredNetworkSessionPaperGuestRefusal'):
         assert stdout.count(f'--- PASS: {case}/root-result-transfer ') == 3
     for case in ('Normal', 'RouterLoss', 'StartupRefusal', 'DNSLoss', 'DNSRefreshFailure', 'PreparationTimeout', 'ExecutionTimeout', 'ControllerResourceLoss', 'PaperGuest', 'PaperGuestRefusal'):
@@ -76,6 +77,10 @@ def main():
                         '-X github.com/bwmp-dev/provenance-runner/internal/buildinfo.Version=0.1.0-alpha',
                         '-o', str(work/'gvisor.test'), './internal/provider/gvisor'],
                        cwd=repo, env=environment, check=True, timeout=180)
+        subprocess.run([args.go, 'test', '-c', '-ldflags',
+                        '-X github.com/bwmp-dev/provenance-runner/internal/buildinfo.Version=0.1.0-alpha',
+                        '-o', str(work/'service.test'), './internal/measuredservice'],
+                       cwd=repo, env=environment, check=True, timeout=180)
         subprocess.run([args.go, 'build', '-o', str(work/'guest'), './scripts/network-policy/sentry'],
                        cwd=repo, env=environment, check=True, timeout=180)
         subprocess.run([args.go, 'build', '-o', str(work/'paper-helper'), './cmd/provenance-measured-paper'],
@@ -108,12 +113,14 @@ def main():
             subprocess.run(command, check=True, capture_output=True, timeout=30)
             created.append(runtime_name)
             result = subprocess.run(['docker', 'start', '--attach', runtime_name],
-                                    capture_output=True, text=True, timeout=440)
+                                    capture_output=True, text=True, timeout=560)
             assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
             print(result.stdout, end='')
             validate_report(result.stdout, result.stderr, result.returncode)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]
-            print(json.dumps({'measuredRoutedSentry': True, 'preLaunchKernelPolicyObserved': True,
+            print(json.dumps({'measuredRoutedSentry': True, 'measuredRootService': True,
+                              'serviceBinarySHA256': hashlib.sha256((work/'service.test').read_bytes()).hexdigest(),
+                              'preLaunchKernelPolicyObserved': True,
                               'closedMeasuredOCIAndGuestStorageQuotas': True,
                               'descriptorOnlyHashVerifiedInputs': True,
                               'exactChildObservationAndMismatchWithdrawal': True,
@@ -136,7 +143,7 @@ def main():
             # On interruption, allow the fixture's bounded process to finish its
             # owned loop cleanup instead of force-killing it mid-mount.
             for name in reversed(created):
-                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=440)
+                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=560)
                 subprocess.run(['docker', 'rm', name], capture_output=True, check=True, timeout=15)
 
 
