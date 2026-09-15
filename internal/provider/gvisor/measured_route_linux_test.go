@@ -126,9 +126,13 @@ func TestMeasuredAuthorityRouteSentryExpiry(t *testing.T) {
 	testMeasuredAuthorityRouteSentry(t, "expiry")
 }
 
+func TestMeasuredAuthorityRouteSentryChildMismatch(t *testing.T) {
+	testMeasuredAuthorityRouteSentry(t, "child-mismatch")
+}
+
 func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	t.Helper()
-	if authorityMode != "withdrawal" && authorityMode != "expiry" {
+	if authorityMode != "withdrawal" && authorityMode != "expiry" && authorityMode != "child-mismatch" {
 		t.Fatal("unknown measured authority case")
 	}
 	if os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
@@ -529,7 +533,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if probe.Close() != nil || workload.Validate(job) != nil {
 		t.Fatal("closing resource proof killed or invalidated owned child")
 	}
-	if err := guard.ObserveInstalled(ctx, specification); err != nil {
+	if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 		t.Fatal("pre-launch kernel observation", err)
 	}
 	if _, err := release.Write([]byte("s")); err != nil {
@@ -554,7 +558,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Fatal("live runtime left original resource boundary", err)
 	}
 	if guard != nil {
-		if err := guard.ObserveInstalled(ctx, specification); err != nil {
+		if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 			t.Fatal("live Sentry authority/kernel observation failed", err)
 		}
 	}
@@ -589,7 +593,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		t.Fatal("native renewal broke guest flows")
 	}
 	if guard != nil {
-		if err := guard.ObserveInstalled(ctx, specification); err != nil {
+		if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 			t.Fatal("renewed live Sentry authority/kernel observation failed", err)
 		}
 	}
@@ -598,6 +602,18 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		case <-guard.Done():
 		case <-time.After(8 * time.Second):
 			t.Fatal("authority expiry required acknowledgement polling")
+		}
+	} else if authorityMode == "child-mismatch" {
+		// Both are real living retained children with the same job identity.
+		// The router cannot stand in for the actual measured workload owner.
+		if router.Validate(job) != nil || workload.Validate(job) != nil {
+			t.Fatal("child mismatch fixture lost its live owners")
+		}
+		if guard.ObserveInstalledForChild(ctx, specification, router) == nil {
+			t.Fatal("same-job foreign child accepted")
+		}
+		if guard.ObserveInstalledForChild(ctx, specification, workload) == nil {
+			t.Fatal("correct child revived failed observation")
 		}
 	} else {
 		receipt.NetworkAuthorityV2.State = runnerv1.NetworkAuthorityStateV2_NETWORK_AUTHORITY_STATE_V2_WITHDRAWN

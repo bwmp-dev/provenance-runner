@@ -54,7 +54,7 @@ def main():
         run('mount', '-t', 'squashfs', '-o', 'ro,nosuid,nodev', loop, str(root/'mount'))
         mounted = True
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',
-                                 '-test.run=^TestMeasuredAuthorityRouteSentry(Withdrawal|Expiry)$',
+                                 '-test.run=^TestMeasuredAuthorityRouteSentry(Withdrawal|Expiry|ChildMismatch)$',
                                  '-test.count=3', '-test.timeout=150s'],
                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
@@ -65,7 +65,7 @@ def main():
         if result.returncode:
             raise RuntimeError('measured routed fixture failed: '+result.stderr[-4096:])
         assert '--- SKIP:' not in result.stdout
-        for case in ('Withdrawal', 'Expiry'):
+        for case in ('Withdrawal', 'Expiry', 'ChildMismatch'):
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
     finally:
         if mounted:

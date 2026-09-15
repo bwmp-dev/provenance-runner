@@ -20,8 +20,11 @@ missing or additional bytes refuse execution, with a 30-second deadline. No
 namespace or evidence descriptors are inherited by the executed runtime.
 
 Before releasing that gate, a production controller must retain/prove ownership
-of the child, install and observe its current authorized route, and place the
-whole workload/runtime/gofer tree in the exact aggregate resource boundary.
+of the child, install and observe its current authorized route using
+`ObserveInstalledForChild` with that exact retained workload owner, and create
+the whole workload/runtime/gofer tree inside the exact aggregate resource
+boundary from birth. A job-only observation or moving an already allocating
+process into a cgroup is insufficient.
 The command ignores runsc-managed cgroups because that outside aggregate boundary
 is the controller's responsibility. The command alone proves none of these
 controller obligations and is not exposed as a privileged service endpoint.

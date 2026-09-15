@@ -228,6 +228,14 @@ func TestRetainedRouteKernelActuation(t *testing.T) {
 			if err := route.ObserveInstalled(context.Background(), job); err != nil {
 				t.Fatal("owned installed state not observed", err)
 			}
+			for _, other := range []*ChildNamespaces{nil, router, {job: job, mapping: workload.mapping}} {
+				if route.observeInstalled(context.Background(), job, other, true) == nil {
+					t.Fatal("missing, foreign, or label-only workload owner accepted")
+				}
+			}
+			if err := route.observeInstalled(context.Background(), job, workload, true); err != nil {
+				t.Fatal("exact retained workload owner refused", err)
+			}
 			if err := route.ObserveInstalled(context.Background(), "20000000-0000-4000-8000-000000000001"); err == nil {
 				t.Fatal("foreign observation accepted")
 			}

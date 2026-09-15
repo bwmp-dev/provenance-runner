@@ -14,6 +14,19 @@ import (
 // Failure withdraws the owning route. This is an installation/authority check,
 // not proof of a measured rootfs, a Sentry launch, or completed cleanup.
 func (s *AuthorityRoute) ObserveInstalled(ctx context.Context, job *p.JobSpecification) error {
+	return s.observeInstalled(ctx, job, nil, false)
+}
+
+// ObserveInstalledForChild additionally binds the observation to the exact
+// retained workload owner used to construct this route. A matching job label,
+// PID, mapping, or separately retained namespace is not a substitute. Failure
+// permanently withdraws this authority, including a nil or foreign owner.
+// This Linux-only launch check does not grant cleanup or resource authority.
+func (s *AuthorityRoute) ObserveInstalledForChild(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces) error {
+	return s.observeInstalled(ctx, job, child, true)
+}
+
+func (s *AuthorityRoute) observeInstalled(ctx context.Context, job *p.JobSpecification, child *ChildNamespaces, requireChild bool) error {
 	if err := s.CheckJob(job); err != nil {
 		return err
 	}
@@ -33,7 +46,7 @@ func (s *AuthorityRoute) ObserveInstalled(ctx context.Context, job *p.JobSpecifi
 		if s.route.withdrawn || s.route.ctx.Err() != nil || !time.Now().Before(s.route.rules.ExpiresAt()) {
 			return ErrExpired
 		}
-		if err := native.ObserveInstalled(ctx, s.authority.lease.JobId); err != nil {
+		if err := native.observeInstalled(ctx, s.authority.lease.JobId, child, requireChild); err != nil {
 			return err
 		}
 		if _, err := s.authority.Deadline(time.Now()); err != nil {
