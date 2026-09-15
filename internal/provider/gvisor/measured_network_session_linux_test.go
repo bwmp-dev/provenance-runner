@@ -96,20 +96,40 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		c.Tools.IP = np.ProtectedRouteTool{}
 	}
 	var session *measuredNetworkSession
+	retainCleanup := func() {
+		if session != nil {
+			t.Cleanup(func() {
+				if session.Close(context.Background()) != nil {
+					t.Error("session cleanup")
+				}
+			})
+		}
+	}
 	if mode == "session-normal" {
 		// Retire the calling OS thread, not the controller process. Owned
 		// children must remain alive until their own lifetime is ended.
 		finished := make(chan struct{})
 		var caller *os.File
-		go func() {
+		var start func()
+		start = func() {
 			runtime.LockOSThread() // Deliberately no Unlock: exiting retires it.
+			if unix.Gettid() == os.Getpid() {
+				// Go parks m0 rather than retiring it. Keep it occupied until
+				// the actual caller has run on another locked OS thread.
+				go start()
+				<-finished
+				runtime.UnlockOSThread()
+				return
+			}
 			defer close(finished)
 			caller, err = os.Open("/proc/self/task/" + strconv.Itoa(unix.Gettid()))
 			if err == nil {
 				session, err = startMeasuredSession(ctx, c)
 			}
-		}()
+		}
+		go start()
 		<-finished
+		retainCleanup()
 		if caller != nil {
 			defer caller.Close()
 			deadline := time.Now().Add(time.Second)
@@ -129,13 +149,7 @@ func testMeasuredSessionFixture(t *testing.T, ctx context.Context, mode string, 
 		}
 	} else {
 		session, err = startMeasuredSession(ctx, c)
-	}
-	if session != nil {
-		t.Cleanup(func() {
-			if session.Close(context.Background()) != nil {
-				t.Error("session cleanup")
-			}
-		})
+		retainCleanup()
 	}
 	in.Close()
 	out.Close()
