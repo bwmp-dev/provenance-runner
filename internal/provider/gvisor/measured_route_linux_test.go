@@ -11,6 +11,7 @@ import (
 	"fmt"
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	"golang.org/x/net/dns/dnsmessage"
 	"io"
 	"net"
@@ -210,6 +211,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		Attempt:         &runnerv1.AttemptIdentity{AttemptId: "40000000-0000-4000-8000-000000000001", ReleaseCandidateId: "50000000-0000-4000-8000-000000000001", MatrixEntryId: "60000000-0000-4000-8000-000000000001", AttemptNumber: 1},
 		EffectivePolicy: policy, Hashes: &runnerv1.JobHashes{Policy: &runnerv1.Digest{Algorithm: runnerv1.DigestAlgorithm_DIGEST_ALGORITHM_SHA256, Value: digest[:]}},
 	}
+	evidenceContext := measuredEvidenceFixture(t, specification)
 	parent, err := os.Open("/sys/fs/cgroup/provenance-fixture-jobs")
 	if err != nil {
 		t.Fatal(err)
@@ -812,6 +814,33 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	if err := resources.ValidateForChild(specification, workload); err != nil {
 		t.Fatal("live runtime left original resource boundary", err)
 	}
+	observation, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard)
+	if launchOwner != nil {
+		observation, err = launchOwner.ObserveRuntime(ctx)
+	}
+	if err != nil {
+		t.Fatal("live network runtime observation", err)
+	}
+	proof, err := terminalevidence.BuildObservedNetwork(evidenceContext, "runner-fixture", nil, observation)
+	if err != nil || terminalevidence.ValidateFrozenV2(proof, specification, "runner-fixture") != nil || !bytes.Contains(proof.GetCanonicalJson(), []byte(`"networkMode":"allowlist"`)) || !bytes.Contains(proof.GetCanonicalJson(), []byte(`"completeness":"partial"`)) {
+		t.Fatal("measured network terminal evidence", err)
+	}
+	unsealed, err := observation.SnapshotFor(specification.Lease, specification.Attempt, specification.Hashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := terminalevidence.Build(evidenceContext, "runner-fixture", nil, &unsealed); err == nil {
+		t.Fatal("unsealed projection minted new evidence")
+	}
+	foreignEvidenceJob := proto.Clone(specification).(*runnerv1.JobSpecification)
+	foreignEvidenceJob.Attempt.AttemptId = "70000000-0000-4000-8000-000000000002"
+	foreignContext, err := terminalevidence.NewContextV2(foreignEvidenceJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := terminalevidence.BuildObservedNetwork(foreignContext, "runner-fixture", nil, observation); err == nil {
+		t.Fatal("observed runtime reassigned to another attempt")
+	}
 	if guard != nil {
 		if err := guard.ObserveInstalledForChild(ctx, specification, workload); err != nil {
 			t.Fatal("live Sentry authority/kernel observation failed", err)
@@ -923,6 +952,13 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 	}
 	if err := guard.CheckJob(specification); err == nil {
 		t.Fatal("native withdrawn authority accepted job")
+	}
+	if resumed, err := lease.ObserveNetwork(ctx, specification, workload, privateRoot, resources, guard); resumed != nil || err == nil {
+		t.Fatal("withdrawn runtime produced a fresh observation")
+	}
+	historical, err := terminalevidence.BuildObservedNetwork(evidenceContext, "runner-fixture", nil, observation)
+	if err != nil || !bytes.Equal(historical.GetCanonicalJson(), proof.GetCanonicalJson()) {
+		t.Fatal("historical observation changed during cleanup")
 	}
 	var tables struct {
 		Items []map[string]json.RawMessage `json:"nftables"`

@@ -173,6 +173,9 @@ func newContext(job *runnerv1.JobSpecification, v2 bool) (*Context, error) {
 		return nil, ErrInvalid
 	}
 	c := &Context{binding: b, requested: map[string]any{"artifactSha256": artifact, "configurationSha256": configuration, "environmentSha256": environment, "policySha256": policy}, planned: map[string]planned{}}
+	c.measurementLease = proto.Clone(lease).(*runnerv1.LeaseIdentity)
+	c.measurementAttempt = proto.Clone(attempt).(*runnerv1.AttemptIdentity)
+	c.measurementHashes = proto.Clone(h).(*runnerv1.JobHashes)
 	if networkV2 {
 		maximum, err := configurationNetworkMaximumV2(job.NormalizedConfigurationJson)
 		if err != nil || !networkpolicy.WithinLocalMaximumV2(job.EffectivePolicy.NetworkV2, maximum) {
