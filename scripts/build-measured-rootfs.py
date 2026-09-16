@@ -231,6 +231,23 @@ def install_paper_guest(helper, expected, root, uid, gid):
             raise Invalid("Paper guest copy changed")
     os.chown(target, uid, gid)
     os.chmod(target, 0o555)
+    install_secret_mountpoint(root, uid, gid)
+
+
+def install_secret_mountpoint(root, uid, gid):
+    # A fixed empty image target, not host storage or a caller-chosen mount.
+    # Inspect each ancestor before touching descendants, including broken links.
+    for name in ('run', 'run/provenance', 'run/provenance/test-secrets'):
+        target = root / name
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            raise Invalid("unsafe secret mountpoint")
+        if not target.exists():
+            target.mkdir(mode=0o755)
+            os.chown(target, uid, gid)
+        if target.stat().st_mode & 0o7777 != 0o755:
+            raise Invalid("invalid secret mountpoint permissions")
+        if name == 'run/provenance/test-secrets' and any(target.iterdir()):
+            raise Invalid("nonempty secret mountpoint")
 
 
 def build(args):

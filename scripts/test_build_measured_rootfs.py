@@ -16,6 +16,38 @@ spec.loader.exec_module(builder)
 
 
 class ImageBuilderTests(unittest.TestCase):
+    def test_closed_secret_mountpoint(self):
+        for case in ('valid', 'symlink-parent', 'symlink-target', 'file-parent', 'nonempty', 'writable'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / 'root'
+                root.mkdir()
+                outside = Path(directory) / 'outside'
+                outside.mkdir()
+                if case == 'symlink-parent':
+                    (root / 'run').symlink_to(outside, target_is_directory=True)
+                elif case == 'file-parent':
+                    (root / 'run').write_bytes(b'preserve')
+                elif case in ('symlink-target', 'nonempty', 'writable'):
+                    (root / 'run/provenance').mkdir(parents=True, mode=0o755)
+                    target = root / 'run/provenance/test-secrets'
+                    if case == 'symlink-target':
+                        target.symlink_to(outside, target_is_directory=True)
+                    else:
+                        target.mkdir(mode=0o755)
+                        if case == 'nonempty':
+                            (target / 'preserve').write_bytes(b'preserve')
+                        else:
+                            target.chmod(0o777)
+                if case == 'valid':
+                    builder.install_secret_mountpoint(root, os.getuid(), os.getgid())
+                    target = root / 'run/provenance/test-secrets'
+                    self.assertEqual(0o755, target.stat().st_mode & 0o7777)
+                    self.assertEqual([], list(target.iterdir()))
+                else:
+                    with self.assertRaises(builder.Invalid):
+                        builder.install_secret_mountpoint(root, os.getuid(), os.getgid())
+                self.assertEqual([], list(outside.iterdir()))
+
     def paper_guest(self):
         # ELF-shaped inert bytes: the builder never executes this input.
         value = bytearray(120)
@@ -47,6 +79,7 @@ class ImageBuilderTests(unittest.TestCase):
                         target = root / "provenance-measured-paper"
                         self.assertEqual(bytes(value), target.read_bytes())
                         self.assertEqual(0o555, target.stat().st_mode & 0o777)
+                        self.assertEqual([], list((root / 'run/provenance/test-secrets').iterdir()))
                     else:
                         with self.assertRaises((builder.Invalid, FileExistsError)):
                             builder.install_paper_guest(helper, expected, root, os.getuid(), os.getgid())
