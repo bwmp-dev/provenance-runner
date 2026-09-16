@@ -52,3 +52,30 @@ resource limits, output bounds and retirement checks are unchanged.
 
 These tests do not establish production provisioning, full gateway-to-Paper
 composition or live scheduling acceptance. Those remain activation gates.
+
+### Local integration observations, 2026-09-16
+
+The pre-integration capability worktree passed the complete disposable kernel
+suite, including three repetitions of root maximum queries, malformed-response
+refusals, secret capability checks and owned resource retirement. Its service
+binary was `2cf66576d649fe5fb1ad661a4d7e5756f22eb012855ff0b3717f1d65f048c01f`,
+kernel-test binary
+`8393c9f529bdf27d8e2730d9d5fa56121727d715578ba6ee2f428511ac1b2e50`,
+and synthetic root image
+`bfd8b374ede7c1f535cab436d68d68875331eb2efcc35c9eae8cbd377ef98071`.
+
+Three real Paper 1.21.8/build 60 executions also passed with the synthetic
+secret fixture, including read-only injection, raw/encoded output redaction and
+retirement. That run used the same service binary, worker binary
+`d93e17d26cdd8bdb09fb5615eea52185bb5104551aa008b88ed15e28f96bed5d`,
+root image `6d0a79fcd156c39a1b362cc4295367989ef72ccbb6a475aad399228b3211c32e`,
+and secret target
+`b84160a378c4e0eaa5f8ada6b0b05a825791c2baf89d11aff5304bf3f923a4b1`.
+These are local build observations, not released binary attestations.
+
+After consolidation onto main `261fae5e730f8c99a36b404ba9bd7038888d7c2f`,
+the full Go race suite, vet, four Python acceptance-driver tests and shell syntax
+checks passed. Publication remains paused for investigation of main's
+intermittent worker CI failure; none of these local passes supersedes that
+failed check. Actual isolated no-network-v2 acceptance, full gateway-to-Paper
+composition and production activation remain outstanding.
