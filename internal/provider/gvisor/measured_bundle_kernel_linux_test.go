@@ -41,6 +41,10 @@ func requireMeasuredBundleFixture(t *testing.T) {
 }
 
 func openBundleFixture(t *testing.T) (*measuredBundleJournal, *np.JobCgroupJournal) {
+	return openBundleSecretFixture(t, nil)
+}
+
+func openBundleSecretFixture(t *testing.T, secrets *os.File) (*measuredBundleJournal, *np.JobCgroupJournal) {
 	t.Helper()
 	var files []*os.File
 	for _, path := range []string{"/sys/fs/cgroup/provenance-fixture-jobs", "/state-input/journal", "/tmp/bundle-input", "/state-input/bundle-journal"} {
@@ -59,7 +63,12 @@ func openBundleFixture(t *testing.T) (*measuredBundleJournal, *np.JobCgroupJourn
 	if err != nil {
 		t.Fatal(err)
 	}
-	j, err := openMeasuredBundleJournal(files[2], files[3], cgroups)
+	var j *measuredBundleJournal
+	if secrets == nil {
+		j, err = openMeasuredBundleJournal(files[2], files[3], cgroups)
+	} else {
+		j, err = OpenMeasuredBundleJournalWithSecrets(files[2], files[3], secrets, cgroups)
+	}
 	if err != nil {
 		cgroups.Close()
 		t.Fatal(err)
@@ -122,6 +131,7 @@ func TestMeasuredBundleCrashHelper(t *testing.T) {
 func TestMeasuredBundleJournalKernelRecovery(t *testing.T) {
 	requireMeasuredBundleFixture(t)
 	t.Run("sealed-secret-tmpfs-materialization", measuredSecretStorageFixture)
+	t.Run("secret-journal-recovery", measuredSecretJournalFixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	job := measuredSpecJob(t)

@@ -24,29 +24,37 @@ import (
 var measuredBundleID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type measuredBundleRecord struct {
-	Version   int    `json:"version"`
-	Job       string `json:"job"`
-	Lease     string `json:"lease"`
-	Execution string `json:"execution"`
-	Attempt   string `json:"attempt"`
-	Policy    string `json:"policy"`
-	ParentDev uint64 `json:"parentDev"`
-	ParentIno uint64 `json:"parentIno"`
-	BundleDev uint64 `json:"bundleDev"`
-	BundleIno uint64 `json:"bundleIno"`
+	Version         int    `json:"version"`
+	Job             string `json:"job"`
+	Lease           string `json:"lease"`
+	Execution       string `json:"execution"`
+	Attempt         string `json:"attempt"`
+	Policy          string `json:"policy"`
+	ParentDev       uint64 `json:"parentDev"`
+	ParentIno       uint64 `json:"parentIno"`
+	BundleDev       uint64 `json:"bundleDev"`
+	BundleIno       uint64 `json:"bundleIno"`
+	SecretBoot      string `json:"secretBoot,omitempty"`
+	SecretParentDev uint64 `json:"secretParentDev,omitempty"`
+	SecretParentIno uint64 `json:"secretParentIno,omitempty"`
+	SecretDev       uint64 `json:"secretDev,omitempty"`
+	SecretIno       uint64 `json:"secretIno,omitempty"`
 }
 
 // This journal is private to the trusted controller. Its recovery first drains
 // the dedicated cgroup journal, then removes only durably owned bundles. Neither
 // recovery nor a bundle descriptor restores runnable authority or capacity.
 type measuredBundleJournal struct {
-	mu                   sync.Mutex
-	parent, state, lock  *os.File
-	cgroups              *np.JobCgroupJournal
-	parentDev, parentIno uint64
-	active               map[string]*measuredBundle
-	controller           *measuredController
-	ready, closed        bool
+	mu                               sync.Mutex
+	parent, state, lock              *os.File
+	cgroups                          *np.JobCgroupJournal
+	parentDev, parentIno             uint64
+	active                           map[string]*measuredBundle
+	controller                       *measuredController
+	ready, closed                    bool
+	secretParent                     *os.File
+	secretBoot                       string
+	secretParentDev, secretParentIno uint64
 }
 
 type measuredBundle struct {
@@ -151,6 +159,9 @@ func decodeMeasuredBundleRecord(raw []byte, name string, owned bool) (measuredBu
 	if name != r.Job+suffix || (owned && (r.BundleDev == 0 || r.BundleIno == 0)) || (!owned && (r.BundleDev != 0 || r.BundleIno != 0)) {
 		return r, errMeasuredBundle
 	}
+	if !validMeasuredSecretRecord(r, owned) {
+		return r, errMeasuredBundle
+	}
 	canonical, err := json.Marshal(r)
 	if err != nil || !bytes.Equal(raw, append(canonical, '\n')) {
 		return r, errMeasuredBundle
@@ -233,6 +244,16 @@ func (j *measuredBundleJournal) createForController(job *p.JobSpecification, con
 	}
 	r := measuredBundleRecord{Version: 1, Job: job.Lease.JobId, Lease: job.Lease.LeaseId, Execution: job.Lease.ExecutionId, Attempt: job.Attempt.AttemptId,
 		Policy: hex.EncodeToString(job.Hashes.Policy.Value), ParentDev: j.parentDev, ParentIno: j.parentIno}
+	if j.secretParent != nil {
+		if !j.secretParentValid() {
+			return nil, errMeasuredBundle
+		}
+		r.SecretBoot, r.SecretParentDev, r.SecretParentIno = j.secretBoot, j.secretParentDev, j.secretParentIno
+		var st unix.Stat_t
+		if unix.Fstatat(int(j.secretParent.Fd()), r.Job, &st, unix.AT_SYMLINK_NOFOLLOW) != unix.ENOENT {
+			return nil, errMeasuredBundle
+		}
+	}
 	if _, ok := j.active[r.Job]; ok {
 		return nil, errMeasuredBundle
 	}
@@ -257,6 +278,10 @@ func (j *measuredBundleJournal) createForController(job *p.JobSpecification, con
 		return nil, errMeasuredBundle
 	}
 	r.BundleDev, r.BundleIno = uint64(st.Dev), st.Ino
+	if j.createSecretDirectory(&r) != nil {
+		dir.Close()
+		return nil, errMeasuredBundle
+	}
 	if j.writeRecord(r, true) != nil {
 		dir.Close()
 		return nil, errMeasuredBundle
@@ -293,6 +318,10 @@ func (j *measuredBundleJournal) cleanup(ctx context.Context, b *measuredBundle) 
 	if b.scope != nil && j.cgroups.Cleanup(ctx, b.scope) != nil {
 		j.ready = false
 		return errMeasuredBundle
+	}
+	if err := j.removeSecretDirectory(ctx, b.record, true); err != nil {
+		j.ready = false
+		return err
 	}
 	if err := j.removeDirectory(ctx, b.record, true); err != nil {
 		j.ready = false
@@ -336,8 +365,13 @@ func (j *measuredBundleJournal) checkLocked(b *measuredBundle, job *p.JobSpecifi
 	}
 	expected := b.record
 	expected.BundleDev, expected.BundleIno = 0, 0
+	expected.SecretDev, expected.SecretIno = 0, 0
 	intent, err := j.readRecord(b.record.Job+".intent.json", false)
 	if err != nil || intent != expected {
+		j.ready = false
+		return errMeasuredBundle
+	}
+	if j.checkSecretDirectory(b.record) != nil {
 		j.ready = false
 		return errMeasuredBundle
 	}
@@ -441,9 +475,13 @@ func (j *measuredBundleJournal) recoverForController(ctx context.Context, contro
 	}
 	for id, r := range owned {
 		r.BundleDev, r.BundleIno = 0, 0
+		r.SecretDev, r.SecretIno = 0, 0
 		if intents[id] != r {
 			return errMeasuredBundle
 		}
+	}
+	if j.checkSecretChildren(intents) != nil {
+		return errMeasuredBundle
 	}
 	view, err = openBundleAt(j.parent, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
@@ -472,7 +510,7 @@ func (j *measuredBundleJournal) recoverForController(ctx context.Context, contro
 		if !isOwned {
 			r = intents[id]
 		}
-		if j.removeDirectory(ctx, r, isOwned) != nil || j.retire(r) != nil {
+		if j.removeSecretDirectory(ctx, r, isOwned) != nil || j.removeDirectory(ctx, r, isOwned) != nil || j.retire(r) != nil {
 			return errMeasuredBundle
 		}
 	}
@@ -495,6 +533,9 @@ func (j *measuredBundleJournal) close() error {
 	j.closed = true
 	j.ready = false
 	err1, err2, err3 := j.lock.Close(), j.state.Close(), j.parent.Close()
+	if j.secretParent != nil && j.secretParent.Close() != nil {
+		return errMeasuredBundle
+	}
 	if err1 != nil || err2 != nil || err3 != nil {
 		return errMeasuredBundle
 	}

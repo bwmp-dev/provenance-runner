@@ -40,6 +40,8 @@ def validate_report(stdout, stderr, status):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
     for case in ('success', 'expired', 'cancelled', 'bad-name', 'duplicate', 'oversize', 'persistent'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' ') == 3
+    for case in ('normal', 'cold', 'foreign', 'intent-only', 'replaced', 'wrong-boot', 'wrong-parent'):
+        assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/secret-journal-recovery/'+case+' ') == 3
     assert stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
     assert stdout.count('--- PASS: TestMeasuredControlListener ') == 3
     assert stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
