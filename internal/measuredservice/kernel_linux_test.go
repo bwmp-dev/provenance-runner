@@ -428,6 +428,9 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		if realPaper {
 			command.Args[len(command.Args)-1] = "-test.timeout=290s"
 			command.Env = append(command.Env, "PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE=1")
+			if os.Getenv("PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE") == "1" {
+				command.Env = append(command.Env, "PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE=1", "PROVENANCE_DISPOSABLE_GATEWAY_ROOTFS="+lease.Snapshot().RootFS.SHA256)
+			}
 		}
 	}
 	command.ExtraFiles = files
@@ -452,6 +455,12 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	clientErr := <-clientDone
 	if (serveErr != nil) != (clientMode != "complete" && clientMode != "secrets" && clientMode != "reject-events") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
+	}
+	if realPaper && os.Getenv("PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE") == "1" {
+		if strings.Count(diagnostic.String(), "MEASURED_GATEWAY_PAPER_TERMINAL_OK") != 1 {
+			t.Fatal("gateway terminal acceptance marker missing")
+		}
+		t.Log("MEASURED_GATEWAY_PAPER_TERMINAL_OK")
 	}
 	capabilityMode := "service-secrets-disabled"
 	if secrets {

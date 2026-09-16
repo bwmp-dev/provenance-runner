@@ -13,6 +13,11 @@ class RealPaperAcceptanceTests(unittest.TestCase):
         rows += ['{"'+marker+'": true}' for marker in ('measuredRealPaperCompatibility', 'measuredHostUplinkJournalRetired', 'measuredBundleJournalRetired', 'measuredJobJournalRetired', 'exclusiveMeasuredJobScopesRemoved', 'measuredRoutedOwnedLoopDetached')]
         report = '\n'.join(rows)
         driver.validate_report(report, '', 0)
+        gateway_report = report+'\n'+('MEASURED_GATEWAY_PAPER_TERMINAL_OK\n'*3)
+        driver.validate_report(gateway_report, '', 0, True)
+        for count in (0, 1, 2, 4):
+            with self.subTest(gateway_markers=count), self.assertRaises(AssertionError):
+                driver.validate_report(report+'\n'+('MEASURED_GATEWAY_PAPER_TERMINAL_OK\n'*count), '', 0, True)
         for index in range(len(rows)):
             with self.subTest(missing=index), self.assertRaises(AssertionError):
                 driver.validate_report('\n'.join(rows[:index]+rows[index+1:]), '', 0)

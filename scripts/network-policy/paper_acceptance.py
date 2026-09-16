@@ -25,10 +25,12 @@ def digest(path):
         return hashlib.file_digest(file, 'sha256').hexdigest()
 
 
-def validate_report(stdout, stderr, code):
+def validate_report(stdout, stderr, code, gateway=False):
     assert len(stdout) <= 65536 and len(stderr) <= 65536
     assert code == 0, stderr[-4096:]
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
+    if gateway:
+        assert stdout.count('MEASURED_GATEWAY_PAPER_TERMINAL_OK') == 3
     for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
         assert stdout.count('--- PASS: TestMeasuredPaperRealKernel'+suffix+' ') == 3
     for marker in ('measuredRealPaperCompatibility', 'measuredHostUplinkJournalRetired', 'measuredBundleJournalRetired', 'measuredJobJournalRetired', 'exclusiveMeasuredJobScopesRemoved', 'measuredRoutedOwnedLoopDetached'):
@@ -42,7 +44,10 @@ def main():
     parser.add_argument('--inputs', type=Path, required=True)
     parser.add_argument('--go', default='go')
     parser.add_argument('--secrets', action='store_true')
+    parser.add_argument('--gateway', action='store_true')
     args = parser.parse_args()
+    if args.gateway and args.secrets:
+        parser.error('--gateway currently requires the plain Paper fixture')
     assert re.fullmatch('sha256:[a-f0-9]{64}', args.image)
     assert args.rootfs.is_absolute() and args.rootfs.resolve() == args.rootfs and digest(args.rootfs) == ROOT
     assert args.inputs.is_absolute() and args.inputs.resolve() == args.inputs
@@ -60,6 +65,7 @@ def main():
                '--memory', '6g', '--memory-swap', '6g', '--cpus', '4', '--pids-limit', '1024',
                '--tmpfs', '/tmp:rw,exec,nosuid,size=1536m',
                '--env', 'PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE=1',
+               '--env', 'PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE='+('1' if args.gateway else '0'),
                '--env', 'PROVENANCE_DISPOSABLE_REAL_PAPER_SECRETS='+('1' if args.secrets else '0'),
                '--mount', f'type=bind,src={repo},dst=/repo,readonly',
                '--mount', f'type=bind,src={work}/gvisor.test,dst=/test-input,readonly',
@@ -76,7 +82,7 @@ def main():
     # after its own loop retirement has been positively observed.
     if '{"measuredRoutedOwnedLoopDetached": true}' in result.stdout:
         subprocess.run(['docker', 'rm', name], capture_output=True, check=True, timeout=30)
-    validate_report(result.stdout, result.stderr, result.returncode)
+    validate_report(result.stdout, result.stderr, result.returncode, args.gateway)
     assert state['Status'] == 'exited' and state['ExitCode'] == 0 and not state['OOMKilled']
     print(json.dumps({'realPaperCompatibility': True, 'gameVersion': '1.21.8', 'paperBuild': 60, 'repetitions': 3,
                       'rootfsSHA256': ROOT, 'paperGuestSHA256': HELPER, 'inputs': INPUTS,
@@ -84,6 +90,8 @@ def main():
                       'fixtureImage': args.image, 'deployed': False}, sort_keys=True))
     if args.secrets:
         print(json.dumps({'realPaperSecretInjectionAndRedaction': True, 'targetSHA256': SECRET_TARGET, 'repetitions': 3, 'deployed': False}, sort_keys=True))
+    if args.gateway:
+        print(json.dumps({'realPaperGatewayTerminalEvidence': True, 'repetitions': 3, 'platformDatabaseAcceptance': False, 'objectStorageAcceptance': False, 'deployed': False}, sort_keys=True))
 
 
 if __name__ == '__main__':

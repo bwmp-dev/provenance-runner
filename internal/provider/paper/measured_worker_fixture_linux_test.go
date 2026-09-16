@@ -144,6 +144,10 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 	if provider.CheckMeasuredService(ctx, endpoint) != nil {
 		t.Fatal("startup root idle barrier refused")
 	}
+	if os.Getenv("PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE") == "1" {
+		runMeasuredGatewayFixture(t, ctx, provider, endpoint, job)
+		return
+	}
 	guard, err := np.NewAuthorityRoute(ctx, job)
 	if err != nil {
 		t.Fatal(err)
