@@ -29,6 +29,17 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if c.Launch.Measurement.ValidatePaperGuestTarget() != nil {
 		t.Fatal("unmeasured Paper helper")
 	}
+	diagnostic, err := os.CreateTemp("/tmp", "measured-secret-mount-diagnostic-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		diagnostic.Close()
+		if !t.Failed() {
+			_ = os.Remove(diagnostic.Name())
+		}
+	})
+	c.Launch.Stderr = diagnostic
 	seed, _ := measuredControllerSessionFixture(t, ctx, c)
 	if seed.Close(ctx) != nil {
 		t.Fatal("seed controller retirement")
@@ -136,7 +147,9 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 		t.Fatal("fixture output deadline")
 	}
 	if guestoutput.ReadStartup(output) != nil {
-		t.Fatal("measured helper startup synchronization")
+		_, _ = diagnostic.Seek(0, 0)
+		raw, _ := io.ReadAll(io.LimitReader(diagnostic, 4096))
+		t.Fatalf("measured helper startup synchronization: %s", raw)
 	}
 	observation, err := owned.ObserveRuntime(ctx)
 	if err != nil || observation == nil {
