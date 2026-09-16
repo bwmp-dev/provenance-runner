@@ -22,6 +22,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
+	"google.golang.org/protobuf/proto"
 )
 
 var ErrService = errors.New("measured_paper_service_refused")
@@ -139,13 +140,24 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 			_ = file.Close()
 		}
 	}()
-	if len(request.IdleNonce) != 0 || len(request.SecretNonce) != 0 {
+	if len(request.IdleNonce) != 0 || len(request.SecretNonce) != 0 || len(request.MaximumNonce) != 0 {
 		// Serve holds admission throughout this probe. A previous Serve must
 		// finish its deferred controller cleanup before this lock is available.
 		if s.controller.CheckIdle() != nil || s.measurement.ValidatePaperGuestTarget() != nil {
 			return ErrService
 		}
 		kind, nonce := cc.IdleConfirmed, request.IdleNonce
+		if len(request.MaximumNonce) != 0 {
+			maximum, err := s.controller.LocalMaximum()
+			if err != nil {
+				return ErrService
+			}
+			raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(maximum)
+			if err != nil || len(raw) == 0 || len(raw) > 16<<10 {
+				return ErrService
+			}
+			return channel.Send(cc.Packet{Kind: cc.MaximumConfirmed, Sequence: 1, Payload: append(request.MaximumNonce, raw...)}, time.Now().Add(5*time.Second))
+		}
 		if len(request.SecretNonce) != 0 {
 			if !s.secrets || !s.controller.SupportsTestSecretStorage() || s.measurement.ValidateTestSecretTarget() != nil {
 				return ErrService

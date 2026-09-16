@@ -24,6 +24,25 @@ import (
 
 var errMeasuredWorker = errors.New("measured_worker_session_refused")
 
+// ReadMeasuredMaximum obtains public policy bounds only from the provisioned
+// root endpoint. Values from connection or job documents are not substitutes.
+func (provider *Provider) ReadMeasuredMaximum(ctx context.Context, endpoint string) (*p.EffectivePolicy, error) {
+	if ctx == nil || ctx.Err() != nil || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0) {
+		return nil, errMeasuredWorker
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	channel, err := dialMeasuredRoot(ctx, endpoint)
+	if err != nil {
+		return nil, errMeasuredWorker
+	}
+	maximum, err := measuredclient.ReadMaximum(ctx, channel)
+	if err != nil {
+		return nil, errMeasuredWorker
+	}
+	return maximum, nil
+}
+
 // CheckMeasuredService is a fresh authenticated startup idle barrier. It
 // reserves no slot; the connected worker still serializes execution admission.
 func (provider *Provider) CheckMeasuredService(ctx context.Context, endpoint string) error {

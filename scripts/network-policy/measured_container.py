@@ -129,10 +129,10 @@ def main():
             print('{"measuredWorkerStressRepetitions": 20}', flush=True)
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',
                                   '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal|Secrets|SecretsMissing|SecretsExpired)?|Daemon|Worker|WorkerSecrets)Kernel$',
-                                  '-test.count=3', '-test.timeout=180s'],
+                                  '-test.count=3', '-test.timeout=210s'],
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                       'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
-                                 capture_output=True, text=True, timeout=190)
+                                 capture_output=True, text=True, timeout=220)
         assert len(service.stdout) <= 65536 and len(service.stderr) <= 65536
         print(service.stdout, end='', flush=True)
         if service.returncode:
@@ -148,6 +148,9 @@ def main():
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel ') == 3
         for case in ('Service', 'ServiceSecrets', 'ServiceSecretsMissing', 'ServiceSecretsExpired', 'ServiceWithdrawal', 'ServiceReleaseRefusal', 'ServiceEventRefusal', 'Daemon', 'Worker', 'WorkerSecrets'):
             assert service.stdout.count('--- PASS: TestMeasuredPaper'+case+'Kernel/root-secret-capability-after-retirement ') == 3
+            assert service.stdout.count('--- PASS: TestMeasuredPaper'+case+'Kernel/root-maximum-after-retirement ') == 3
+        for case in ('valid', 'nonce', 'kind', 'short', 'files', 'eof', 'oversize', 'noncanonical', 'unknown'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaperServiceKernel/root-maximum-protocol/'+case+' ') == 3
         for case in ('valid', 'nonce', 'idle', 'short', 'files', 'eof'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperServiceKernel/root-secret-capability-protocol/'+case+' ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel/root-idle-barrier-after-retirement ') == 3

@@ -25,6 +25,8 @@ func validateAdvertisedFeatures(features []runnerv1.ProtocolFeature) error {
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY,
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V1,
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V2,
+			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_POLICY_V2,
+			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2,
 			runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1:
 		default:
 			return errors.New("runner capabilities contain an unknown protocol feature")
@@ -33,6 +35,13 @@ func validateAdvertisedFeatures(features []runnerv1.ProtocolFeature) error {
 			return errors.New("runner capabilities contain a duplicate protocol feature")
 		}
 		seen[feature] = struct{}{}
+	}
+	if advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_POLICY_V2) || advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2) {
+		for _, required := range []runnerv1.ProtocolFeature{1, 3, 7, 9, 10} {
+			if !advertisedFeature(features, required) {
+				return errors.New("runner network-v2 capabilities lack a required feature")
+			}
+		}
 	}
 	return nil
 }

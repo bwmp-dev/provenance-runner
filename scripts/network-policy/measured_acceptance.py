@@ -61,6 +61,9 @@ def validate_report(stdout, stderr, status, worker_stress=False):
     assert stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel ') == 3
     for case in ('Service', 'ServiceSecrets', 'ServiceSecretsMissing', 'ServiceSecretsExpired', 'ServiceWithdrawal', 'ServiceReleaseRefusal', 'ServiceEventRefusal', 'Daemon', 'Worker', 'WorkerSecrets'):
         assert stdout.count('--- PASS: TestMeasuredPaper'+case+'Kernel/root-secret-capability-after-retirement ') == 3
+        assert stdout.count('--- PASS: TestMeasuredPaper'+case+'Kernel/root-maximum-after-retirement ') == 3
+    for case in ('valid', 'nonce', 'kind', 'short', 'files', 'eof', 'oversize', 'noncanonical', 'unknown'):
+        assert stdout.count('--- PASS: TestMeasuredPaperServiceKernel/root-maximum-protocol/'+case+' ') == 3
     for case in ('valid', 'nonce', 'idle', 'short', 'files', 'eof'):
         assert stdout.count('--- PASS: TestMeasuredPaperServiceKernel/root-secret-capability-protocol/'+case+' ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel/root-idle-barrier-after-retirement ') == 3
@@ -166,7 +169,7 @@ def main():
             subprocess.run(command, check=True, capture_output=True, timeout=30)
             created.append(runtime_name)
             result = subprocess.run(['docker', 'start', '--attach', runtime_name],
-                                    capture_output=True, text=True, timeout=840 if args.worker_stress else 620)
+                                    capture_output=True, text=True, timeout=870 if args.worker_stress else 650)
             assert len(result.stdout) <= 131072 and len(result.stderr) <= 65536
             print(result.stdout, end='')
             validate_report(download.stdout + result.stdout, download.stderr + result.stderr, result.returncode, args.worker_stress)
@@ -199,7 +202,7 @@ def main():
             # On interruption, allow the fixture's bounded process to finish its
             # owned loop cleanup instead of force-killing it mid-mount.
             for name in reversed(created):
-                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=620)
+                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=650)
                 subprocess.run(['docker', 'rm', name], capture_output=True, check=True, timeout=15)
 
 

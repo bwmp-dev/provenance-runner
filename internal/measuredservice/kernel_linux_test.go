@@ -122,6 +122,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	t.Run("root-idle-response-refusal", idleRefusalFixture)
 	if mode == "complete" {
 		t.Run("root-secret-capability-protocol", secretProbeRefusalFixture)
+		t.Run("root-maximum-protocol", maximumRefusalFixture)
 	}
 	budget, maximumInput := 45*time.Second, uint64(64<<20)
 	realPaper := mode == "real" || mode == "real-secrets"
@@ -456,13 +457,23 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if secrets {
 		capabilityMode = "service-secrets-enabled"
 	}
-	for _, probeMode := range []string{"service-idle", capabilityMode} {
+	for _, probeMode := range []string{"service-idle", capabilityMode, "service-maximum"} {
 		probeName := "root-idle-barrier-after-retirement"
 		if probeMode != "service-idle" {
 			probeName = "root-secret-capability-after-retirement"
 		}
+		if probeMode == "service-maximum" {
+			probeName = "root-maximum-after-retirement"
+		}
 		t.Run(probeName, func(t *testing.T) {
 			probe := exec.CommandContext(ctx, clientPath, probeMode, filepath.Join(root, cc.SocketName))
+			if probeMode == "service-maximum" {
+				digest, err := np.EffectivePolicyV2SHA256(job.EffectivePolicy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				probe.Args = append(probe.Args, hex.EncodeToString(digest[:]))
+			}
 			probe.Env = command.Env
 			probe.SysProcAttr = command.SysProcAttr
 			var output bytes.Buffer

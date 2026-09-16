@@ -4,6 +4,7 @@ package measuredservice
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,8 +52,12 @@ func TestMain(m *testing.M) {
 		case "service-client":
 			serviceFixtureClient()
 			return
-		case "service-idle", "service-secrets-enabled", "service-secrets-disabled":
-			if len(os.Args) != 3 || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
+		case "service-idle", "service-secrets-enabled", "service-secrets-disabled", "service-maximum":
+			expectedArgs := 3
+			if os.Args[1] == "service-maximum" {
+				expectedArgs = 4
+			}
+			if len(os.Args) != expectedArgs || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 				panic("disposable idle client required")
 			}
 			conn, err := net.DialTimeout("unixpacket", os.Args[2], time.Second)
@@ -66,7 +71,16 @@ func TestMain(m *testing.M) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if os.Args[1] == "service-idle" {
+			if os.Args[1] == "service-maximum" {
+				maximum, err := measuredclient.ReadMaximum(ctx, channel)
+				if err != nil {
+					panic("root maximum refused")
+				}
+				digest, err := np.EffectivePolicyV2SHA256(maximum)
+				if err != nil || hex.EncodeToString(digest[:]) != os.Args[3] {
+					panic("root maximum differs from provisioned policy")
+				}
+			} else if os.Args[1] == "service-idle" {
 				if measuredclient.CheckIdle(ctx, channel) != nil {
 					panic("root idle barrier refused after cleanup")
 				}

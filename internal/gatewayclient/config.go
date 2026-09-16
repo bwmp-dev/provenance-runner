@@ -76,9 +76,11 @@ type Config struct {
 	// Explicit operator opt-in for controlled lifecycle acceptance and rollout.
 	// Never accepted from connection/job JSON; backend scheduling is separate.
 	EnableTestSecrets bool `json:"-"`
-	credential        []byte
-	journalFile       string
-	credentialStore   durableCredentialStore
+	// Operator-only; requires a measured worker's root-confirmed local maximum.
+	EnableNetworkPolicyV2 bool `json:"-"`
+	credential            []byte
+	journalFile           string
+	credentialStore       durableCredentialStore
 }
 
 func LoadConfig(path, runnerVersion string) (Config, error) {

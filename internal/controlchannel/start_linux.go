@@ -23,7 +23,8 @@ type StartRequest struct {
 	// It never accompanies execution payloads or input files.
 	IdleNonce []byte
 	// SecretNonce is a separate explicit capability probe, never an execution.
-	SecretNonce []byte
+	SecretNonce  []byte
+	MaximumNonce []byte
 }
 
 // SendStart sends the first request on a fresh authenticated channel. One shared
@@ -108,17 +109,19 @@ func receiveStart(channel *Channel, deadline time.Time, allowIdle bool) (accepte
 			return Packet{}, err
 		}
 		r.LastSequence++
-		if (packet.Kind != Start && !(allowIdle && r.LastSequence == 1 && (packet.Kind == IdleCheck || packet.Kind == SecretCheck))) || packet.Sequence != r.LastSequence {
+		if (packet.Kind != Start && !(allowIdle && r.LastSequence == 1 && (packet.Kind == IdleCheck || packet.Kind == SecretCheck || packet.Kind == MaximumCheck))) || packet.Sequence != r.LastSequence {
 			return Packet{}, ErrChannel
 		}
 		return packet, nil
 	}
 	header, err := receive()
-	if err == nil && (header.Kind == IdleCheck || header.Kind == SecretCheck) {
+	if err == nil && (header.Kind == IdleCheck || header.Kind == SecretCheck || header.Kind == MaximumCheck) {
 		if len(header.Payload) != 32 || len(header.Files) != 0 {
 			return nil, ErrChannel
 		}
-		if header.Kind == SecretCheck {
+		if header.Kind == MaximumCheck {
+			r.MaximumNonce = append([]byte(nil), header.Payload...)
+		} else if header.Kind == SecretCheck {
 			r.SecretNonce = append([]byte(nil), header.Payload...)
 		} else {
 			r.IdleNonce = append([]byte(nil), header.Payload...)
