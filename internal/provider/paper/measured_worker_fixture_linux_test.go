@@ -174,7 +174,9 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 		wantClassification, marker = execution.ClassificationPassed, "Paper"
 	}
 	if starts != 1 || result.Classification != wantClassification || result.Cleanup == nil || !result.Cleanup.Succeeded || result.MeasuredNetwork == nil || result.Logs == nil || !strings.Contains(result.Logs.Stdout, marker) {
-		if realPaper && result.Logs != nil {
+		// Both inputs are fixed disposable fixtures. Keep diagnostics bounded
+		// for synthetic startup failures as well as real Paper failures.
+		if result.Logs != nil {
 			out, diagnostic := result.Logs.Stdout, result.Logs.Stderr
 			if len(out) > 4096 {
 				out = out[len(out)-4096:]
