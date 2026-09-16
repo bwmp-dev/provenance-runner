@@ -50,6 +50,10 @@ harness ceiling. The additional exchanges receive a 210-second service/220-secon
 subprocess ceiling and a 650-second outer ceiling. Individual job deadlines,
 resource limits, output bounds and retirement checks are unchanged.
 
+With the twenty-repetition worker stress prelude enabled, the combined outer
+ceiling is 870 seconds. This accounts for that separate 220-second test stage;
+CI's overall 15-minute job ceiling and every individual job limit are unchanged.
+
 These tests do not establish production provisioning, full gateway-to-Paper
 composition or live scheduling acceptance. Those remain activation gates.
 
