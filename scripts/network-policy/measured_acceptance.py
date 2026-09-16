@@ -28,7 +28,9 @@ def fixture_workspace():
 
 
 def validate_report(stdout, stderr, status):
-    assert len(stdout) <= 65536 and len(stderr) <= 65536
+    # Bounded harness transcript, not guest logs: the expanded repeated secret
+    # recovery cases exceed the former 64-KiB report envelope.
+    assert len(stdout) <= 131072 and len(stderr) <= 65536
     assert status == 0, stderr[-4096:]
     assert '{"measuredRoutedOwnedLoopDetached": true}' in stdout
     assert '{"exclusiveMeasuredJobScopesRemoved": true}' in stdout
@@ -151,7 +153,7 @@ def main():
             created.append(runtime_name)
             result = subprocess.run(['docker', 'start', '--attach', runtime_name],
                                     capture_output=True, text=True, timeout=560)
-            assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
+            assert len(result.stdout) <= 131072 and len(result.stderr) <= 65536
             print(result.stdout, end='')
             validate_report(download.stdout + result.stdout, download.stderr + result.stderr, result.returncode)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]

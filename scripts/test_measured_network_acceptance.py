@@ -54,7 +54,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
                 driver.validate_report('\n'.join(rows[:index]+rows[index+1:]), '', 0)
         for stdout, stderr, status in ((report, '', 1), (report+'\n--- SKIP: missing', '', 0),
                                        (report+'\n--- FAIL: ignored', '', 0),
-                                       (report+'x'*65536, '', 0), (report, 'x'*65537, 0)):
+                                       (report+'x'*131072, '', 0), (report, 'x'*65537, 0)):
             with self.assertRaises(AssertionError):
                 driver.validate_report(stdout, stderr, status)
 

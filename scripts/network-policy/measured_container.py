@@ -141,7 +141,7 @@ def main():
                                      'PROVENANCE_DISPOSABLE_NETWORK_FIXTURE': '1',
                                      'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
                                 capture_output=True, text=True, timeout=420)
-        assert len(result.stdout) + len(service.stdout) <= 65536 and len(result.stderr) <= 65536
+        assert len(result.stdout) + len(service.stdout) <= 131072 and len(result.stderr) <= 65536
         print(result.stdout, end='')
         if result.returncode:
             raise RuntimeError('measured routed fixture failed: '+result.stderr[-4096:])
