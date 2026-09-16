@@ -45,6 +45,8 @@ type measuredController struct {
 // A non-nil job owns its partial staging/session until done closes. The global
 // slot is not released merely because its main process exited or was cancelled.
 type measuredControllerJob struct {
+	job        *p.JobSpecification
+	observed   bool
 	controller *measuredController
 	bundle     *measuredBundle
 	session    *measuredNetworkSession
@@ -134,7 +136,7 @@ func (c *measuredController) start(ctx context.Context, job *p.JobSpecification,
 	if err != nil {
 		return nil, err
 	}
-	owned := &measuredControllerJob{controller: c, budget: budget, authority: authority, done: make(chan struct{})}
+	owned := &measuredControllerJob{job: job, controller: c, budget: budget, authority: authority, done: make(chan struct{})}
 	c.active = owned
 	fail := func(err error) (*measuredControllerJob, error) {
 		owned.reason = errors.Join(errMeasuredSession, err, context.Cause(budget.ctx))
@@ -352,6 +354,7 @@ func (j *measuredControllerJob) ObserveRuntime(ctx context.Context) (*runtimeide
 	if err != nil || !c.resourcesReady() {
 		return nil, errors.Join(err, np.ErrResources)
 	}
+	j.observed = true
 	return observation, nil
 }
 

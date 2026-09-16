@@ -35,6 +35,7 @@ type DaemonConfig struct {
 	CgroupState       string            `json:"cgroupState"`
 	BundleRoot        string            `json:"bundleRoot"`
 	BundleState       string            `json:"bundleState"`
+	SecretRoot        string            `json:"secretRoot,omitempty"`
 	UplinkState       string            `json:"uplinkState"`
 	SandboxPath       string            `json:"sandboxPath"`
 	RootPath          string            `json:"rootPath"`
@@ -77,6 +78,9 @@ func (c DaemonConfig) boundary() (*gvisor.MeasuredLocalBoundary, error) {
 		}
 	}
 	paths := []string{c.SocketDirectory, c.CgroupParent, c.CgroupState, c.BundleRoot, c.BundleState, c.UplinkState, c.SandboxPath, c.RootPath, c.ImagePath, c.LoopPath, c.IP.Path, c.NFT.Path, c.NSenter.Path}
+	if c.SecretRoot != "" {
+		paths = append(paths, c.SecretRoot)
+	}
 	seen := make(map[string]bool)
 	for _, path := range paths {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" || len(path) > 4096 || strings.IndexByte(path, 0) >= 0 || seen[path] {
