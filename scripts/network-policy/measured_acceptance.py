@@ -58,6 +58,8 @@ def validate_report(stdout, stderr, status, worker_stress=False):
     for case in ('Secrets', 'SecretsMissing', 'SecretsExpired'):
         assert stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 3
+    assert stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel ') == 3
+    assert stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel/root-idle-barrier-after-retirement ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperWorkerKernel/root-idle-barrier-after-retirement ') == 3
     for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
         assert stdout.count('--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' ') == 3

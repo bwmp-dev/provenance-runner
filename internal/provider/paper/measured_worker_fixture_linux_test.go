@@ -4,6 +4,7 @@ package paper
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -16,16 +17,31 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/artifact"
 	cc "github.com/bwmp-dev/provenance-runner/internal/controlchannel"
+	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+type measuredSecretFixtureObserver struct {
+	mu   sync.Mutex
+	logs bytes.Buffer
+}
+
+func (o *measuredSecretFixtureObserver) ObserveLog(entry execution.LiveLogEntry) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.logs.Write(entry.Data)
+}
+func (*measuredSecretFixtureObserver) ObserveUsage(execution.ResourceUsage) {}
 
 // Invoked only as the non-root child of the disposable root service fixture.
 // Supplied JAR bytes are data; the fixed synthetic stand-in executes in gVisor.
@@ -160,6 +176,19 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 	}()
 	defer func() { stopRenew(); <-renewDone }()
 	starts := 0
+	secretCalls := 0
+	observer := &measuredSecretFixtureObserver{}
+	if len(job.TestSecrets) > 0 {
+		ctx = execution.WithObserver(ctx, observer)
+		ctx = execution.WithTestSecretSource(ctx, func(context.Context) (*ts.Files, time.Time, error) {
+			secretCalls++
+			if starts != 1 || secretCalls != 1 {
+				t.Error("secret acquired before release boundary or more than once")
+			}
+			files, err := ts.New([]ts.Input{{Name: "license", Value: []byte("synthetic-session-secret")}})
+			return files, time.Now().Add(20 * time.Second), err
+		})
+	}
 	result := execution.SuperviseNetworkAuthority(ctx, job, guard, func(ctx context.Context) execution.Result {
 		defer func() { stopRenew(); <-renewDone }()
 		return provider.ExecuteMeasured(ctx, job, endpoint, func(context.Context, execution.ExecutionStart) error { starts++; return nil })
@@ -187,6 +216,29 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 			t.Logf("bounded fixture diagnostics: stdout=%s stderr=%s", out, diagnostic)
 		}
 		t.Fatalf("worker composition: starts=%d classification=%s phase=%s failure=%v cleanup=%v", starts, result.Classification, result.Phase, result.Failure, result.Cleanup)
+	}
+	if len(job.TestSecrets) > 0 {
+		if secretCalls != 1 || strings.Contains(result.Logs.Stdout, "synthetic-session-secret") || !strings.Contains(result.Logs.Stdout, evidence.RedactionMarker) || !strings.Contains(result.Logs.Stdout, "ROOT_SECRET_READ_ONLY_OK") {
+			t.Fatal("late worker injection or redaction failed")
+		}
+		observer.mu.Lock()
+		live := observer.logs.String()
+		observer.mu.Unlock()
+		if strings.Contains(live, "synthetic-session-secret") || !strings.Contains(live, evidence.RedactionMarker) {
+			t.Fatal("late live redaction failed")
+		}
+		if result.CompleteLog == nil || result.CompleteLog.Archive == nil || result.CompleteLog.State != "complete" {
+			t.Fatal("secret complete archive missing")
+		}
+		archive, err := gzip.NewReader(io.NewSectionReader(result.CompleteLog.Archive, 0, result.CompleteLog.CompressedBytes))
+		if err != nil {
+			t.Fatal("secret archive framing")
+		}
+		complete, readErr := io.ReadAll(io.LimitReader(archive, (16<<20)+1))
+		closeErr := archive.Close()
+		if readErr != nil || closeErr != nil || len(complete) > 16<<20 || bytes.Contains(complete, []byte("synthetic-session-secret")) || !bytes.Contains(complete, []byte(evidence.RedactionMarker)) {
+			t.Fatal("late archive redaction failed")
+		}
 	}
 	frozen, err := result.FreezeTerminalEvidence("fixture-runner")
 	if err != nil || frozen == nil || terminalevidence.ValidateFrozenV2(frozen, job, "fixture-runner") != nil {

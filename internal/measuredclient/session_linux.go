@@ -28,7 +28,10 @@ type SessionOptions struct {
 	// PrepareSecrets runs only after root observation, before Java release.
 	// The caller owns returned descriptors through Run and configures redaction
 	// before returning. Values never enter job JSON or startup metadata.
-	PrepareSecrets func(context.Context) ([]ts.Descriptor, time.Time, error)
+	PrepareSecrets func(context.Context, *runtimeidentity.NetworkObservation) ([]ts.Descriptor, time.Time, error)
+	// PrepareOutput replaces the caller-owned collector before any guest output
+	// is consumed. This supports redaction configured by late secret delivery.
+	PrepareOutput func(context.Context) (*evidence.Collector, error)
 }
 
 // SessionResult exists only after the same authenticated root session supplied
@@ -114,7 +117,7 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 		if options.PrepareSecrets == nil || ts.ValidateSelection(job) != nil || guard.CheckJob(job) != nil {
 			return nil, ErrSession
 		}
-		descriptors, expires, err := options.PrepareSecrets(executionCtx)
+		descriptors, expires, err := options.PrepareSecrets(executionCtx, observation)
 		ceiling, authorityErr := guard.CurrentLeaseExpiry(job)
 		if err != nil || authorityErr != nil || !expires.After(time.Now()) || expires.After(ceiling) || len(descriptors) != len(job.TestSecrets) {
 			return nil, ErrSession
@@ -131,6 +134,12 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 		}
 	} else if options.PrepareSecrets != nil {
 		return nil, ErrSession
+	}
+	if options.PrepareOutput != nil {
+		collector, err = options.PrepareOutput(executionCtx)
+		if err != nil || collector == nil {
+			return nil, ErrSession
+		}
 	}
 	if executionCtx.Err() != nil || forwarder.Release(executionCtx) != nil {
 		return nil, ErrSession

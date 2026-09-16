@@ -87,6 +87,9 @@ func openFixtureDaemon(t *testing.T, ctx context.Context, socket, state, bundle 
 		}
 	})
 	config := fixtureDaemonConfig(t)
+	if len(job.TestSecrets) > 0 {
+		config.SecretRoot = filepath.Join(socket, "secrets")
+	}
 	config.MaximumInputBytes = maximumInput
 	config.SocketDirectory = socket
 	config.CgroupParent = "/sys/fs/cgroup/provenance-fixture-jobs"

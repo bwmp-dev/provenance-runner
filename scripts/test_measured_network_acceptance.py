@@ -37,6 +37,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['--- PASS: TestMeasuredPaperServiceEventRefusalKernel (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel (1s)' for case in ('Secrets', 'SecretsMissing', 'SecretsExpired') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperWorkerKernel'+suffix+' (1s)' for suffix in ('', '/root-idle-barrier-after-retirement') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperWorkerSecretsKernel'+suffix+' (1s)' for suffix in ('', '/root-idle-barrier-after-retirement') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' (1s)' for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal', 'Secrets', 'SecretsMissing', 'SecretsExpired') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal', 'Secrets', 'SecretsMissing', 'SecretsExpired') for _ in range(3)]

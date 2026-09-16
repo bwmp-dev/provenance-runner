@@ -270,7 +270,7 @@ func serviceFixtureClient() {
 		}
 	}()
 	if os.Args[3] == "secrets" || os.Args[3] == "secrets-expired" {
-		options.PrepareSecrets = func(context.Context) ([]ts.Descriptor, time.Time, error) {
+		options.PrepareSecrets = func(context.Context, *runtimeidentity.NetworkObservation) ([]ts.Descriptor, time.Time, error) {
 			var err error
 			secretFiles, err = ts.New([]ts.Input{{Name: "license", Value: []byte("synthetic-session-secret")}})
 			if err != nil {

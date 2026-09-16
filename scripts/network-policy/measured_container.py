@@ -127,7 +127,7 @@ def main():
             assert stress.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 20
             print('{"measuredWorkerStressRepetitions": 20}', flush=True)
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',
-                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal|Secrets|SecretsMissing|SecretsExpired)?|Daemon|Worker)Kernel$',
+                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal|Secrets|SecretsMissing|SecretsExpired)?|Daemon|Worker|WorkerSecrets)Kernel$',
                                   '-test.count=3', '-test.timeout=180s'],
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                       'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
@@ -144,6 +144,8 @@ def main():
         for case in ('Secrets', 'SecretsMissing', 'SecretsExpired'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 3
+        assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel ') == 3
+        assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel/root-idle-barrier-after-retirement ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel/root-idle-barrier-after-retirement ') == 3
         for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' ') == 3

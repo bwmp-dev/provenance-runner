@@ -82,6 +82,10 @@ func TestMeasuredPaperServiceSecretsExpiredKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "secrets-expired")
 }
 
+func TestMeasuredPaperWorkerSecretsKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "worker-secrets")
+}
+
 func TestMeasuredPaperServiceWithdrawalKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "withdraw")
 }
@@ -210,7 +214,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal("accepted probe fixture identity")
 	}
 	source, manifest, job := serviceFixtureJob(t, java, prepared)
-	secrets := strings.HasPrefix(mode, "secrets")
+	secrets := strings.HasPrefix(mode, "secrets") || mode == "worker-secrets"
 	if secrets {
 		var config map[string]any
 		if json.Unmarshal(job.NormalizedConfigurationJson, &config) != nil {
@@ -387,7 +391,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	var daemon *Daemon
 	var daemonDone chan error
 	clientMode := mode
-	if mode == "daemon" || mode == "worker" || mode == "real" {
+	if mode == "daemon" || mode == "worker" || mode == "worker-secrets" || mode == "real" {
 		clientMode = "complete"
 		// Retire the manual fixture provisioner before testing the complete
 		// daemon's reopening/recovery of these same owned, empty journals.
@@ -410,7 +414,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), clientMode)
 	command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1"}
-	if mode == "worker" || mode == "real" {
+	if mode == "worker" || mode == "worker-secrets" || mode == "real" {
 		command = exec.CommandContext(ctx, "/tmp/measured-worker.test", "-test.run=^TestMeasuredWorkerRootFixture$", "-test.timeout=40s")
 		command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1", "PROVENANCE_DISPOSABLE_WORKER_ROOT_SOCKET=" + filepath.Join(root, cc.SocketName)}
 		if mode == "real" {
@@ -422,7 +426,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
 	var diagnostic bytes.Buffer
 	command.Stderr = &diagnostic
-	if mode == "worker" || mode == "real" {
+	if mode == "worker" || mode == "worker-secrets" || mode == "real" {
 		command.Stdout = &diagnostic
 	}
 	clientDone := make(chan error, 1)
