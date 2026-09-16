@@ -26,6 +26,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['{"measuredBundleJournalRetired": true}']
         rows += ['{"measuredHostUplinkJournalRetired": true}']
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' (1s)' for case in ('success', 'expired', 'cancelled', 'bad-name', 'duplicate', 'oversize', 'persistent') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/secret-journal-recovery/'+case+' (1s)' for case in ('normal', 'cold', 'foreign', 'intent-only', 'replaced', 'wrong-boot', 'wrong-parent') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredHostUplinkColdRecovery (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredControlListener (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer (1s)' for _ in range(3)]
@@ -53,7 +54,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
                 driver.validate_report('\n'.join(rows[:index]+rows[index+1:]), '', 0)
         for stdout, stderr, status in ((report, '', 1), (report+'\n--- SKIP: missing', '', 0),
                                        (report+'\n--- FAIL: ignored', '', 0),
-                                       (report+'x'*65536, '', 0), (report, 'x'*65537, 0)):
+                                       (report+'x'*131072, '', 0), (report, 'x'*65537, 0)):
             with self.assertRaises(AssertionError):
                 driver.validate_report(stdout, stderr, status)
 
