@@ -87,7 +87,7 @@ def get_accounts(group):
 
 def inventory(selected, worker_uid, storage):
     assert os.geteuid() == 0 and Path('/proc/1/status').is_file()
-    assert len(selected) == 2 and all(65536 <= value <= MAX_ID for value in selected) and worker_uid not in selected
+    assert len(selected) == 4 and all(65536 <= value <= MAX_ID for value in selected) and worker_uid not in selected
     assert 0 < worker_uid <= MAX_ID
     assert storage.is_absolute() and storage.resolve(strict=True) == storage and storage.is_dir()
     start = time.monotonic()
@@ -133,12 +133,14 @@ def inventory(selected, worker_uid, storage):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workload-id', type=int, required=True)
+    parser.add_argument('--workload-overflow-id', type=int, required=True)
     parser.add_argument('--router-id', type=int, required=True)
+    parser.add_argument('--router-overflow-id', type=int, required=True)
     parser.add_argument('--worker-uid', type=int, required=True)
     parser.add_argument('--storage-parent', type=Path, required=True)
     args = parser.parse_args()
     try:
-        report = inventory({args.workload_id, args.router_id}, args.worker_uid, args.storage_parent)
+        report = inventory({args.workload_id, args.workload_overflow_id, args.router_id, args.router_overflow_id}, args.worker_uid, args.storage_parent)
     except Exception:
         raise SystemExit('Measured host inventory incomplete; no activation or provisioning performed.') from None
     print(json.dumps(report, sort_keys=True))
