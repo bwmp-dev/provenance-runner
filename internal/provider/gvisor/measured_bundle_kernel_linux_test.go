@@ -121,6 +121,7 @@ func TestMeasuredBundleCrashHelper(t *testing.T) {
 
 func TestMeasuredBundleJournalKernelRecovery(t *testing.T) {
 	requireMeasuredBundleFixture(t)
+	t.Run("sealed-secret-tmpfs-materialization", measuredSecretStorageFixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	job := measuredSpecJob(t)

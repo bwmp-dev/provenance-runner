@@ -149,6 +149,8 @@ def main():
         for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal', 'LayoutRefusal', 'UplinkRefusal'):
             assert result.stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery ') == 3
+        for case in ('success', 'expired', 'cancelled', 'bad-name', 'duplicate', 'oversize', 'persistent'):
+            assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredControlListener ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
