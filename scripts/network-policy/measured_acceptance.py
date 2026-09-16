@@ -38,6 +38,8 @@ def validate_report(stdout, stderr, status):
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
     for case in ('Withdrawal', 'Expiry', 'ChildMismatch', 'OwnedLaunch', 'OwnedNormal', 'OwnedGatedStartup', 'JournalRefusal', 'BundleRefusal', 'PreparedRefusal', 'LinkRefusal', 'LayoutRefusal', 'UplinkRefusal'):
         assert stdout.count('--- PASS: TestMeasuredAuthorityRouteSentry'+case+' ') == 3
+    for case in ('success', 'expired', 'cancelled', 'bad-name', 'duplicate', 'oversize', 'persistent'):
+        assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' ') == 3
     assert stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
     assert stdout.count('--- PASS: TestMeasuredControlListener ') == 3
     assert stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3

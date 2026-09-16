@@ -25,6 +25,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['{"measuredJobJournalRetired": true}']
         rows += ['{"measuredBundleJournalRetired": true}']
         rows += ['{"measuredHostUplinkJournalRetired": true}']
+        rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' (1s)' for case in ('success', 'expired', 'cancelled', 'bad-name', 'duplicate', 'oversize', 'persistent') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredHostUplinkColdRecovery (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredControlListener (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer (1s)' for _ in range(3)]
