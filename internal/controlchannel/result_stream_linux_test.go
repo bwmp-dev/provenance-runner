@@ -3,16 +3,59 @@
 package controlchannel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/guestoutput"
 	"golang.org/x/sys/unix"
 )
+
+// Pipes and sequenced packets need not preserve the guest encoder's writes.
+// Exercise every split, including inside headers, with quiet-period keepalives.
+func TestResultStreamPreservesGuestFramesAcrossEveryPacketSplit(t *testing.T) {
+	const logs = "ROOT_SERVICE_STARTED\nfixture-padding-fixture-padding-\nROOT_SERVICE_OK\n"
+	var encoded bytes.Buffer
+	encoder := guestoutput.NewEncoder(&encoded)
+	for _, frame := range []struct {
+		kind guestoutput.Kind
+		raw  string
+	}{{guestoutput.Stdout, logs}, {guestoutput.Events, "{\"fixture\":true}\n"}, {guestoutput.Outcome, "{\"exitCode\":0,\"infrastructureFailure\":false}"}} {
+		if err := encoder.Write(frame.kind, []byte(frame.raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completion, err := EncodeCompletion(0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := encoded.Bytes()
+	for split := 1; split < len(raw); split++ {
+		t.Run(strconv.Itoa(split), func(t *testing.T) {
+			stream := resultParserFixture(t, []Packet{{Kind: Result}, {Kind: Result, Payload: raw[:split]}, {Kind: Result}, {Kind: Result, Payload: raw[split:]}, {Kind: Result}, {Kind: Completion, Payload: completion}})
+			var observed bytes.Buffer
+			transcript, err := guestoutput.ReadStream(context.Background(), stream, 1024, func(kind guestoutput.Kind, data []byte) error {
+				if kind != guestoutput.Stdout {
+					t.Fatal("unexpected stream")
+				}
+				_, err := observed.Write(data)
+				return err
+			})
+			if err != nil || transcript == nil || observed.String() != logs || string(transcript.EventBytes()) != "{\"fixture\":true}\n" {
+				t.Fatal("fragmented guest stream", err)
+			}
+			if _, err := stream.Receipt(); err != nil {
+				t.Fatal("missing retirement receipt", err)
+			}
+		})
+	}
+}
 
 // This fixture directly exercises the private parser with same-user sockets.
 // It does not test or claim authenticated root provenance; production callers
