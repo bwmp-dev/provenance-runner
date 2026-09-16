@@ -325,6 +325,19 @@ func serviceFixtureClient() {
 		return
 	}
 	if err != nil || result == nil || !released || !sawStart || result.Observation() == nil {
+		// Fixed synthetic input only. Snapshot still sanitizes partial guest
+		// output when framing/outcome validation correctly refuses a result.
+		bundle, _ := collector.Snapshot(context.Background())
+		prefix := func(value string) string {
+			if len(value) > 4096 {
+				return value[:4096]
+			}
+			return value
+		}
+		fmt.Fprintf(os.Stderr, "bounded synthetic guest prefix: stdout=%q stderr=%q\n", prefix(bundle.Stdout), prefix(bundle.Stderr))
+		if bundle.CompleteLog.Archive != nil {
+			_ = bundle.CompleteLog.Archive.Close()
+		}
 		code, infrastructure, outcomeErr := result.Outcome()
 		panic(fmt.Sprintf("session result/startup mismatch: sessionError=%v result=%t released=%t startup=%t observation=%t exit=%d infrastructure=%t outcomeError=%v", err, result != nil, released, sawStart, result.Observation() != nil, code, infrastructure, outcomeErr))
 	}
