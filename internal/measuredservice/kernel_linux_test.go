@@ -336,8 +336,15 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var runtimeDiagnostics fixtureDiagnosticPrefix
+	if !realPaper && !secrets {
+		server.fixtureDiagnostics = &runtimeDiagnostics
+	}
 	server.fixtureCompletion = func(exit int, infrastructure bool, wait, relay, diagnostic, cause error) {
 		t.Logf("fixture root completion: exit=%d infrastructure=%t wait=%v relay=%v diagnostic=%v cause=%v", exit, infrastructure, wait, relay, diagnostic, cause)
+		if (exit != 0 || infrastructure) && runtimeDiagnostics.Len() != 0 {
+			t.Logf("secret-free synthetic runtime diagnostic prefix: %s", runtimeDiagnostics.String())
+		}
 		for _, name := range []string{"memory.events", "memory.peak", "pids.events"} {
 			raw, err := os.ReadFile("/sys/fs/cgroup/provenance-fixture-jobs/" + name)
 			if err == nil && len(raw) < 1024 {
@@ -408,6 +415,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		}
 		daemon = openFixtureDaemon(t, ctx, root, state, bundlePath, lease, tools, source, job, maximumInput)
 		daemon.server.fixtureCompletion = server.fixtureCompletion
+		daemon.server.fixtureDiagnostics = server.fixtureDiagnostics
 		listener, server = daemon.listener, daemon.server
 		daemonDone = make(chan error, 1)
 		go func() { daemonDone <- daemon.Serve() }()

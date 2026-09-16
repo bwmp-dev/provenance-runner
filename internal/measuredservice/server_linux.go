@@ -54,6 +54,8 @@ type Server struct {
 	// unset in every constructor and cannot be enabled by configuration or wire
 	// input. It never receives guest bytes, input descriptors or secret values.
 	fixtureCompletion func(int, bool, error, error, error, error)
+	// Set only by the in-package, secret-free synthetic kernel fixture.
+	fixtureDiagnostics io.Writer
 }
 
 func New(ctx context.Context, config Config) (*Server, error) {
@@ -330,9 +332,13 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 	}
 	diagnostics := make(chan struct{})
 	var diagnosticErr error
+	diagnosticOutput := io.Writer(io.Discard)
+	if s.fixtureDiagnostics != nil {
+		diagnosticOutput = s.fixtureDiagnostics
+	}
 	go func() {
 		defer close(diagnostics)
-		n, err := io.Copy(io.Discard, io.LimitReader(errR, (64<<10)+1))
+		n, err := io.Copy(diagnosticOutput, io.LimitReader(errR, (64<<10)+1))
 		if n > 64<<10 {
 			err = ErrService
 		}
