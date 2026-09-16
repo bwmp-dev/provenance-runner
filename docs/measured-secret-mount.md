@@ -4,7 +4,10 @@ An explicitly secret-provisioned bundle journal supplies a single derived mount
 at `/run/provenance/test-secrets`, read-only, nosuid, nodev and noexec. Its source
 is the job's recorded tmpfs child, not a caller-selected path or the shared
 parent. The retained parent and its canonical pathname must identify the same
-root-owned inode. Ordinary journals add no secret mount.
+root-owned inode through protected ancestors. Ordinary journals add no secret
+mount. A fixed 1-MiB metadata/content reserve is subtracted from the existing
+guest temporary-storage budget; a job too small for that reserve is refused.
+The immutable root must already provide the empty mountpoint.
 
 Before launch the empty child remains root-owned with mode 0550 and the mapped
 runtime's group. The runtime can traverse it but cannot change its permissions.

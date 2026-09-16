@@ -21,3 +21,15 @@ func TestMeasuredSecretMountRequiresOwnedPreparation(t *testing.T) {
 		}
 	}
 }
+
+func TestMeasuredSecretMountReservesExistingDiskBudget(t *testing.T) {
+	for _, spec := range []*ociSpec{nil, {}, {Mounts: []ociMount{{Destination: "/tmp", Type: "tmpfs", Options: []string{"size=1048576"}}}}} {
+		if reserveMeasuredSecretStorage(spec) == nil {
+			t.Fatal("missing reserve accepted")
+		}
+	}
+	spec := &ociSpec{Mounts: []ociMount{{Destination: "/tmp", Type: "tmpfs", Options: []string{"size=4194304", "nosuid"}}}}
+	if reserveMeasuredSecretStorage(spec) != nil || spec.Mounts[0].Options[0] != "size=3145728" || spec.Mounts[0].Options[1] != "nosuid" {
+		t.Fatal("secret disk reserve")
+	}
+}

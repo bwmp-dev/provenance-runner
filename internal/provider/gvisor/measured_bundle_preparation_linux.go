@@ -70,6 +70,9 @@ func (b *measuredBundle) prepare(ctx context.Context, job *p.JobSpecification, c
 	// Invalid input does not poison unrelated jobs' durable ownership journal.
 	b.preparationFailed = true
 	if b.record.SecretBoot != "" {
+		if reserveMeasuredSecretStorage(&spec) != nil {
+			return errMeasuredBundle
+		}
 		if !j.secretPathValid() || j.checkSecretDirectory(b.record) != nil {
 			return errMeasuredBundle
 		}
