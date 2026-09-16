@@ -26,6 +26,110 @@ def pin(path):
     return {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
+def rotation_fixture(root, evidence, previous, previous_path, legacy_plan):
+    """Two actual immutable images; synthetic manifests/drain, never production."""
+    source = evidence / 'rotation-source'
+    source.mkdir()
+    write(source / 'fixture.txt', b'second measured generation\n', 0o444)
+    image = evidence / 'rotation.squashfs'
+    b.run('mksquashfs', str(source), str(image), '-noappend', '-no-recovery', '-processors', '1')
+    sha = pin(image)['sha256']
+    generation = evidence / ('sha256-' + sha)
+    generation.mkdir(mode=0o710)
+    os.chown(generation, 0, previous['gid'])
+    image.rename(generation / 'image.squashfs')
+    image = generation / 'image.squashfs'
+    image.chmod(0o440)
+    os.chown(image, 0, previous['gid'])
+    (generation / 'rootfs').mkdir()
+    manifest = generation / 'image-manifest.json'
+    write(manifest, json.dumps({'format': 'squashfs-image-sha256/v1', 'sha256': sha,
+          'sizeBytes': image.stat().st_size, 'runnerUid': previous['uid'],
+          'runnerGid': previous['gid'], 'reproducibleBuilds': 2}).encode())
+    boot = previous | {'generation': str(generation), 'image': pin(image),
+                      'imageManifest': pin(manifest), 'rootfs': str(generation / 'rootfs'),
+                      'loop': str(generation / 'loop')}
+    unit = Path('/etc/systemd/system') / b.run('systemd-escape', '--path', '--suffix=mount', boot['rootfs'])
+    write(unit, b.unit_bytes(boot), 0o644)
+    boot['mountUnit'] = pin(unit)
+    bootpath = evidence / 'rotation-boot.json'
+    write(bootpath, json.dumps(boot).encode())
+    oldenv, oldhook = (root / 'runner.env').read_bytes(), (root / 'verify-rootfs').read_bytes()
+    write(evidence / 'rotation-before.env', oldenv)
+    write(evidence / 'rotation-after.env', b.render_environment(boot, oldenv))
+    write(evidence / 'rotation-before.hook', oldhook)
+    plan = legacy_plan | {'version': 2, 'bootPlan': pin(bootpath),
+                         'previousBootPlan': pin(previous_path),
+                         'environmentBefore': pin(evidence / 'rotation-before.env'),
+                         'environmentAfter': pin(evidence / 'rotation-after.env'),
+                         'hookBefore': pin(evidence / 'rotation-before.hook')}
+    del plan['legacyRootfs']
+    path = evidence / 'rotation.json'
+    write(path, json.dumps(plan).encode())
+    now = int(time.time())
+    drain = evidence / 'rotation-drain.json'
+    write(drain, json.dumps({'version': 1, 'planSha256': pin(path)['sha256'],
+          'issuedAt': now, 'expiresAt': now + 300, 'platformDrainEvidenceSha256': 'c' * 64,
+          'activeLeases': 0, 'pendingTerminalReplay': 0}).encode())
+    b.run('systemctl', 'daemon-reload')
+    def invoke(action, expected=0):
+        result = subprocess.run(('python3', '-I', str(root / 'measured-runtime-selection.py'), action,
+               '--plan', str(path), '--plan-sha256', pin(path)['sha256'], '--drain', str(drain),
+               '--drain-sha256', pin(drain)['sha256']), capture_output=True, timeout=90, umask=0o077)
+        assert result.returncode == expected, 'measured rotation invocation failed'
+    try:
+        # Both generation locks must independently exclude the operation.
+        for lockpath in (previous['generation'], boot['generation']):
+            fd = os.open(lockpath, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                invoke('select', 1)
+            finally:
+                os.close(fd)
+        assert (root / 'runner.env').read_bytes() == oldenv
+        assert (root / 'verify-rootfs').read_bytes() == oldhook
+        b.run('systemctl', 'stop', Path(previous['mountUnit']['path']).name)
+        invoke('select', 1)
+        assert (root / 'runner.env').read_bytes() == oldenv
+        assert (root / 'verify-rootfs').read_bytes() == oldhook
+        b.execute(previous, 'ensure')
+        # Interrupted selection is safe to resume; the mismatched hook refuses.
+        (root / 'verify-rootfs').write_bytes(s.hook(plan))
+        assert subprocess.run((str(root / 'verify-rootfs'),), capture_output=True,
+                              timeout=90).returncode == 1
+        invoke('select')
+        invoke('select')
+        b.run(str(root / 'verify-rootfs'))
+        assert (Path(boot['rootfs']) / 'fixture.txt').read_bytes() == b'second measured generation\n'
+        b.execute(previous, 'verify')
+        # Drift in the pinned previous hook snapshot refuses before rollback.
+        beforehook = Path(plan['hookBefore']['path'])
+        beforehook.write_bytes(b'#!/bin/sh\nexit 0\n')
+        invoke('rollback', 1)
+        beforehook.write_bytes(oldhook)
+        # Simulate committed rollback environment before restoring its hook.
+        (root / 'runner.env').write_bytes(oldenv)
+        assert subprocess.run((str(root / 'verify-rootfs'),), capture_output=True,
+                              timeout=90).returncode == 1
+        invoke('rollback')
+        invoke('rollback')
+        b.run(str(root / 'verify-rootfs'))
+        assert (root / 'runner.env').read_bytes() == oldenv
+        assert (root / 'verify-rootfs').read_bytes() == oldhook
+        b.execute(boot, 'verify')
+        print(json.dumps({'measuredRotationAndRollback': True, 'bothGenerationLocksEnforced': True,
+                          'missingRollbackMountRefusedBeforeWrites': True,
+                          'measuredMixedStateBootRefused': True, 'bothGenerationsRetained': True,
+                          'productionDrainProven': False}))
+    finally:
+        if os.path.ismount(boot['rootfs']):
+            b.mounted(boot)
+            b.run('systemctl', 'stop', unit.name)
+        assert not os.path.ismount(boot['rootfs'])
+        assert b.run('losetup', '--associated', boot['image']['path']) == ''
+        print(json.dumps({'rotationFixtureOwnedMountAndLoopAbsent': True}))
+
+
 def main():
     assert os.geteuid() == 0 and Path('/proc/1/comm').read_text().strip() == 'systemd'
     assert Path('/opt/boot-fixture/wrapper-proof.json').is_file()
@@ -147,6 +251,7 @@ def main():
         # Exercise both replacements from the original state, not only the
         # interrupted-hook state above, with the production operator umask.
         invoke('select')
+        rotation_fixture(root, evidence, boot, bootpath, plan)
         invoke('rollback')
         assert (root / 'runner.env').read_bytes() == oldenv
         assert (root / 'verify-rootfs').read_bytes() == oldhook

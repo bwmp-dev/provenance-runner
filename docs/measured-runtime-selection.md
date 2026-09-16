@@ -53,6 +53,25 @@ The new hook is generated from the pinned boot helper and boot-plan digest.
 The selector itself and helper code must be pinned by the installing coordinator;
 the plan is not a self-authenticating executable.
 
+For an already measured runner, use **selection-plan version 2**: the same fields,
+but replace `legacyRootfs` with `previousBootPlan: {path,sha256}`. Both boot plans
+must be environment-bound version 2 and refer to distinct image hashes and
+generation directories. Worker UID/GID, user unit, environment path and runsc pin
+must be identical. The before snapshot must contain all seven runtime values
+from the previous plan; the old hook must be exactly the generated pinned hook
+for that plan. This operation cannot also upgrade runsc or change worker identity.
+
+Both measured generations must already be installed with loaded mount metadata.
+The previous image must remain mounted, with verified read-only backing and its
+matching private loop alias, even when resuming selection or rolling back. Missing
+rollback storage refuses before any replacement; the selector does not recreate
+it. Both generation directory locks are held in sorted path order along with
+the updater lock. The old mount is reverified before each replacement; rollback
+also checks the restored environment against the previous plan. No image is
+detached in either direction. These requirements preserve the existing
+interrupted-transition safety without substituting the legacy tree for the real
+previous runtime.
+
 ## Drain and selection
 
 The authorized coordinator keeps admission disabled for this runner throughout
@@ -111,6 +130,10 @@ exact original-byte restoration and unchanged fixed binary/user-unit hashes.
 It also refuses pending updater operations/terminal replay and proves that a new
 catalog can pass the runtime boot binding while the old full-snapshot rollback
 plan refuses to erase that catalog change.
+The version-2 fixture additionally uses two distinct actual SquashFS images,
+checks exclusion by either generation lock, refuses a missing previous mount
+before writes, resumes interrupted selection and rollback, rejects snapshot
+drift, and verifies both retained mounts plus cleanup of the newly owned loop.
 It verifies owned mount/loop absence during fixture cleanup. The fake runsc ELF,
 catalog and coordinator drain are explicitly synthetic.
 

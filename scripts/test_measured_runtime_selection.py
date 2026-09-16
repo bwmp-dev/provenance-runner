@@ -73,7 +73,7 @@ class SelectionTests(unittest.TestCase):
                     with self.assertRaises(s.g.Refusal):
                         s.drain('/drain', 'd' * 64, 'a' * 64)
 
-    def transition_fixture(self, action, fail_after=None):
+    def transition_fixture(self, action, fail_after=None, measured=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             oldenv, newenv, oldhook = b'old-env\n', b'new-env\n', b'old-hook\n'
@@ -85,6 +85,9 @@ class SelectionTests(unittest.TestCase):
                  'helper': {'path': '/opt/provenance-runner/measured-rootfs-boot.py'},
                  'bootPlan': {'path': '/opt/boot-plan.json', 'sha256': 'a' * 64}, 'legacyRootfs': {}}
             boot = {'runtimeEnvironment': str(root / 'runner.env')}
+            previous = {'generation': '/previous'} if measured else None
+            if measured:
+                p['version'] = 2
             target_env, target_hook = root / 'runner.env', root / 'verify-rootfs'
             target_env.write_bytes(oldenv if action == 'select' else newenv)
             target_hook.write_bytes(oldhook if action == 'select' else s.hook(p))
@@ -98,6 +101,7 @@ class SelectionTests(unittest.TestCase):
                 if len(writes) == fail_after:
                     raise OSError('post-rename crash')
             with patch.object(s, 'ROOT', root), patch.object(s, 'state'), \
+                    patch.object(s, 'previous_boot', return_value=previous), \
                     patch.object(s.g, 'legacy'), patch.object(s.g, 'fingerprint', side_effect=fingerprint), \
                     patch.object(s.g, 'replace_file', side_effect=replace), \
                     patch.object(b, 'selected_environment'), patch.object(b, 'execute') as execute:
@@ -116,7 +120,12 @@ class SelectionTests(unittest.TestCase):
                 self.assertEqual(target_hook.read_bytes(), s.hook(p) if action == 'select' else oldhook)
                 self.assertEqual(writes, ['verify-rootfs', 'runner.env'] if action == 'select'
                                  else ['runner.env', 'verify-rootfs'])
-                self.assertEqual(execute.call_count, 1 if action == 'select' else 0)
+                if measured:
+                    self.assertGreaterEqual(execute.call_count, 4)
+                    self.assertEqual(execute.call_args.args,
+                                     (boot, 'ensure') if action == 'select' else (previous, 'verify'))
+                else:
+                    self.assertEqual(execute.call_count, 1 if action == 'select' else 0)
 
     def test_select_order_and_resume_after_committed_hook(self):
         self.transition_fixture('select')
@@ -125,6 +134,42 @@ class SelectionTests(unittest.TestCase):
     def test_rollback_order_and_resume_after_committed_environment(self):
         self.transition_fixture('rollback')
         self.transition_fixture('rollback', fail_after=1)
+
+    def test_measured_rotation_and_rollback_resume(self):
+        for action in ('select', 'rollback'):
+            for failure in (None, 1):
+                with self.subTest(action=action, failure=failure):
+                    self.transition_fixture(action, failure, measured=True)
+
+    def test_previous_boot_refuses_identity_change_and_same_generation(self):
+        boot = self.boot() | {'version': 2, 'generation': '/new', 'uid': 994, 'gid': 981,
+                              'userUnit': {'path': '/user-unit', 'sha256': 'd' * 64}}
+        previous = boot | {'generation': '/old', 'image': {'sha256': 'b' * 64}}
+        plan = {'previousBootPlan': {'path': '/previous.json', 'sha256': 'c' * 64}}
+        for delta in ({}, {'version': 1}, {'uid': 995}, {'gid': 982},
+                      {'userUnit': {}}, {'runsc': {}}, {'runtimeEnvironment': '/other'},
+                      {'generation': '/new'}, {'image': boot['image']}):
+            with self.subTest(delta=delta), patch.object(b, 'load_plan', return_value=previous | delta):
+                if delta:
+                    with self.assertRaises(s.g.Refusal):
+                        s.previous_boot(plan, boot)
+                else:
+                    self.assertEqual(s.previous_boot(plan, boot), previous)
+
+    def test_missing_previous_mount_refuses_before_any_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'snapshot'
+            path.write_bytes(b'synthetic\n')
+            plan = {'version': 2, 'environmentBefore': {'path': str(path)},
+                    'environmentAfter': {'path': str(path)}, 'hookBefore': {'path': str(path)},
+                    'helper': {'path': '/helper'}, 'bootPlan': {'path': '/plan', 'sha256': 'a' * 64}}
+            for action in ('select', 'rollback'):
+                with patch.object(s, 'state'), patch.object(s, 'previous_boot', return_value={}), \
+                        patch.object(b, 'execute', side_effect=s.g.Refusal('missing mount')), \
+                        patch.object(s.g, 'replace_file') as replace:
+                    with self.assertRaises(s.g.Refusal):
+                        s.transition(plan, {'runtimeEnvironment': '/environment'}, action, lambda: None)
+                    replace.assert_not_called()
 
     def test_hook_uses_isolated_python_and_pinned_boot_plan(self):
         p = {'helper': {'path': '/opt/provenance-runner/measured-rootfs-boot.py'},
