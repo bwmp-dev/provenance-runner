@@ -15,6 +15,7 @@ def validate_report(stdout, stderr, status):
     assert len(stdout) <= 65536 and len(stderr) <= 65536
     assert status == 0, stderr[-4096:]
     assert stdout.count('--- PASS: TestJobCgroupKernelLifecycle ') == 3
+    assert stdout.count('--- PASS: TestJobCgroupKernelLifecycle/pre-cleanup-pid-denial ') == 3
     assert stdout.count('--- PASS: TestJobCgroupJournalKernelRecovery ') == 3
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
 
@@ -50,6 +51,7 @@ def inside():
     assert not [p for p in jobs.iterdir() if p.is_dir()]
     jobs.rmdir()
     print(json.dumps({'ownedJobCgroupRemoved': True, 'descendantCleanup': True,
+                      'preCleanupPIDDenialObserved': True,
                       'journalCrashRecoveryAndLock': True,
                       'staleLaunchFDRefused': True, 'controllerSurvived': True, 'repetitions': 3}))
 

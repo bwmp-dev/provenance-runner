@@ -73,3 +73,13 @@ driver mock: it emitted argv but not the newly required NONE-v2 pass markers.
 The mock now emits both expected markers and separately verifies that omitting
 either fails. Actual systemd/NONE-v2 acceptance still must pass; correcting the
 mock does not stand in for that check.
+
+At integration head `c523763d921742537ba725e5fd0f238f77a3085b`, actual
+measured systemd acceptance in CI `35148068536` passed both NONE-v2 variants
+and cleanup. Its later routed service stage still reproduced the intermittent
+failure (worker secrets, exit 137 without OOM), so the overall check failed and
+is not waived. A separate three-run real gateway-secret acceptance passed at
+that head with service binary
+`1592368a50d859351405aa3a1de44af47695b23c1d30b7b21982f92689b34064`
+and worker binary
+`889df3075f640d4fffb545273cd040e23a11da4a8030b6fab6e19b24beef7807`.

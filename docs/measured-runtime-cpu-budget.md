@@ -44,3 +44,28 @@ the counter fails; the absence of evidence never becomes evidence of zero
 denials. Denials introduced by cleanup or later stale-descriptor attempts do
 not alter the captured value. A disposable kernel regression deliberately fills
 a one-task leaf and checks actual `EAGAIN`, retirement, and the frozen counter.
+
+## Diagnostic comparison and acceptance observations
+
+On 2026-09-16, diagnostic branch `37817b8` constrained only the disposable
+child's CPU visibility, retaining the 81-task limit and all workload budgets.
+Its 20 worker stress repetitions and all 30 service cases passed. Per-leaf
+pre-cleanup observations showed zero PID denials and a maximum peak of 46 tasks.
+The overall diagnostic run still failed its combined transcript-size assertion
+because of the added scalar logging; it is not a full-suite pass or a waived
+check. Release code contains neither those logs nor the diagnostic panic-pipe
+changes, and has separate full acceptance requirements.
+
+The CPU-budget implementation `ef48f51a303730f7773575f9fc8ca91eed459950`
+passed the full local race suite, vet and all 92 Python tests. Three real Paper
+gateway-secret runs passed with service binary
+`e5328c22cd63b4a1575a89c9355661551f754a83b3b996280031e7c92b0f033e`
+and worker binary
+`ac2eaf98c6e226ee3a0520de57c86afba2ddf2b566374eac50baaba9e31b2e93`.
+Those runs precede the additional PID-outcome classification change and do not
+substitute for its acceptance or actual platform/object-storage composition.
+
+The PID-outcome change separately passed the real private-cgroup kernel fixture
+three times, including actual denied creation, frozen counter retention,
+descendant retirement, stale-FD refusal and journal crash recovery. Test binary:
+`9399c3f3bc004c43b71061b86a0916ac2eb05380bae80d5f193d2ccb2342d9bc`.
