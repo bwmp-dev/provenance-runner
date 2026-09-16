@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -70,6 +72,14 @@ func fixtureArchive(t *testing.T, name string, raw []byte, mode int64) []byte {
 
 func TestMeasuredPaperServiceKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "complete")
+}
+
+func TestMeasuredPaperServiceSecretsKernel(t *testing.T) { measuredPaperServiceKernel(t, "secrets") }
+func TestMeasuredPaperServiceSecretsMissingKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "secrets-missing")
+}
+func TestMeasuredPaperServiceSecretsExpiredKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "secrets-expired")
 }
 
 func TestMeasuredPaperServiceWithdrawalKernel(t *testing.T) {
@@ -200,6 +210,20 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal("accepted probe fixture identity")
 	}
 	source, manifest, job := serviceFixtureJob(t, java, prepared)
+	secrets := strings.HasPrefix(mode, "secrets")
+	if secrets {
+		var config map[string]any
+		if json.Unmarshal(job.NormalizedConfigurationJson, &config) != nil {
+			t.Fatal("secret fixture configuration")
+		}
+		config["tests"].(map[string]any)["secrets"] = map[string]uint64{"license": 1}
+		job.NormalizedConfigurationJson, err = json.Marshal(config)
+		if err != nil {
+			t.Fatal("secret fixture configuration")
+		}
+		job.Hashes.Configuration = fixtureDigest(job.NormalizedConfigurationJson)
+		job.TestSecrets = []*p.TestSecretReference{{Name: "license", SecretId: "b1111111-1111-4111-8111-111111111111", Version: 1}}
+	}
 	if mode == "real" {
 		source, manifest, job = realPaperFixtureJob(t, java, prepared, paperBytes, targetBytes)
 	}
@@ -230,6 +254,18 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		}
 	})
 	bundles, err := gvisor.OpenMeasuredBundleJournal(bundleRoot, bundleState, groups)
+	if err == nil && secrets {
+		if bundles.Close() != nil {
+			t.Fatal("empty journal retirement")
+		}
+		secretRoot := openDir(filepath.Join(root, "secrets"), 0711)
+		t.Cleanup(func() {
+			if !t.Failed() && os.Remove(filepath.Join(root, "secrets")) != nil {
+				t.Error("secret parent retained")
+			}
+		})
+		bundles, err = gvisor.OpenMeasuredBundleJournalWithSecrets(bundleRoot, bundleState, secretRoot, groups)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +320,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(ctx, Config{Controller: controller, Measurement: lease, RuntimeSource: source, WorkerUID: 65532, MaximumInputBytes: maximumInput})
+	server, err := New(ctx, Config{Controller: controller, Measurement: lease, RuntimeSource: source, WorkerUID: 65532, MaximumInputBytes: maximumInput, EnableSecrets: secrets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +438,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		serveErr = server.Serve(ctx, channel)
 	}
 	clientErr := <-clientDone
-	if (serveErr != nil) != (clientMode != "complete" && clientMode != "reject-events") || clientErr != nil {
+	if (serveErr != nil) != (clientMode != "complete" && clientMode != "secrets" && clientMode != "reject-events") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
 	}
 	t.Run("root-idle-barrier-after-retirement", func(t *testing.T) {

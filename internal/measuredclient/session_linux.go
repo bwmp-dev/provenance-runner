@@ -11,6 +11,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -24,6 +25,10 @@ type SessionOptions struct {
 	PreparationDeadline time.Time
 	MaximumLogBytes     int64
 	BeforeRelease       func(context.Context) error
+	// PrepareSecrets runs only after root observation, before Java release.
+	// The caller owns returned descriptors through Run and configures redaction
+	// before returning. Values never enter job JSON or startup metadata.
+	PrepareSecrets func(context.Context) ([]ts.Descriptor, time.Time, error)
 }
 
 // SessionResult exists only after the same authenticated root session supplied
@@ -103,6 +108,28 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 	executionCtx, stopExecution := context.WithTimeout(ctx, execution)
 	defer stopExecution()
 	if options.BeforeRelease != nil && options.BeforeRelease(executionCtx) != nil {
+		return nil, ErrSession
+	}
+	if len(job.TestSecrets) > 0 {
+		if options.PrepareSecrets == nil || ts.ValidateSelection(job) != nil || guard.CheckJob(job) != nil {
+			return nil, ErrSession
+		}
+		descriptors, expires, err := options.PrepareSecrets(executionCtx)
+		ceiling, authorityErr := guard.CurrentLeaseExpiry(job)
+		if err != nil || authorityErr != nil || !expires.After(time.Now()) || expires.After(ceiling) || len(descriptors) != len(job.TestSecrets) {
+			return nil, ErrSession
+		}
+		names, files := make([]string, len(descriptors)), make([]*os.File, len(descriptors))
+		for i, descriptor := range descriptors {
+			if descriptor.Name != job.TestSecrets[i].Name {
+				return nil, ErrSession
+			}
+			names[i], files[i] = descriptor.Name, descriptor.File
+		}
+		if forwarder.DeliverSecrets(executionCtx, names, files, expires) != nil {
+			return nil, ErrSession
+		}
+	} else if options.PrepareSecrets != nil {
 		return nil, ErrSession
 	}
 	if executionCtx.Err() != nil || forwarder.Release(executionCtx) != nil {

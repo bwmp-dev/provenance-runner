@@ -127,11 +127,11 @@ def main():
             assert stress.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 20
             print('{"measuredWorkerStressRepetitions": 20}', flush=True)
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',
-                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal)?|Daemon|Worker)Kernel$',
-                                  '-test.count=3', '-test.timeout=120s'],
+                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal|Secrets|SecretsMissing|SecretsExpired)?|Daemon|Worker)Kernel$',
+                                  '-test.count=3', '-test.timeout=180s'],
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                       'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
-                                 capture_output=True, text=True, timeout=130)
+                                 capture_output=True, text=True, timeout=190)
         assert len(service.stdout) <= 65536 and len(service.stderr) <= 65536
         print(service.stdout, end='', flush=True)
         if service.returncode:
@@ -141,11 +141,13 @@ def main():
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceEventRefusalKernel ') == 3
+        for case in ('Secrets', 'SecretsMissing', 'SecretsExpired'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel/root-idle-barrier-after-retirement ') == 3
         for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' ') == 3
-        for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal'):
+        for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal', 'Secrets', 'SecretsMissing', 'SecretsExpired'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement ') == 3
             assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal ') == 3
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',

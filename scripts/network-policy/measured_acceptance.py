@@ -55,11 +55,13 @@ def validate_report(stdout, stderr, status, worker_stress=False):
     assert stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperServiceEventRefusalKernel ') == 3
+    for case in ('Secrets', 'SecretsMissing', 'SecretsExpired'):
+        assert stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 3
     assert stdout.count('--- PASS: TestMeasuredPaperWorkerKernel/root-idle-barrier-after-retirement ') == 3
     for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
         assert stdout.count('--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' ') == 3
-    for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal'):
+    for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal', 'Secrets', 'SecretsMissing', 'SecretsExpired'):
         assert stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement ') == 3
         assert stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal ') == 3
     assert stdout.count('--- PASS: TestMeasuredInputDownloadFixture ') == 3
@@ -158,7 +160,7 @@ def main():
             subprocess.run(command, check=True, capture_output=True, timeout=30)
             created.append(runtime_name)
             result = subprocess.run(['docker', 'start', '--attach', runtime_name],
-                                    capture_output=True, text=True, timeout=760 if args.worker_stress else 560)
+                                    capture_output=True, text=True, timeout=840 if args.worker_stress else 620)
             assert len(result.stdout) <= 131072 and len(result.stderr) <= 65536
             print(result.stdout, end='')
             validate_report(download.stdout + result.stdout, download.stderr + result.stderr, result.returncode, args.worker_stress)
@@ -191,7 +193,7 @@ def main():
             # On interruption, allow the fixture's bounded process to finish its
             # owned loop cleanup instead of force-killing it mid-mount.
             for name in reversed(created):
-                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=560)
+                subprocess.run(['docker', 'wait', name], capture_output=True, check=True, timeout=620)
                 subprocess.run(['docker', 'rm', name], capture_output=True, check=True, timeout=15)
 
 

@@ -6,6 +6,7 @@ package measuredclient
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"time"
 
@@ -17,14 +18,41 @@ import (
 var ErrSession = errors.New("measured_worker_session_refused")
 
 type AuthorityForwarder struct {
-	mu       sync.Mutex
-	ctx      context.Context
-	channel  *cc.Channel
-	sequence uint64
-	released bool
-	cancel   context.CancelFunc
-	done     chan struct{}
-	err      error
+	mu          sync.Mutex
+	ctx         context.Context
+	channel     *cc.Channel
+	sequence    uint64
+	released    bool
+	secretsSent bool
+	cancel      context.CancelFunc
+	done        chan struct{}
+	err         error
+}
+
+// DeliverSecrets borrows descriptors for one bounded, indivisible transfer.
+// Reconciliation packets cannot interleave with its descriptor batches. Root
+// independently checks selection, phase, expiry and sealed memory profiles.
+func (w *AuthorityForwarder) DeliverSecrets(ctx context.Context, names []string, files []*os.File, expires time.Time) error {
+	if w == nil || ctx == nil || ctx.Err() != nil {
+		return ErrSession
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.released || w.secretsSent || w.cancel == nil || w.ctx == nil || w.ctx.Err() != nil {
+		return ErrSession
+	}
+	w.secretsSent = true
+	deadline := time.Now().Add(5 * time.Second)
+	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+		deadline = end
+	}
+	next, err := cc.SendSecrets(w.channel, names, files, expires, w.sequence, deadline)
+	if err != nil {
+		w.cancel()
+		return ErrSession
+	}
+	w.sequence = next
+	return nil
 }
 
 // StartAuthorityForwarder owns the channel and its one serialized writer.
