@@ -209,7 +209,11 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 		}
 	} else {
 		if waitErr != nil || claimedExit != 0 || claimedInfrastructure || !strings.Contains(stdout.String(), "synthetic Paper guest prepared") || !strings.Contains(stderr.String(), "synthetic Paper guest stderr") || string(transcript.EventBytes()) != "{\"syntheticPaperEvent\":true}\n" {
-			t.Fatal("Paper preparation or framed result failed", waitErr)
+			diagnostic := stderr.String()
+			if len(diagnostic) > 4096 {
+				diagnostic = diagnostic[len(diagnostic)-4096:]
+			}
+			t.Fatalf("Paper preparation or framed result failed: %v; synthetic guest stderr: %s", waitErr, diagnostic)
 		}
 	}
 	if !owned.bundle.retired || owned.Release(ctx) == nil || controller.Close(ctx) != nil || c.Uplinks.Recover(ctx) != nil {
