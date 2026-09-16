@@ -112,6 +112,20 @@ def main():
             return
         # Exercise the new composed service before the longer regression suite
         # so provisioning failures surface promptly. Both remain mandatory.
+        if os.environ.get('PROVENANCE_DISPOSABLE_WORKER_STRESS') == '1':
+            stress = subprocess.run(['/tmp/measured-service.test', '-test.v',
+                                     '-test.run=^TestMeasuredPaperWorkerKernel$',
+                                     '-test.count=20', '-test.timeout=220s'],
+                                    env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
+                                         'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
+                                    capture_output=True, text=True, timeout=230)
+            assert len(stress.stdout) <= 65536 and len(stress.stderr) <= 65536
+            if stress.returncode:
+                print(stress.stdout, end='', flush=True)
+                raise RuntimeError('worker stress failed: '+stress.stderr[-4096:])
+            assert '--- SKIP:' not in stress.stdout
+            assert stress.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 20
+            print('{"measuredWorkerStressRepetitions": 20}', flush=True)
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',
                                   '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal)?|Daemon|Worker)Kernel$',
                                   '-test.count=3', '-test.timeout=120s'],

@@ -206,7 +206,7 @@ jobs:
           docker build --iidfile "${evidence}/fixture-image.txt" \
             -f scripts/network-policy/Dockerfile.sentry scripts/network-policy
           image=$(< "${evidence}/fixture-image.txt")
-          python3 -B scripts/network-policy/measured_acceptance.py --image "$image" \
+          python3 -B scripts/network-policy/measured_acceptance.py --worker-stress --image "$image" \
             --builder "${PROVENANCE_INSTALL_ROOT}/measured-builder" \
             2>&1 | tee "${evidence}/acceptance.log"
           (cd "$evidence" && sha256sum source-commit.txt fixture-image.txt acceptance.log > manifest.sha256)
