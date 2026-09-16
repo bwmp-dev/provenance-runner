@@ -11,9 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,21 +64,7 @@ func TestRunscSmokeNoNetworkV2(t *testing.T) {
 		return raw.Bytes()
 	}
 	payloads := map[string][]byte{"/java": archive("fixture-jre/bin/java", executable, 0755), "/paper": []byte("synthetic paper"), "/probe": []byte("synthetic probe"), "/prepared": archive("cache/patched.jar", []byte("synthetic prepared"), 0600), "/target": []byte("synthetic target")}
-	server := httptest.NewTLSServer(http.HandlerFunc(func(out http.ResponseWriter, request *http.Request) {
-		if value, ok := payloads[request.URL.Path]; ok {
-			out.Write(value)
-		} else {
-			http.NotFound(out, request)
-		}
-	}))
-	defer server.Close()
-	client := server.Client()
-	transport := client.Transport.(*http.Transport)
-	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
-	}
-	transport.TLSClientConfig.ServerName = "example.com"
-	const origin = "https://93.184.216.34"
+	const origin = "https://example.com"
 	pin := func(path, name string) paper.ArtifactPin {
 		return paper.ArtifactPin{URI: origin + path, SHA256: artifact.SHA256(payloads[path]).String(), Filename: name, SizeBytes: int64(len(payloads[path]))}
 	}
@@ -108,6 +91,18 @@ func TestRunscSmokeNoNetworkV2(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// This fixture tests execution and evidence, not HTTP acquisition.
+			// Seed through the real hash/size-verified cache to avoid ambient DNS
+			// or weakening the production DNS-name-only source policy.
+			for _, data := range payloads {
+				_, err := cache.AcquireExact(ctx, artifact.SHA256(data), int64(len(data)), artifact.SourceFunc(func(_ context.Context, out io.Writer) error {
+					_, err := out.Write(data)
+					return err
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			image, err := os.Open(os.Getenv("PROVENANCE_MEASURED_ROOTFS_IMAGE"))
 			if err != nil {
 				t.Fatal(err)
@@ -122,7 +117,7 @@ func TestRunscSmokeNoNetworkV2(t *testing.T) {
 			if err != nil || sandbox.Reconcile(ctx) != nil {
 				t.Fatal("isolated provider", err)
 			}
-			provider, err := paper.New(paper.Config{Catalog: catalog, HTTPClient: client, ArtifactHosts: []string{"93.184.216.34"}, ArtifactCache: cache, JavaCache: cache, PaperCache: cache, ProbeCache: cache, RuntimeCache: cache, Workspaces: manager, Sandbox: sandbox, MaximumArtifactBytes: 64 << 20, MaximumDependencyBytes: 64 << 20, MaximumPreparationBytes: 256 << 20})
+			provider, err := paper.New(paper.Config{Catalog: catalog, ArtifactHosts: []string{"example.com"}, ArtifactCache: cache, JavaCache: cache, PaperCache: cache, ProbeCache: cache, RuntimeCache: cache, Workspaces: manager, Sandbox: sandbox, MaximumArtifactBytes: 64 << 20, MaximumDependencyBytes: 64 << 20, MaximumPreparationBytes: 256 << 20})
 			if err != nil {
 				t.Fatal(err)
 			}
