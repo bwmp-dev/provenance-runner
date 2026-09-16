@@ -28,7 +28,10 @@ func stageMeasuredSecrets(ctx context.Context, directory *os.File, descriptors [
 	}
 	var st unix.Stat_t
 	var fs unix.Statfs_t
-	if unix.Fstat(int(directory.Fd()), &st) != nil || st.Mode != unix.S_IFDIR|0700 || st.Uid != 0 || st.Gid != 0 || st.Nlink == 0 || unix.Fstatfs(int(directory.Fd()), &fs) != nil || fs.Type != unix.TMPFS_MAGIC {
+	if unix.Fstat(int(directory.Fd()), &st) != nil || st.Uid != 0 || st.Nlink == 0 || unix.Fstatfs(int(directory.Fd()), &fs) != nil || fs.Type != unix.TMPFS_MAGIC {
+		return errMeasuredBundle
+	}
+	if !((st.Mode == unix.S_IFDIR|0700 && st.Gid == 0) || (st.Mode == unix.S_IFDIR|0550 && st.Gid == mapping.GID)) {
 		return errMeasuredBundle
 	}
 	view, err := openBundleAt(directory, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)

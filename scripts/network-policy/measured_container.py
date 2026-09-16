@@ -153,6 +153,8 @@ def main():
             assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' ') == 3
         for case in ('normal', 'cold', 'foreign', 'intent-only', 'replaced', 'wrong-boot', 'wrong-parent'):
             assert result.stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/secret-journal-recovery/'+case+' ') == 3
+        for case in ('PaperGuest', 'PaperGuestRefusal'):
+            assert result.stdout.count('--- PASS: TestMeasuredNetworkSession'+case+'/late-sealed-secret-mount ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredControlListener ') == 3
         assert result.stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3

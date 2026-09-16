@@ -4,8 +4,10 @@ package gvisor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
@@ -47,6 +49,10 @@ func OpenMeasuredBundleJournalWithSecrets(parent, state, secretParent *os.File, 
 		return fail()
 	}
 	j.secretParentDev, j.secretParentIno = uint64(st.Dev), st.Ino
+	j.secretPath, err = os.Readlink(fmt.Sprintf("/proc/self/fd/%d", j.secretParent.Fd()))
+	if err != nil || !j.secretPathValid() {
+		return fail()
+	}
 	f, err := os.OpenFile("/proc/sys/kernel/random/boot_id", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return fail()
@@ -60,6 +66,34 @@ func OpenMeasuredBundleJournalWithSecrets(parent, state, secretParent *os.File, 
 	return j, nil
 }
 
+func (j *measuredBundleJournal) secretPathValid() bool {
+	if !filepath.IsAbs(j.secretPath) || filepath.Clean(j.secretPath) != j.secretPath || j.secretPath == "/" || len(j.secretPath) > 4096 || strings.ContainsAny(j.secretPath, "\x00\r\n") {
+		return false
+	}
+	fd, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = unix.Close(fd) }()
+	// Every ancestor is root-owned and non-writable, except root-owned sticky
+	// directories such as /dev/shm. Their root-owned children cannot be renamed
+	// by the worker between validation and the gofer opening the mount source.
+	for _, component := range strings.Split(strings.TrimPrefix(j.secretPath, "/"), "/") {
+		var parent unix.Stat_t
+		if unix.Fstat(fd, &parent) != nil || parent.Uid != 0 || parent.Gid != 0 || (parent.Mode&0022 != 0 && parent.Mode&unix.S_ISVTX == 0) {
+			return false
+		}
+		next, err := unix.Openat2(fd, component, &unix.OpenHow{Flags: unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+		if err != nil {
+			return false
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	var st unix.Stat_t
+	return unix.Fstat(fd, &st) == nil && uint64(st.Dev) == j.secretParentDev && st.Ino == j.secretParentIno && st.Uid == 0 && st.Gid == 0 && st.Mode == unix.S_IFDIR|0711
+}
+
 func measuredSecretParent(f *os.File) bool {
 	if f == nil {
 		return false
@@ -70,7 +104,7 @@ func measuredSecretParent(f *os.File) bool {
 }
 
 func (j *measuredBundleJournal) secretParentValid() bool {
-	if !measuredSecretParent(j.secretParent) {
+	if !measuredSecretParent(j.secretParent) || !j.secretPathValid() {
 		return false
 	}
 	var st unix.Stat_t

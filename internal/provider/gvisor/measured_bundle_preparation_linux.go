@@ -5,6 +5,7 @@ package gvisor
 import (
 	"context"
 	"encoding/json"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	"io"
 	"os"
 	"path/filepath"
@@ -50,10 +51,6 @@ func (b *measuredBundle) prepare(ctx context.Context, job *p.JobSpecification, c
 	if err != nil {
 		return errMeasuredBundle
 	}
-	raw, err := json.Marshal(spec)
-	if err != nil || len(raw) > 1<<20 {
-		return errMeasuredBundle
-	}
 	j := b.owner
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -72,6 +69,25 @@ func (b *measuredBundle) prepare(ctx context.Context, job *p.JobSpecification, c
 	// A partial preparation can only be cleaned up, not retried or launched.
 	// Invalid input does not poison unrelated jobs' durable ownership journal.
 	b.preparationFailed = true
+	if b.record.SecretBoot != "" {
+		if !j.secretPathValid() || j.checkSecretDirectory(b.record) != nil {
+			return errMeasuredBundle
+		}
+		dir, err := openBundleAt(j.secretParent, b.record.Job, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+		if err != nil {
+			return errMeasuredBundle
+		}
+		ownerErr, modeErr := dir.Chown(0, int(mapping.GID)), dir.Chmod(0550)
+		closeErr := dir.Close()
+		if ownerErr != nil || modeErr != nil || closeErr != nil {
+			return errMeasuredBundle
+		}
+		spec.Mounts = append(spec.Mounts, ociMount{Destination: ts.Destination, Type: "bind", Source: filepath.Join(j.secretPath, b.record.Job), Options: []string{"bind", "ro", "nosuid", "nodev", "noexec"}})
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil || len(raw) > 1<<20 {
+		return errMeasuredBundle
+	}
 	for _, name := range []string{".measured-root", ".runsc-state", "inputs"} {
 		if unix.Mkdirat(int(b.directory.Fd()), name, 0700) != nil {
 			return errMeasuredBundle
@@ -167,6 +183,9 @@ func (b *measuredBundle) checkPrepared(mapping np.MappedIdentity) (result error)
 		}
 	}()
 	if b.prepared.mapping != mapping {
+		return errMeasuredBundle
+	}
+	if j.checkSecretDirectory(b.record) != nil {
 		return errMeasuredBundle
 	}
 	var root unix.Stat_t

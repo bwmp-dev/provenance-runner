@@ -13,10 +13,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/controlchannel"
 	"github.com/bwmp-dev/provenance-runner/internal/guestoutput"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
 func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c measuredSessionConfig, input, out, output *os.File) {
@@ -140,6 +142,24 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if err != nil || observation == nil {
 		t.Fatal("live Paper helper kernel observation", err)
 	}
+	t.Run("late-sealed-secret-mount", func(t *testing.T) {
+		owner, err := ts.New([]ts.Input{{Name: "license", Value: []byte("synthetic-late-guest-secret")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer owner.Close()
+		views, err := owner.ReadOnlyDescriptors()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer views[0].File.Close()
+		if owned.bundle.stageSecrets(ctx, c.Launch.Job, views, time.Now().Add(time.Minute)) != nil {
+			t.Fatal("late materialization")
+		}
+		if owned.bundle.stageSecrets(ctx, c.Launch.Job, views, time.Now().Add(time.Minute)) == nil {
+			t.Fatal("repeated materialization")
+		}
+	})
 	// Bootstrap is supplied only after the helper is running and its retained
 	// runtime objects have been observed; readiness alone is not evidence.
 	if _, err = input.Write(raw); err != nil {

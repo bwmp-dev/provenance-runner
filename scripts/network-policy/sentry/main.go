@@ -223,6 +223,18 @@ func paperPreparationFixture() {
 	if os.Getuid() != 65532 || os.Getgid() != 65532 {
 		panic("non-root guest required")
 	}
+	secret, secretErr := os.ReadFile("/run/provenance/test-secrets/license")
+	if secretErr != nil || string(secret) != "synthetic-late-guest-secret" {
+		panic("late secret mount unavailable")
+	}
+	clear(secret)
+	if os.WriteFile("/run/provenance/test-secrets/license", []byte("changed"), 0600) == nil || os.WriteFile("/run/provenance/test-secrets/new", []byte("changed"), 0600) == nil || os.Chmod("/run/provenance/test-secrets", 0700) == nil {
+		panic("mutable secret mount")
+	}
+	entries, secretErr := os.ReadDir("/run/provenance/test-secrets")
+	if secretErr != nil || len(entries) != 1 || entries[0].Name() != "license" {
+		panic("unexpected secret mount entries")
+	}
 	for name, want := range map[string]string{"paper.jar": "synthetic paper", "plugins/target.jar": "synthetic target", "plugins/provenance-probe.jar": "synthetic probe", "cache/patched.jar": "synthetic prepared"} {
 		raw, err := os.ReadFile(name)
 		if err != nil || string(raw) != want {

@@ -27,6 +27,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['{"measuredHostUplinkJournalRetired": true}']
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' (1s)' for case in ('success', 'expired', 'cancelled', 'bad-name', 'duplicate', 'oversize', 'persistent') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/secret-journal-recovery/'+case+' (1s)' for case in ('normal', 'cold', 'foreign', 'intent-only', 'replaced', 'wrong-boot', 'wrong-parent') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredNetworkSession'+case+'/late-sealed-secret-mount (1s)' for case in ('PaperGuest', 'PaperGuestRefusal') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredHostUplinkColdRecovery (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredControlListener (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer (1s)' for _ in range(3)]

@@ -44,6 +44,8 @@ def validate_report(stdout, stderr, status):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/sealed-secret-tmpfs-materialization/'+case+' ') == 3
     for case in ('normal', 'cold', 'foreign', 'intent-only', 'replaced', 'wrong-boot', 'wrong-parent'):
         assert stdout.count('--- PASS: TestMeasuredBundleJournalKernelRecovery/secret-journal-recovery/'+case+' ') == 3
+    for case in ('PaperGuest', 'PaperGuestRefusal'):
+        assert stdout.count('--- PASS: TestMeasuredNetworkSession'+case+'/late-sealed-secret-mount ') == 3
     assert stdout.count('--- PASS: TestMeasuredHostUplinkColdRecovery ') == 3
     assert stdout.count('--- PASS: TestMeasuredControlListener ') == 3
     assert stdout.count('--- PASS: TestMeasuredNetworkSessionRouterLoss/root-observation-transfer ') == 3
