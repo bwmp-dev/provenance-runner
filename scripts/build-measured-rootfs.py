@@ -244,6 +244,9 @@ def install_secret_mountpoint(root, uid, gid):
         if not target.exists():
             target.mkdir(mode=0o755)
             os.chown(target, uid, gid)
+            # Normalize only directories we just created in the private image
+            # staging tree; a restrictive caller umask must not alter the image.
+            os.chmod(target, 0o755)
         if target.stat().st_mode & 0o7777 != 0o755:
             raise Invalid("invalid secret mountpoint permissions")
         if name == 'run/provenance/test-secrets' and any(target.iterdir()):

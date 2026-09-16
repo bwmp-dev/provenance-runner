@@ -16,6 +16,22 @@ spec.loader.exec_module(builder)
 
 
 class ImageBuilderTests(unittest.TestCase):
+    def test_secret_mountpoint_with_restrictive_umask(self):
+        previous = os.umask(0o077)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                builder.install_secret_mountpoint(root, os.getuid(), os.getgid())
+                for name in ('run', 'run/provenance', 'run/provenance/test-secrets'):
+                    self.assertEqual(0o755, (root / name).stat().st_mode & 0o7777)
+                target = root / 'run/provenance/test-secrets'
+                target.chmod(0o700)
+                with self.assertRaises(builder.Invalid):
+                    builder.install_secret_mountpoint(root, os.getuid(), os.getgid())
+                self.assertEqual(0o700, target.stat().st_mode & 0o7777)
+        finally:
+            os.umask(previous)
+
     def test_closed_secret_mountpoint(self):
         for case in ('valid', 'symlink-parent', 'symlink-target', 'file-parent', 'nonempty', 'writable'):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
