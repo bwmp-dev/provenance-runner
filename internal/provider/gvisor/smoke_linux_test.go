@@ -47,6 +47,9 @@ func (r secretSmokeDebugRunner) Run(ctx context.Context, invocation command) com
 }
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "-Xms") {
+		os.Exit(runPaperNoneFixtureGuest())
+	}
 	if len(os.Args) > 1 && os.Args[1] == MeasuredLauncherCommand {
 		if expected := os.Getenv("PROVENANCE_MEASUREMENT_EXPECTED_PROFILE"); expected != "" {
 			label, err := os.ReadFile("/proc/self/attr/current")

@@ -79,11 +79,12 @@ func permanent(format string, arguments ...any) error {
 }
 
 type Client struct {
-	config    Config
-	connector streamConnector
-	worker    RemoteWorker
-	journal   *journal
-	close     func() error
+	config         Config
+	connector      streamConnector
+	worker         RemoteWorker
+	networkMaximum *runnerv1.EffectivePolicy
+	journal        *journal
+	close          func() error
 
 	now                func() time.Time
 	newExpirationTimer func(time.Duration) *time.Timer
@@ -154,6 +155,26 @@ func newClient(config Config, connector streamConnector) *Client {
 }
 
 func newClientWithWorker(config Config, connector streamConnector, worker RemoteWorker) (*Client, error) {
+	var networkMaximum *runnerv1.EffectivePolicy
+	if config.EnableNetworkPolicyV2 {
+		provider, ok := worker.(interface {
+			MeasuredNetworkMaximum() *runnerv1.EffectivePolicy
+		})
+		_, v2 := worker.(RemoteWorkerV2)
+		if !ok || !v2 || !config.EnableTerminalEvidenceV2 || config.DisableTerminalEvidence {
+			return nil, errors.New("network-v2 requires measured worker and terminal evidence v2")
+		}
+		networkMaximum = provider.MeasuredNetworkMaximum()
+		if _, err := networkpolicy.EffectivePolicyV2SHA256(networkMaximum); err != nil || networkMaximum.GetSandbox() != runnerv1.SandboxKind_SANDBOX_KIND_GVISOR {
+			return nil, errors.New("network-v2 requires a valid root-confirmed maximum")
+		}
+		networkMaximum = proto.Clone(networkMaximum).(*runnerv1.EffectivePolicy)
+		bounds := networkMaximum.Resources
+		config.Resources.CPUMillis = min(config.Resources.CPUMillis, bounds.CpuMillis)
+		config.Resources.MemoryBytes = min(config.Resources.MemoryBytes, bounds.MemoryBytes)
+		config.Resources.DiskBytes = min(config.Resources.DiskBytes, bounds.DiskBytes)
+		config.Resources.ProcessCount = min(config.Resources.ProcessCount, bounds.ProcessCount)
+	}
 	if config.credentialStore == nil && filepath.IsAbs(config.CredentialFile) {
 		// Existing configurations retain legacy connectivity when the host lacks
 		// the required Linux durability primitives. The feature is advertised
@@ -171,6 +192,7 @@ func newClientWithWorker(config Config, connector streamConnector, worker Remote
 		config:             config,
 		connector:          connector,
 		worker:             worker,
+		networkMaximum:     networkMaximum,
 		journal:            journal,
 		now:                time.Now,
 		newExpirationTimer: time.NewTimer,
@@ -383,6 +405,7 @@ func (c *Client) runSession(ctx context.Context) (established bool, result error
 		generation:            generation,
 		testSecretsV1:         advertisedFeature(capabilities.GetCapabilities().GetFeatures(), runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1),
 		networkFeatures:       append([]runnerv1.ProtocolFeature(nil), capabilities.GetCapabilities().GetFeatures()...),
+		networkMaximum:        cloneNetworkMaximum(c.networkMaximum),
 	}
 	defer func() { c.stopSecretWorker(generation); session.abandonSecretRequest() }()
 	defer c.stopNetworkAuthority(generation)
@@ -577,7 +600,10 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 	if canUseTestSecrets(c.config, c.worker) {
 		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1)
 	}
-	return &runnerv1.Capabilities{
+	if c.networkMaximum != nil && c.config.EnableNetworkPolicyV2 && c.config.EnableTerminalEvidenceV2 && !c.config.DisableTerminalEvidence {
+		features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_POLICY_V2, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2)
+	}
+	result := &runnerv1.Capabilities{
 		RunnerVersion:    c.config.RunnerVersion,
 		ProtocolVersions: []string{ProtocolVersion},
 		OperatingSystem:  runnerv1.OperatingSystem_OPERATING_SYSTEM_LINUX,
@@ -593,6 +619,18 @@ func (c *Client) capabilities() *runnerv1.Capabilities {
 		},
 		Features: features,
 	}
+	if advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_POLICY_V2) {
+		result.Policy.MaximumNetwork = nil
+		result.Policy.MaximumNetworkV2 = proto.Clone(c.networkMaximum.NetworkV2).(*runnerv1.NetworkPolicyV2)
+	}
+	return result
+}
+
+func cloneNetworkMaximum(maximum *runnerv1.EffectivePolicy) *runnerv1.EffectivePolicy {
+	if maximum == nil {
+		return nil
+	}
+	return proto.Clone(maximum).(*runnerv1.EffectivePolicy)
 }
 
 func (c *Client) capacity() *runnerv1.Capacity {

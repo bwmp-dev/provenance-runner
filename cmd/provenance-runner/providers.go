@@ -21,6 +21,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 	processprovider "github.com/bwmp-dev/provenance-runner/internal/provider/process"
 	"github.com/bwmp-dev/provenance-runner/internal/workspace"
+	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 )
 
 type environmentLookup func(string) string
@@ -37,13 +38,16 @@ type providerRegistry struct {
 	*execution.Registry
 	instanceLocks    *instancelock.Set
 	measuredEndpoint string
+	measuredSecrets  bool
+	measuredMaximum  *p.EffectivePolicy
+	none             *providerRegistry
 }
 
 func (r *providerRegistry) Close() error {
 	if r == nil {
 		return nil
 	}
-	return r.instanceLocks.Close()
+	return errors.Join(r.none.Close(), r.instanceLocks.Close())
 }
 
 func registryForProvider(ctx context.Context, providerName string, lookup environmentLookup) (*providerRegistry, error) {
@@ -60,6 +64,18 @@ func registryForLocalExecution(ctx context.Context, providerName string, lookup 
 
 func registryForProviderWithOptions(ctx context.Context, providerName string, lookup environmentLookup, options paperProviderOptions) (*providerRegistry, error) {
 	endpoint := lookup("PROVENANCE_MEASURED_SERVICE_SOCKET")
+	noneMode := lookup("PROVENANCE_MEASURED_NONE_PROVIDER")
+	secretMode := lookup("PROVENANCE_MEASURED_TEST_SECRETS")
+	networkMode := lookup("PROVENANCE_MEASURED_NETWORK_V2")
+	if networkMode != "" && (networkMode != "enabled" || endpoint == "" || noneMode != "isolated") {
+		return nil, errors.New("PROVENANCE_MEASURED_NETWORK_V2 requires enabled, a measured endpoint, and isolated none provider")
+	}
+	if secretMode != "" && (secretMode != "enabled" || endpoint == "" || noneMode != "isolated") {
+		return nil, errors.New("PROVENANCE_MEASURED_TEST_SECRETS requires enabled, a measured endpoint, and isolated none provider")
+	}
+	if noneMode != "" && (noneMode != "isolated" || endpoint == "") {
+		return nil, errors.New("PROVENANCE_MEASURED_NONE_PROVIDER requires isolated and a measured service endpoint")
+	}
 	if endpoint != "" && (providerName != paper.ProviderName || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0)) {
 		return nil, errors.New("PROVENANCE_MEASURED_SERVICE_SOCKET must be an absolute clean Unix socket path for Paper")
 	}
@@ -77,7 +93,47 @@ func registryForProviderWithOptions(ctx context.Context, providerName string, lo
 	if err != nil {
 		return nil, errors.Join(err, instanceLocks.Close())
 	}
-	return &providerRegistry{Registry: registry, instanceLocks: instanceLocks, measuredEndpoint: endpoint}, nil
+	result := &providerRegistry{Registry: registry, instanceLocks: instanceLocks, measuredEndpoint: endpoint}
+	if noneMode == "isolated" {
+		// Explicitly retain the already provisioned no-network provider. It
+		// owns separate sandbox journals/locks, never the root network session.
+		result.none, err = registryForProviderWithOptions(ctx, providerName, func(name string) string {
+			if name == "PROVENANCE_MEASURED_SERVICE_SOCKET" || name == "PROVENANCE_MEASURED_NONE_PROVIDER" || name == "PROVENANCE_MEASURED_TEST_SECRETS" || name == "PROVENANCE_MEASURED_NETWORK_V2" {
+				return ""
+			}
+			return lookup(name)
+		}, options)
+		if err != nil {
+			return nil, errors.Join(err, result.Close())
+		}
+	}
+	if secretMode == "enabled" {
+		provider, _ := result.Provider(paper.ProviderName)
+		readiness, ok := provider.(interface {
+			CheckMeasuredSecrets(context.Context, string) error
+		})
+		if !ok {
+			return nil, errors.Join(errors.New("measured secret readiness unavailable"), result.Close())
+		}
+		if err := readiness.CheckMeasuredSecrets(ctx, endpoint); err != nil {
+			return nil, errors.Join(err, result.Close())
+		}
+		result.measuredSecrets = true
+	}
+	if networkMode == "enabled" {
+		provider, _ := result.Provider(paper.ProviderName)
+		readiness, ok := provider.(interface {
+			ReadMeasuredMaximum(context.Context, string) (*p.EffectivePolicy, error)
+		})
+		if !ok {
+			return nil, errors.Join(errors.New("measured network readiness unavailable"), result.Close())
+		}
+		result.measuredMaximum, err = readiness.ReadMeasuredMaximum(ctx, endpoint)
+		if err != nil {
+			return nil, errors.Join(err, result.Close())
+		}
+	}
+	return result, nil
 }
 
 func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup, options paperProviderOptions) (*paper.Provider, *instancelock.Set, error) {

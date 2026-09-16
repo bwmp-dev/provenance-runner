@@ -14,7 +14,7 @@ import (
 
 func networkMeasuredArguments() []string {
 	job := "10000000-0000-4000-8000-000000000001"
-	return []string{job, "65532", "65532", "65533", "65533", filepath.Join("/fixture", job, ".measured-root"), strings.Repeat("a", 64), "embedded-executable"}
+	return []string{job, "65532", "65532", "65533", "65533", filepath.Join("/fixture", job, ".measured-root"), strings.Repeat("a", 64), "embedded-executable", "2000"}
 }
 
 func TestMeasuredNetworkHandoffHasClosedArguments(t *testing.T) {
@@ -31,9 +31,9 @@ func TestMeasuredNetworkHandoffHasClosedArguments(t *testing.T) {
 	if embeddedOptions(run) {
 		t.Fatal("network handoff silently admitted through legacy launcher")
 	}
-	for _, index := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8} {
+	for _, index := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9} {
 		changed := append([]string(nil), args...)
-		if index == 8 {
+		if index == 9 {
 			changed = append(changed, "--network=host")
 		} else {
 			changed[index] = "secret-value"

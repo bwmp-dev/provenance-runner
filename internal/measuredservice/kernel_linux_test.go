@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -72,6 +74,18 @@ func TestMeasuredPaperServiceKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "complete")
 }
 
+func TestMeasuredPaperServiceSecretsKernel(t *testing.T) { measuredPaperServiceKernel(t, "secrets") }
+func TestMeasuredPaperServiceSecretsMissingKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "secrets-missing")
+}
+func TestMeasuredPaperServiceSecretsExpiredKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "secrets-expired")
+}
+
+func TestMeasuredPaperWorkerSecretsKernel(t *testing.T) {
+	measuredPaperServiceKernel(t, "worker-secrets")
+}
+
 func TestMeasuredPaperServiceWithdrawalKernel(t *testing.T) {
 	measuredPaperServiceKernel(t, "withdraw")
 }
@@ -106,8 +120,13 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal("empty supplementary groups")
 	}
 	t.Run("root-idle-response-refusal", idleRefusalFixture)
+	if mode == "complete" {
+		t.Run("root-secret-capability-protocol", secretProbeRefusalFixture)
+		t.Run("root-maximum-protocol", maximumRefusalFixture)
+	}
 	budget, maximumInput := 45*time.Second, uint64(64<<20)
-	if mode == "real" {
+	realPaper := mode == "real" || mode == "real-secrets"
+	if realPaper {
 		budget, maximumInput = 300*time.Second, 512<<20
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
@@ -188,11 +207,14 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	java := fixtureArchive(t, "jre/bin/java", executable, 0755)
 	prepared := fixtureArchive(t, "cache/patched.jar", []byte("synthetic prepared"), 0600)
 	paperBytes, targetBytes := []byte("synthetic paper"), []byte("synthetic target")
-	if mode == "real" {
+	if realPaper {
 		java = realPaperInput(t, "java.tar.gz", "968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03", 64<<20)
 		prepared = realPaperInput(t, "prepared-runtime.tar.gz", "bd8ba32e4ec988a09335b868a9585c94ca75600e445f37825fd8339bee45d69c", 256<<20)
 		paperBytes = realPaperInput(t, "paper.jar", "8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e", 64<<20)
 		targetBytes = realPaperInput(t, "target.jar", "a0c881f0a9e2229143ae8cfcc5fd019de02ce96504fe66c29f90eb13aad004ba", 1<<20)
+		if mode == "real-secrets" {
+			targetBytes = realPaperInput(t, "secret-target.jar", "b84160a378c4e0eaa5f8ada6b0b05a825791c2baf89d11aff5304bf3f923a4b1", 1<<20)
+		}
 	}
 	probe, err := os.ReadFile("/opt/provenance-fixture/paper-probe.jar")
 	digest := sha256.Sum256(probe)
@@ -200,8 +222,22 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal("accepted probe fixture identity")
 	}
 	source, manifest, job := serviceFixtureJob(t, java, prepared)
-	if mode == "real" {
+	if realPaper {
 		source, manifest, job = realPaperFixtureJob(t, java, prepared, paperBytes, targetBytes)
+	}
+	secrets := strings.HasPrefix(mode, "secrets") || mode == "worker-secrets" || mode == "real-secrets"
+	if secrets {
+		var config map[string]any
+		if json.Unmarshal(job.NormalizedConfigurationJson, &config) != nil {
+			t.Fatal("secret fixture configuration")
+		}
+		config["tests"].(map[string]any)["secrets"] = map[string]uint64{"license": 1}
+		job.NormalizedConfigurationJson, err = json.Marshal(config)
+		if err != nil {
+			t.Fatal("secret fixture configuration")
+		}
+		job.Hashes.Configuration = fixtureDigest(job.NormalizedConfigurationJson)
+		job.TestSecrets = []*p.TestSecretReference{{Name: "license", SecretId: "b1111111-1111-4111-8111-111111111111", Version: 1}}
 	}
 	limits := job.EffectivePolicy.Resources
 	controls := [][2]string{{"cpu.max", strconv.FormatUint(2*uint64(limits.CpuMillis)*100, 10) + " 100000"}, {"cpu.max.burst", "0"}, {"memory.max", strconv.FormatUint(2*limits.MemoryBytes, 10)}, {"memory.swap.max", "0"}, {"pids.max", strconv.FormatUint(2*(uint64(limits.ProcessCount)+np.MappedRuntimeProcessReserve), 10)}, {"cgroup.max.descendants", "2"}, {"cgroup.max.depth", "1"}, {"memory.oom.group", "1"}}
@@ -230,6 +266,18 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		}
 	})
 	bundles, err := gvisor.OpenMeasuredBundleJournal(bundleRoot, bundleState, groups)
+	if err == nil && secrets {
+		if bundles.Close() != nil {
+			t.Fatal("empty journal retirement")
+		}
+		secretRoot := openDir(filepath.Join(root, "secrets"), 0711)
+		t.Cleanup(func() {
+			if !t.Failed() && os.Remove(filepath.Join(root, "secrets")) != nil {
+				t.Error("secret parent retained")
+			}
+		})
+		bundles, err = gvisor.OpenMeasuredBundleJournalWithSecrets(bundleRoot, bundleState, secretRoot, groups)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,12 +332,19 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(ctx, Config{Controller: controller, Measurement: lease, RuntimeSource: source, WorkerUID: 65532, MaximumInputBytes: maximumInput})
+	server, err := New(ctx, Config{Controller: controller, Measurement: lease, RuntimeSource: source, WorkerUID: 65532, MaximumInputBytes: maximumInput, EnableSecrets: secrets})
 	if err != nil {
 		t.Fatal(err)
 	}
+	var runtimeDiagnostics fixtureDiagnosticPrefix
+	if !realPaper && !secrets {
+		server.fixtureDiagnostics = &runtimeDiagnostics
+	}
 	server.fixtureCompletion = func(exit int, infrastructure bool, wait, relay, diagnostic, cause error) {
 		t.Logf("fixture root completion: exit=%d infrastructure=%t wait=%v relay=%v diagnostic=%v cause=%v", exit, infrastructure, wait, relay, diagnostic, cause)
+		if (exit != 0 || infrastructure) && runtimeDiagnostics.Len() != 0 {
+			t.Logf("secret-free synthetic runtime diagnostic prefix: %s", runtimeDiagnostics.String())
+		}
 		for _, name := range []string{"memory.events", "memory.peak", "pids.events"} {
 			raw, err := os.ReadFile("/sys/fs/cgroup/provenance-fixture-jobs/" + name)
 			if err == nil && len(raw) < 1024 {
@@ -351,7 +406,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	var daemon *Daemon
 	var daemonDone chan error
 	clientMode := mode
-	if mode == "daemon" || mode == "worker" || mode == "real" {
+	if mode == "daemon" || mode == "worker" || mode == "worker-secrets" || realPaper {
 		clientMode = "complete"
 		// Retire the manual fixture provisioner before testing the complete
 		// daemon's reopening/recovery of these same owned, empty journals.
@@ -360,6 +415,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		}
 		daemon = openFixtureDaemon(t, ctx, root, state, bundlePath, lease, tools, source, job, maximumInput)
 		daemon.server.fixtureCompletion = server.fixtureCompletion
+		daemon.server.fixtureDiagnostics = server.fixtureDiagnostics
 		listener, server = daemon.listener, daemon.server
 		daemonDone = make(chan error, 1)
 		go func() { daemonDone <- daemon.Serve() }()
@@ -374,19 +430,22 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), clientMode)
 	command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1"}
-	if mode == "worker" || mode == "real" {
+	if mode == "worker" || mode == "worker-secrets" || realPaper {
 		command = exec.CommandContext(ctx, "/tmp/measured-worker.test", "-test.run=^TestMeasuredWorkerRootFixture$", "-test.timeout=40s")
 		command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1", "PROVENANCE_DISPOSABLE_WORKER_ROOT_SOCKET=" + filepath.Join(root, cc.SocketName)}
-		if mode == "real" {
+		if realPaper {
 			command.Args[len(command.Args)-1] = "-test.timeout=290s"
 			command.Env = append(command.Env, "PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE=1")
+			if os.Getenv("PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE") == "1" {
+				command.Env = append(command.Env, "PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE=1", "PROVENANCE_DISPOSABLE_GATEWAY_ROOTFS="+lease.Snapshot().RootFS.SHA256)
+			}
 		}
 	}
 	command.ExtraFiles = files
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
 	var diagnostic bytes.Buffer
 	command.Stderr = &diagnostic
-	if mode == "worker" || mode == "real" {
+	if mode == "worker" || mode == "worker-secrets" || realPaper {
 		command.Stdout = &diagnostic
 	}
 	clientDone := make(chan error, 1)
@@ -402,31 +461,63 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		serveErr = server.Serve(ctx, channel)
 	}
 	clientErr := <-clientDone
-	if (serveErr != nil) != (clientMode != "complete" && clientMode != "reject-events") || clientErr != nil {
+	if (serveErr != nil) != (clientMode != "complete" && clientMode != "secrets" && clientMode != "reject-events") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
 	}
-	t.Run("root-idle-barrier-after-retirement", func(t *testing.T) {
-		probe := exec.CommandContext(ctx, clientPath, "service-idle", filepath.Join(root, cc.SocketName))
-		probe.Env = command.Env
-		probe.SysProcAttr = command.SysProcAttr
-		var output bytes.Buffer
-		probe.Stderr = &output
-		done := make(chan error, 1)
-		go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); done <- probe.Run() }()
-		var serveErr error
-		if daemon == nil {
-			channel, err := listener.Accept(time.Now().Add(5 * time.Second))
-			if err != nil {
-				cancel()
-				<-done
-				t.Fatal("idle probe admission", err)
+	if realPaper && os.Getenv("PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE") == "1" {
+		if strings.Count(diagnostic.String(), "MEASURED_GATEWAY_PAPER_TERMINAL_OK") != 1 {
+			t.Fatal("gateway terminal acceptance marker missing")
+		}
+		t.Log("MEASURED_GATEWAY_PAPER_TERMINAL_OK")
+		if secrets {
+			if strings.Count(diagnostic.String(), "MEASURED_GATEWAY_PAPER_SECRETS_OK") != 1 {
+				t.Fatal("gateway secret acceptance marker missing")
 			}
-			serveErr = server.Serve(ctx, channel)
+			t.Log("MEASURED_GATEWAY_PAPER_SECRETS_OK")
 		}
-		if clientErr := <-done; serveErr != nil || clientErr != nil {
-			t.Fatal("authenticated idle barrier", serveErr, clientErr, output.String())
+	}
+	capabilityMode := "service-secrets-disabled"
+	if secrets {
+		capabilityMode = "service-secrets-enabled"
+	}
+	for _, probeMode := range []string{"service-idle", capabilityMode, "service-maximum"} {
+		probeName := "root-idle-barrier-after-retirement"
+		if probeMode != "service-idle" {
+			probeName = "root-secret-capability-after-retirement"
 		}
-	})
+		if probeMode == "service-maximum" {
+			probeName = "root-maximum-after-retirement"
+		}
+		t.Run(probeName, func(t *testing.T) {
+			probe := exec.CommandContext(ctx, clientPath, probeMode, filepath.Join(root, cc.SocketName))
+			if probeMode == "service-maximum" {
+				digest, err := np.EffectivePolicyV2SHA256(job.EffectivePolicy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				probe.Args = append(probe.Args, hex.EncodeToString(digest[:]))
+			}
+			probe.Env = command.Env
+			probe.SysProcAttr = command.SysProcAttr
+			var output bytes.Buffer
+			probe.Stderr = &output
+			done := make(chan error, 1)
+			go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); done <- probe.Run() }()
+			var serveErr error
+			if daemon == nil {
+				channel, err := listener.Accept(time.Now().Add(5 * time.Second))
+				if err != nil {
+					cancel()
+					<-done
+					t.Fatal("idle probe admission", err)
+				}
+				serveErr = server.Serve(ctx, channel)
+			}
+			if clientErr := <-done; clientErr != nil || (daemon == nil && (serveErr != nil) != (probeMode == "service-secrets-disabled")) {
+				t.Fatal("authenticated idle barrier", serveErr, clientErr, output.String())
+			}
+		})
+	}
 	if daemon != nil {
 		if daemon.Close(ctx) != nil {
 			t.Fatal("daemon retirement")

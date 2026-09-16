@@ -4,6 +4,8 @@ package measuredservice
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +22,9 @@ import (
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/gvisor"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -48,8 +52,12 @@ func TestMain(m *testing.M) {
 		case "service-client":
 			serviceFixtureClient()
 			return
-		case "service-idle":
-			if len(os.Args) != 3 || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
+		case "service-idle", "service-secrets-enabled", "service-secrets-disabled", "service-maximum":
+			expectedArgs := 3
+			if os.Args[1] == "service-maximum" {
+				expectedArgs = 4
+			}
+			if len(os.Args) != expectedArgs || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 				panic("disposable idle client required")
 			}
 			conn, err := net.DialTimeout("unixpacket", os.Args[2], time.Second)
@@ -63,8 +71,21 @@ func TestMain(m *testing.M) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if measuredclient.CheckIdle(ctx, channel) != nil {
-				panic("root idle barrier refused after cleanup")
+			if os.Args[1] == "service-maximum" {
+				maximum, err := measuredclient.ReadMaximum(ctx, channel)
+				if err != nil {
+					panic("root maximum refused")
+				}
+				digest, err := np.EffectivePolicyV2SHA256(maximum)
+				if err != nil || hex.EncodeToString(digest[:]) != os.Args[3] {
+					panic("root maximum differs from provisioned policy")
+				}
+			} else if os.Args[1] == "service-idle" {
+				if measuredclient.CheckIdle(ctx, channel) != nil {
+					panic("root idle barrier refused after cleanup")
+				}
+			} else if err := measuredclient.CheckSecrets(ctx, channel); (err == nil) != (os.Args[1] == "service-secrets-enabled") {
+				panic("root secret capability does not match actual provisioning")
 			}
 			return
 		}
@@ -73,6 +94,13 @@ func TestMain(m *testing.M) {
 			// measured guest. It never interprets or executes any JAR bytes.
 			if os.Getuid() != 65532 || os.Getgid() != 65532 {
 				os.Exit(125)
+			}
+			if value, err := os.ReadFile(ts.Destination + "/license"); err == nil {
+				if string(value) != "synthetic-session-secret" || os.WriteFile(ts.Destination+"/license", []byte("changed"), 0444) == nil {
+					os.Exit(125)
+				}
+				clear(value)
+				fmt.Println("ROOT_SECRET_READ_ONLY_OK")
 			}
 			if os.WriteFile("/tmp/provenance-probe-events.ndjson", []byte("{\"syntheticRootService\":true}\n"), 0600) != nil {
 				os.Exit(125)
@@ -94,7 +122,7 @@ func TestMain(m *testing.M) {
 }
 
 func serviceFixtureClient() {
-	if len(os.Args) != 4 || (os.Args[3] != "complete" && os.Args[3] != "withdraw" && os.Args[3] != "reject-release" && os.Args[3] != "reject-events") || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
+	if len(os.Args) != 4 || (os.Args[3] != "complete" && os.Args[3] != "withdraw" && os.Args[3] != "reject-release" && os.Args[3] != "reject-events" && os.Args[3] != "secrets" && os.Args[3] != "secrets-missing" && os.Args[3] != "secrets-expired") || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 		panic("disposable service client required")
 	}
 	read := func(fd uintptr, maximum int64) []byte {
@@ -130,6 +158,50 @@ func serviceFixtureClient() {
 	defer channel.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if os.Args[3] == "secrets-missing" || os.Args[3] == "secrets-expired" {
+		// Deliberately bypass worker-side secret validation. This fixture
+		// exercises the authenticated root's own rejection boundary.
+		last, err := cc.SendStart(channel, request, files, time.Now().Add(5*time.Second))
+		if err != nil {
+			panic("raw secret refusal startup")
+		}
+		last++
+		if channel.Send(cc.Packet{Kind: cc.Reconcile, Sequence: last, Payload: ack}, time.Now().Add(time.Second)) != nil {
+			panic("raw secret authority")
+		}
+		packet, err := channel.AwaitRootObservation(ctx)
+		if err != nil {
+			panic("raw secret observation")
+		}
+		if _, err := runtimeidentity.ImportRootObservation(job, packet); err != nil {
+			panic("raw secret binding")
+		}
+		last++
+		refusal := cc.Packet{Kind: cc.Release, Sequence: last}
+		if os.Args[3] == "secrets-expired" {
+			// Canonical header deliberately names an expired delivery. Root
+			// must refuse it before asking for any value-bearing descriptors.
+			refusal.Kind = cc.SecretDelivery
+			refusal.Payload, err = json.Marshal(struct {
+				Version         int      `json:"version"`
+				Names           []string `json:"names"`
+				ExpiresUnixNano int64    `json:"expiresUnixNano"`
+			}{1, []string{"license"}, time.Now().Add(-time.Second).UnixNano()})
+			if err != nil {
+				panic("raw secret header")
+			}
+		}
+		if channel.Send(refusal, time.Now().Add(time.Second)) != nil {
+			panic("raw secret refusal packet")
+		}
+		if packet, err := channel.Receive(time.Now().Add(5 * time.Second)); err == nil {
+			for _, file := range packet.Files {
+				file.Close()
+			}
+			panic("root emitted output after refused secret delivery")
+		}
+		return
+	}
 	update, err := np.DecodeAuthorityUpdate(ack)
 	if err != nil {
 		panic(err)
@@ -195,7 +267,7 @@ func serviceFixtureClient() {
 	}
 	defer func() { cancel(); <-stopper }()
 	released := false
-	result, err := measuredclient.Run(ctx, channel, guard, measuredclient.SessionOptions{Job: job, Request: request, Files: files, PreparationDeadline: time.Now().Add(job.EffectivePolicy.PreparationTimeout.AsDuration()), MaximumLogBytes: 1 << 20, BeforeRelease: func(context.Context) error {
+	options := measuredclient.SessionOptions{Job: job, Request: request, Files: files, PreparationDeadline: time.Now().Add(job.EffectivePolicy.PreparationTimeout.AsDuration()), MaximumLogBytes: 1 << 20, BeforeRelease: func(context.Context) error {
 		if released {
 			return measuredclient.ErrSession
 		}
@@ -204,7 +276,33 @@ func serviceFixtureClient() {
 			return measuredclient.ErrSession
 		}
 		return nil
-	}}, collector)
+	}}
+	var secretFiles *ts.Files
+	var descriptors []ts.Descriptor
+	defer func() {
+		for _, descriptor := range descriptors {
+			descriptor.File.Close()
+		}
+		if secretFiles != nil {
+			secretFiles.Close()
+		}
+	}()
+	if os.Args[3] == "secrets" || os.Args[3] == "secrets-expired" {
+		options.PrepareSecrets = func(context.Context, *runtimeidentity.NetworkObservation) ([]ts.Descriptor, time.Time, error) {
+			var err error
+			secretFiles, err = ts.New([]ts.Input{{Name: "license", Value: []byte("synthetic-session-secret")}})
+			if err != nil {
+				return nil, time.Time{}, err
+			}
+			descriptors, err = secretFiles.ReadOnlyDescriptors()
+			expires := time.Now().Add(20 * time.Second)
+			if os.Args[3] == "secrets-expired" {
+				expires = time.Now().Add(-time.Second)
+			}
+			return descriptors, expires, err
+		}
+	}
+	result, err := measuredclient.Run(ctx, channel, guard, options, collector)
 	if os.Args[3] == "reject-events" {
 		var failure *measuredclient.SessionFailure
 		if result != nil || !errors.Is(err, measuredclient.ErrSession) || !errors.As(err, &failure) || !failure.RetiredFor(job) || !released || !sawStart {
@@ -217,13 +315,29 @@ func serviceFixtureClient() {
 		}
 		return
 	}
-	if os.Args[3] != "complete" {
-		if err == nil || result != nil || !released || sawStart != (os.Args[3] == "withdraw") {
+	if os.Args[3] != "complete" && os.Args[3] != "secrets" {
+		// Missing/expired secret delivery is still preparation: it must fail
+		// before committing the running/start acknowledgement.
+		wantReleased := os.Args[3] != "secrets-missing" && os.Args[3] != "secrets-expired"
+		if err == nil || result != nil || released != wantReleased || sawStart != (os.Args[3] == "withdraw") {
 			panic("refused session crossed its execution or completion boundary")
 		}
 		return
 	}
 	if err != nil || result == nil || !released || !sawStart || result.Observation() == nil {
+		// Fixed synthetic input only. Snapshot still sanitizes partial guest
+		// output when framing/outcome validation correctly refuses a result.
+		bundle, _ := collector.Snapshot(context.Background())
+		prefix := func(value string) string {
+			if len(value) > 4096 {
+				return value[:4096]
+			}
+			return value
+		}
+		fmt.Fprintf(os.Stderr, "bounded synthetic guest prefix: stdout=%q stderr=%q\n", prefix(bundle.Stdout), prefix(bundle.Stderr))
+		if bundle.CompleteLog.Archive != nil {
+			_ = bundle.CompleteLog.Archive.Close()
+		}
 		code, infrastructure, outcomeErr := result.Outcome()
 		panic(fmt.Sprintf("session result/startup mismatch: sessionError=%v result=%t released=%t startup=%t observation=%t exit=%d infrastructure=%t outcomeError=%v", err, result != nil, released, sawStart, result.Observation() != nil, code, infrastructure, outcomeErr))
 	}
@@ -232,6 +346,9 @@ func serviceFixtureClient() {
 		panic(err)
 	}
 	defer bundle.CompleteLog.Archive.Close()
+	if os.Args[3] == "secrets" && !strings.Contains(bundle.Stdout, "ROOT_SECRET_READ_ONLY_OK") {
+		panic("late secret did not reach read-only guest mount")
+	}
 	exit, infra, err := result.Outcome()
 	if err != nil || exit != 0 || infra || !strings.Contains(bundle.Stdout, "ROOT_SERVICE_OK") || strings.Contains(bundle.Stdout, "synthetic-session-secret") || !strings.Contains(bundle.Stdout, evidence.RedactionMarker) || len(bundle.Events) != 1 || string(bundle.Events[0].Payload) != "{\"syntheticRootService\":true}" {
 		panic("root service result mismatch")

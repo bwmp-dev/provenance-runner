@@ -169,6 +169,7 @@ func runConnect(ctx context.Context, configPath string, disableObjectUploadIdent
 		fmt.Fprintf(stderr, "connect runner: %v\n", err)
 		return 1
 	}
+	config.EnableNetworkPolicyV2 = registry.measuredMaximum != nil
 	client, err := gatewayclient.DialWithWorker(config, worker)
 	if err != nil {
 		fmt.Fprintf(stderr, "connect runner: %v\n", err)

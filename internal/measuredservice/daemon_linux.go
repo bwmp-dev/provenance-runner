@@ -171,7 +171,15 @@ func OpenDaemon(ctx context.Context, config DaemonConfig) (*Daemon, error) {
 	if err != nil {
 		return fail()
 	}
-	d.bundles, err = gvisor.OpenMeasuredBundleJournal(bundleRoot, bundleState, d.groups)
+	if config.SecretRoot != "" {
+		secretRoot, openErr := open(config.SecretRoot, true, 0711)
+		if openErr != nil {
+			return fail()
+		}
+		d.bundles, err = gvisor.OpenMeasuredBundleJournalWithSecrets(bundleRoot, bundleState, secretRoot, d.groups)
+	} else {
+		d.bundles, err = gvisor.OpenMeasuredBundleJournal(bundleRoot, bundleState, d.groups)
+	}
 	if err != nil {
 		return fail()
 	}
@@ -188,7 +196,7 @@ func OpenDaemon(ctx context.Context, config DaemonConfig) (*Daemon, error) {
 	if err != nil {
 		return fail()
 	}
-	d.server, err = New(ctx, Config{Controller: d.controller, Measurement: d.measurement, RuntimeSource: source, WorkerUID: config.WorkerUID, MaximumInputBytes: config.MaximumInputBytes})
+	d.server, err = New(ctx, Config{Controller: d.controller, Measurement: d.measurement, RuntimeSource: source, WorkerUID: config.WorkerUID, MaximumInputBytes: config.MaximumInputBytes, EnableSecrets: config.SecretRoot != ""})
 	if err != nil {
 		return fail()
 	}

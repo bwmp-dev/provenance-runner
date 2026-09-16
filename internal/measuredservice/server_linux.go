@@ -21,6 +21,8 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/provider/gvisor"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
+	"google.golang.org/protobuf/proto"
 )
 
 var ErrService = errors.New("measured_paper_service_refused")
@@ -34,6 +36,7 @@ type Config struct {
 	RuntimeSource     *paper.RuntimeSource
 	WorkerUID         uint32
 	MaximumInputBytes uint64
+	EnableSecrets     bool
 }
 
 type Server struct {
@@ -46,15 +49,21 @@ type Server struct {
 	worker         uint32
 	maximum        uint64
 	failed, closed bool
+	secrets        bool
 	// In-package disposable fixtures may observe retirement failures. This is
 	// unset in every constructor and cannot be enabled by configuration or wire
 	// input. It never receives guest bytes, input descriptors or secret values.
 	fixtureCompletion func(int, bool, error, error, error, error)
+	// Set only by the in-package, secret-free synthetic kernel fixture.
+	fixtureDiagnostics io.Writer
 }
 
 func New(ctx context.Context, config Config) (*Server, error) {
 	groups, err := os.Getgroups()
 	if ctx == nil || ctx.Err() != nil || os.Getuid() != 0 || os.Geteuid() != 0 || err != nil || len(groups) != 0 || config.Controller == nil || config.Measurement == nil || config.RuntimeSource == nil || len(config.RuntimeSource.PublicKey) != ed25519.PublicKeySize || config.WorkerUID == 0 || config.WorkerUID == ^uint32(0) || config.MaximumInputBytes == 0 || config.MaximumInputBytes > 64<<30 {
+		return nil, ErrService
+	}
+	if config.EnableSecrets && !config.Controller.SupportsTestSecretStorage() {
 		return nil, ErrService
 	}
 	source, err := paper.NewRuntimeSource(config.RuntimeSource.Origin, hex.EncodeToString(config.RuntimeSource.PublicKey))
@@ -66,12 +75,12 @@ func New(ctx context.Context, config Config) (*Server, error) {
 	if err != nil {
 		return nil, ErrService
 	}
-	if measurement.ValidatePaperGuestTarget() != nil {
+	if measurement.ValidatePaperGuestTarget() != nil || (config.EnableSecrets && measurement.ValidateTestSecretTarget() != nil) {
 		measurement.Close()
 		return nil, ErrService
 	}
 	root, stop := context.WithCancel(ctx)
-	return &Server{ctx: root, stop: stop, controller: config.Controller, measurement: measurement, source: source, worker: config.WorkerUID, maximum: config.MaximumInputBytes}, nil
+	return &Server{ctx: root, stop: stop, controller: config.Controller, measurement: measurement, source: source, worker: config.WorkerUID, maximum: config.MaximumInputBytes, secrets: config.EnableSecrets}, nil
 }
 
 // Close first cancels admission/execution. Failed controller cleanup retains all
@@ -133,18 +142,40 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 			_ = file.Close()
 		}
 	}()
-	if len(request.IdleNonce) != 0 {
+	if len(request.IdleNonce) != 0 || len(request.SecretNonce) != 0 || len(request.MaximumNonce) != 0 {
 		// Serve holds admission throughout this probe. A previous Serve must
 		// finish its deferred controller cleanup before this lock is available.
 		if s.controller.CheckIdle() != nil || s.measurement.ValidatePaperGuestTarget() != nil {
 			return ErrService
 		}
-		return channel.Send(cc.Packet{Kind: cc.IdleConfirmed, Sequence: 1, Payload: request.IdleNonce}, time.Now().Add(5*time.Second))
+		kind, nonce := cc.IdleConfirmed, request.IdleNonce
+		if len(request.MaximumNonce) != 0 {
+			maximum, err := s.controller.LocalMaximum()
+			if err != nil {
+				return ErrService
+			}
+			raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(maximum)
+			if err != nil || len(raw) == 0 || len(raw) > 16<<10 {
+				return ErrService
+			}
+			return channel.Send(cc.Packet{Kind: cc.MaximumConfirmed, Sequence: 1, Payload: append(request.MaximumNonce, raw...)}, time.Now().Add(5*time.Second))
+		}
+		if len(request.SecretNonce) != 0 {
+			if !s.secrets || !s.controller.SupportsTestSecretStorage() || s.measurement.ValidateTestSecretTarget() != nil {
+				return ErrService
+			}
+			kind, nonce = cc.SecretConfirmed, request.SecretNonce
+		}
+		return channel.Send(cc.Packet{Kind: kind, Sequence: 1, Payload: nonce}, time.Now().Add(5*time.Second))
 	}
 	send := &sender{channel: channel}
 	stopKeep, keepDone := keepalive(jobCtx, send, cancel)
 	defer func() { stopKeep(); <-keepDone }()
-	plan, err := s.source.PrepareMeasuredRequest(request.Payload, s.maximum)
+	prepare := s.source.PrepareMeasuredRequest
+	if s.secrets {
+		prepare = s.source.PrepareMeasuredRequestWithSecrets
+	}
+	plan, err := prepare(request.Payload, s.maximum)
 	if err != nil || s.measurement.ValidatePaperGuestTarget() != nil {
 		return ErrService
 	}
@@ -184,6 +215,9 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 	controlDone := make(chan struct{})
 	released := make(chan struct{})
 	var releaseAllowed, releaseUsed atomic.Bool
+	var secretUsed, secretReady bool
+	var secretExpiry time.Time
+	secretRequired := len(job.TestSecrets) > 0
 	go func() {
 		defer close(controlDone)
 		for i := 0; i < 8192; i++ {
@@ -193,11 +227,49 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 				return
 			}
 			if packet.Kind == cc.Release {
-				if len(packet.Payload) != 0 || !releaseAllowed.Load() || !releaseUsed.CompareAndSwap(false, true) {
+				if len(packet.Payload) != 0 || !releaseAllowed.Load() || (secretRequired && (!secretReady || !secretExpiry.After(time.Now()))) || !releaseUsed.CompareAndSwap(false, true) {
 					cancel(ErrService)
 					return
 				}
 				close(released)
+				continue
+			}
+			if packet.Kind == cc.SecretDelivery {
+				if !s.secrets || !secretRequired || !releaseAllowed.Load() || releaseUsed.Load() || secretUsed {
+					cancel(ErrService)
+					return
+				}
+				secretUsed = true
+				ceiling, err := authority.CurrentLeaseExpiry(job)
+				if err != nil {
+					cancel(ErrService)
+					return
+				}
+				names := make([]string, len(job.TestSecrets))
+				for i, ref := range job.TestSecrets {
+					names[i] = ref.Name
+				}
+				until := time.Now().Add(5 * time.Second)
+				if end, ok := jobCtx.Deadline(); ok && end.Before(until) {
+					until = end
+				}
+				delivery, err := cc.ReceiveSecrets(channel, packet, names, ceiling, until)
+				if err != nil {
+					cancel(ErrService)
+					return
+				}
+				descriptors := make([]ts.Descriptor, len(delivery.Files))
+				for i, file := range delivery.Files {
+					descriptors[i] = ts.Descriptor{Name: delivery.Names[i], File: file}
+				}
+				err = owned.MaterializeTestSecrets(jobCtx, descriptors, delivery.ExpiresAt)
+				closeErr := delivery.Close()
+				if err != nil || closeErr != nil {
+					cancel(ErrService)
+					return
+				}
+				secretExpiry = delivery.ExpiresAt
+				secretReady = true
 				continue
 			}
 			if err := applyAuthorityPacket(jobCtx, packet, authority); err != nil {
@@ -260,9 +332,13 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 	}
 	diagnostics := make(chan struct{})
 	var diagnosticErr error
+	diagnosticOutput := io.Writer(io.Discard)
+	if s.fixtureDiagnostics != nil {
+		diagnosticOutput = s.fixtureDiagnostics
+	}
 	go func() {
 		defer close(diagnostics)
-		n, err := io.Copy(io.Discard, io.LimitReader(errR, (64<<10)+1))
+		n, err := io.Copy(diagnosticOutput, io.LimitReader(errR, (64<<10)+1))
 		if n > 64<<10 {
 			err = ErrService
 		}
@@ -294,7 +370,7 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 		return ErrService
 	case <-released:
 	}
-	if jobCtx.Err() != nil {
+	if jobCtx.Err() != nil || (secretRequired && !secretExpiry.After(time.Now())) {
 		return ErrService
 	}
 	bootstrap := plan.GuestConfiguration()

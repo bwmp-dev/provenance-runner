@@ -22,6 +22,7 @@ const maximumRememberedGatewayMessageIDs = 4096
 
 type clientSession struct {
 	networkFeatures               []runnerv1.ProtocolFeature
+	networkMaximum                *runnerv1.EffectivePolicy
 	testSecretsV1                 bool
 	pendingSecret                 *pendingSecretRequest
 	client                        *Client
@@ -174,7 +175,24 @@ func (s *clientSession) handleOffer(envelope *runnerv1.GatewayMessage, now time.
 	}
 	offerConfig := s.client.config
 	offerConfig.EnableTestSecrets = s.testSecretsV1
-	if rejection := validateOffer(offer, offerConfig, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity); rejection != nil {
+	var rejection *OfferRejection
+	if offer.GetJob().GetEffectivePolicy().GetNetworkV2() != nil {
+		if s.networkMaximum == nil || !s.terminalEvidenceV2 {
+			rejection = rejectUnsupported("network_v2_unavailable", "root-confirmed network maximum is unavailable")
+		} else {
+			rejection = validateNetworkV2Offer(offer, offerConfig, now, s.authenticated.GetLeaseDuration().AsDuration(), s.networkFeatures, s.networkMaximum.NetworkV2)
+			if rejection == nil {
+				policy := offer.Job.EffectivePolicy
+				maximum := s.networkMaximum
+				if policy.PreparationTimeout.AsDuration() > maximum.PreparationTimeout.AsDuration() || policy.ExecutionTimeout.AsDuration() > maximum.ExecutionTimeout.AsDuration() || policy.GracefulShutdownTimeout.AsDuration() > maximum.GracefulShutdownTimeout.AsDuration() {
+					rejection = rejectPolicy("timeout_exceeds_capacity", "effective timeouts exceed the measured root maximum")
+				}
+			}
+		}
+	} else {
+		rejection = validateOffer(offer, offerConfig, now, s.authenticated.GetLeaseDuration().AsDuration(), s.jobCorrelationV1, s.objectUploadIdentity)
+	}
+	if rejection != nil {
 		return s.rejectOffer(offer, rejection.Reason, rejection.Code+": "+rejection.Message)
 	}
 	target, rejection := validateCompleteLogUpload(offer.GetJob().GetCompleteLogUpload(), now, offer.GetOfferExpiresAt().AsTime(), offer.GetJob().GetLease().GetExpiresAt().AsTime(), s.objectUploadIdentity)

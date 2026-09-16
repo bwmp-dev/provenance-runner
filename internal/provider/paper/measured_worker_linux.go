@@ -15,16 +15,46 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/measuredclient"
+	"github.com/bwmp-dev/provenance-runner/internal/runtimeidentity"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 var errMeasuredWorker = errors.New("measured_worker_session_refused")
 
+// ReadMeasuredMaximum obtains public policy bounds only from the provisioned
+// root endpoint. Values from connection or job documents are not substitutes.
+func (provider *Provider) ReadMeasuredMaximum(ctx context.Context, endpoint string) (*p.EffectivePolicy, error) {
+	if ctx == nil || ctx.Err() != nil || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0) {
+		return nil, errMeasuredWorker
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	channel, err := dialMeasuredRoot(ctx, endpoint)
+	if err != nil {
+		return nil, errMeasuredWorker
+	}
+	maximum, err := measuredclient.ReadMaximum(ctx, channel)
+	if err != nil {
+		return nil, errMeasuredWorker
+	}
+	return maximum, nil
+}
+
 // CheckMeasuredService is a fresh authenticated startup idle barrier. It
 // reserves no slot; the connected worker still serializes execution admission.
 func (provider *Provider) CheckMeasuredService(ctx context.Context, endpoint string) error {
+	return checkMeasuredService(ctx, endpoint, false)
+}
+
+// CheckMeasuredSecrets requires a separate root-authenticated capability reply.
+func (provider *Provider) CheckMeasuredSecrets(ctx context.Context, endpoint string) error {
+	return checkMeasuredService(ctx, endpoint, true)
+}
+
+func checkMeasuredService(ctx context.Context, endpoint string, secrets bool) error {
 	if ctx == nil || ctx.Err() != nil || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0) {
 		return errMeasuredWorker
 	}
@@ -34,7 +64,11 @@ func (provider *Provider) CheckMeasuredService(ctx context.Context, endpoint str
 	if err != nil {
 		return errMeasuredWorker
 	}
-	if measuredclient.CheckIdle(ctx, channel) != nil {
+	check := measuredclient.CheckIdle
+	if secrets {
+		check = measuredclient.CheckSecrets
+	}
+	if check(ctx, channel) != nil {
 		return errMeasuredWorker
 	}
 	return nil
@@ -47,7 +81,7 @@ func (provider *Provider) ExecuteMeasured(ctx context.Context, job *p.JobSpecifi
 	fail := func() execution.Result {
 		return execution.FailedResult(job.GetLease().GetJobId(), execution.PhasePreparation, execution.ClassificationInfrastructureFailure, "measured_worker_refused", errMeasuredWorker)
 	}
-	if ctx == nil || ctx.Err() != nil || job == nil || proto.Size(job) > 1<<20 || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0) || len(job.TestSecrets) != 0 {
+	if ctx == nil || ctx.Err() != nil || job == nil || proto.Size(job) > 1<<20 || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0) || ts.ValidateSelection(job) != nil {
 		return fail()
 	}
 	job = proto.Clone(job).(*p.JobSpecification)
@@ -83,6 +117,9 @@ type measuredWorkerSession struct {
 	plan               testPlan
 	contacted, retired bool
 	accepted           *measuredclient.SessionResult
+	observer           execution.ExecutionObserver
+	secretFiles        *ts.Files
+	secretDescriptors  []ts.Descriptor
 }
 
 func dialMeasuredRoot(ctx context.Context, endpoint string) (*cc.Channel, error) {
@@ -105,6 +142,10 @@ func dialMeasuredRoot(ctx context.Context, endpoint string) (*cc.Channel, error)
 }
 
 func (s *measuredWorkerSession) AttachObserver(observer execution.ExecutionObserver) {
+	s.observer = observer
+	if observer == nil {
+		return
+	}
 	s.collector.SetLiveSink(func(entry evidence.LiveEntry) {
 		observer.ObserveLog(execution.LiveLogEntry{Stream: string(entry.Stream), Data: append([]byte(nil), entry.Data...), Partial: entry.Partial, Redacted: entry.Redacted})
 	})
@@ -124,7 +165,7 @@ func (s *measuredWorkerSession) Execute(ctx context.Context) (execution.Executio
 		return execution.ExecutionOutcome{}, errMeasuredWorker
 	}
 	s.contacted = true
-	s.accepted, err = measuredclient.Run(ctx, channel, execution.NetworkAuthorityRoute(ctx), measuredclient.SessionOptions{
+	options := measuredclient.SessionOptions{
 		Job: s.job, Request: s.inputs.Request(), Files: s.inputs.Files(), PreparationDeadline: s.inputs.PreparationDeadline(), MaximumLogBytes: s.maximumLogs,
 		BeforeRelease: func(ctx context.Context) error {
 			if s.before != nil {
@@ -132,7 +173,12 @@ func (s *measuredWorkerSession) Execute(ctx context.Context) (execution.Executio
 			}
 			return nil
 		},
-	}, s.collector)
+	}
+	if len(s.job.TestSecrets) > 0 {
+		options.PrepareSecrets = s.prepareSecrets
+		options.PrepareOutput = func(context.Context) (*evidence.Collector, error) { return s.collector, nil }
+	}
+	s.accepted, err = measuredclient.Run(ctx, channel, execution.NetworkAuthorityRoute(ctx), options, s.collector)
 	if err != nil {
 		var failure *measuredclient.SessionFailure
 		s.retired = errors.As(err, &failure) && failure.RetiredFor(s.job)
@@ -150,6 +196,44 @@ func (s *measuredWorkerSession) Execute(ctx context.Context) (execution.Executio
 		outcome.Failure = execution.NewFailure(execution.ClassificationWorkloadFailure, "paper_process_exit_nonzero", "Paper exited unsuccessfully")
 	}
 	return outcome, nil
+}
+
+func (s *measuredWorkerSession) prepareSecrets(ctx context.Context, observed *runtimeidentity.NetworkObservation) ([]ts.Descriptor, time.Time, error) {
+	if s.secretFiles != nil {
+		return nil, time.Time{}, errMeasuredWorker
+	}
+	files, expires, err := execution.AcquireMeasuredTestSecretFiles(ctx, s.job, observed)
+	if err != nil {
+		return nil, time.Time{}, errMeasuredWorker
+	}
+	s.secretFiles = files
+	s.secretDescriptors, err = files.ReadOnlyDescriptors()
+	if err != nil || len(s.secretDescriptors) != len(s.job.TestSecrets) {
+		return nil, time.Time{}, errMeasuredWorker
+	}
+	for i, descriptor := range s.secretDescriptors {
+		if descriptor.Name != s.job.TestSecrets[i].Name {
+			return nil, time.Time{}, errMeasuredWorker
+		}
+	}
+	values, err := files.RedactionValues()
+	if err != nil {
+		return nil, time.Time{}, errMeasuredWorker
+	}
+	collector, err := evidence.NewCollector(evidence.Config{Secrets: values, MaxTotalBytes: s.maximumLogs, MaxCompleteLogBytes: 16 << 20})
+	clear(values)
+	if err != nil {
+		return nil, time.Time{}, errMeasuredWorker
+	}
+	// The bootstrap gate is still closed, so the old collector is empty and
+	// has no concurrent guest writer. Never mutate a live redactor in place.
+	if s.collector.Close() != nil {
+		collector.Close()
+		return nil, time.Time{}, errMeasuredWorker
+	}
+	s.collector = collector
+	s.AttachObserver(s.observer)
+	return s.secretDescriptors, expires, nil
 }
 
 func (s *measuredWorkerSession) Cleanup(ctx context.Context) error {
@@ -172,7 +256,20 @@ func (s *measuredWorkerSession) Cleanup(ctx context.Context) error {
 	}
 	inputErr := s.inputs.Close()
 	collectorErr := s.collector.Close()
-	if (s.contacted && !s.retired) || inputErr != nil || collectorErr != nil {
+	var secretErr error
+	for _, descriptor := range s.secretDescriptors {
+		if descriptor.File.Close() != nil {
+			secretErr = errMeasuredWorker
+		}
+	}
+	s.secretDescriptors = nil
+	if s.secretFiles != nil {
+		if s.secretFiles.Close() != nil {
+			secretErr = errMeasuredWorker
+		}
+		s.secretFiles = nil
+	}
+	if (s.contacted && !s.retired) || inputErr != nil || collectorErr != nil || secretErr != nil {
 		return errMeasuredWorker
 	}
 	return nil

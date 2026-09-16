@@ -30,6 +30,9 @@ type JobCgroup struct {
 	stopping, removed bool
 	journalOwner      *JobCgroupJournal
 	journalRetired    bool
+	pidSampled        bool
+	pidDenials        uint64
+	pidSampleError    error
 }
 
 func cgroupControl(scope *os.File, name string, flags uint64) (*os.File, error) {
@@ -239,6 +242,17 @@ func (s *JobCgroup) Cleanup(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	if !s.pidSampled {
+		// Snapshot the owned leaf before cleanup itself closes process
+		// admission. Parent or post-cleanup counters conflate other work and
+		// cleanup-induced denials with execution-time runtime exhaustion.
+		raw, err := readCgroupControl(s.scope, "pids.events")
+		s.pidSampled = true
+		s.pidSampleError = err
+		if err == nil {
+			s.pidDenials, s.pidSampleError = parsePIDDenials(raw)
+		}
+	}
 	if writeCgroupControl(s.scope, "pids.max", "0") != nil {
 		return ErrResources
 	}
@@ -282,4 +296,19 @@ func (s *JobCgroup) Cleanup(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// CompletedPIDDenials exposes only the frozen pre-cleanup scalar after whole
+// leaf retirement. A failed observation never prevents best-effort cleanup,
+// but cannot be used as evidence of zero execution-time denials.
+func (s *JobCgroup) CompletedPIDDenials() (uint64, error) {
+	if s == nil {
+		return 0, ErrResources
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.removed || !s.pidSampled || s.pidSampleError != nil {
+		return 0, ErrResources
+	}
+	return s.pidDenials, nil
 }

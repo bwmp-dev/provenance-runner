@@ -8,7 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestReleasedNetworkV2CannotActivateOfferOrCapability(t *testing.T) {
+func TestLegacyAdmissionAndIncompleteNetworkNegotiationRemainFenced(t *testing.T) {
 	now := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
 	for _, mixed := range []bool{false, true} {
 		for _, mode := range []runnerv1.NetworkMode{runnerv1.NetworkMode_NETWORK_MODE_NONE, runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST} {
@@ -30,10 +30,10 @@ func TestReleasedNetworkV2CannotActivateOfferOrCapability(t *testing.T) {
 		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_POLICY_V2,
 	}
 	if validateAdvertisedFeatures(features) == nil {
-		t.Fatal("unimplemented network feature accepted")
+		t.Fatal("network feature without current-authority support accepted")
 	}
 	features = append(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2)
 	if validateAdvertisedFeatures(features) == nil {
-		t.Fatal("partial authority consumer enabled capability advertisement")
+		t.Fatal("network features without terminal evidence v2 accepted")
 	}
 }

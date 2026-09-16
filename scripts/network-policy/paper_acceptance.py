@@ -10,7 +10,8 @@ import subprocess
 import tempfile
 import uuid
 
-ROOT = '94862cd9a2d88c29421e281166cf59a7190336eb1c0365cdb7fca55e89f8f361'
+ROOT = '6d0a79fcd156c39a1b362cc4295367989ef72ccbb6a475aad399228b3211c32e'
+SECRET_TARGET = 'b84160a378c4e0eaa5f8ada6b0b05a825791c2baf89d11aff5304bf3f923a4b1'
 HELPER = '69991043ce8c4c640163d70e484b4b1af009f3e82bc6e847d97815a464b81275'
 INPUTS = {'java.tar.gz': '968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03',
           'paper.jar': '8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e',
@@ -24,10 +25,14 @@ def digest(path):
         return hashlib.file_digest(file, 'sha256').hexdigest()
 
 
-def validate_report(stdout, stderr, code):
+def validate_report(stdout, stderr, code, gateway=False, secrets=False):
     assert len(stdout) <= 65536 and len(stderr) <= 65536
     assert code == 0, stderr[-4096:]
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
+    if gateway:
+        assert stdout.count('MEASURED_GATEWAY_PAPER_TERMINAL_OK') == 3
+        if secrets:
+            assert stdout.count('MEASURED_GATEWAY_PAPER_SECRETS_OK') == 3
     for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
         assert stdout.count('--- PASS: TestMeasuredPaperRealKernel'+suffix+' ') == 3
     for marker in ('measuredRealPaperCompatibility', 'measuredHostUplinkJournalRetired', 'measuredBundleJournalRetired', 'measuredJobJournalRetired', 'exclusiveMeasuredJobScopesRemoved', 'measuredRoutedOwnedLoopDetached'):
@@ -40,12 +45,16 @@ def main():
     parser.add_argument('--rootfs', type=Path, required=True)
     parser.add_argument('--inputs', type=Path, required=True)
     parser.add_argument('--go', default='go')
+    parser.add_argument('--secrets', action='store_true')
+    parser.add_argument('--gateway', action='store_true')
     args = parser.parse_args()
     assert re.fullmatch('sha256:[a-f0-9]{64}', args.image)
     assert args.rootfs.is_absolute() and args.rootfs.resolve() == args.rootfs and digest(args.rootfs) == ROOT
     assert args.inputs.is_absolute() and args.inputs.resolve() == args.inputs
     for name, expected in INPUTS.items():
         assert digest(args.inputs/name) == expected and (args.inputs/name).stat().st_size <= 256 << 20
+    if args.secrets:
+        assert digest(args.inputs/'secret-target.jar') == SECRET_TARGET and (args.inputs/'secret-target.jar').stat().st_size <= 1 << 20
     repo = Path(__file__).resolve().parents[2]
     work = Path(tempfile.mkdtemp(prefix='provenance-real-paper-', dir='/var/tmp'))
     environment = os.environ | {'CGO_ENABLED': '0'}
@@ -56,6 +65,8 @@ def main():
                '--memory', '6g', '--memory-swap', '6g', '--cpus', '4', '--pids-limit', '1024',
                '--tmpfs', '/tmp:rw,exec,nosuid,size=1536m',
                '--env', 'PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE=1',
+               '--env', 'PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE='+('1' if args.gateway else '0'),
+               '--env', 'PROVENANCE_DISPOSABLE_REAL_PAPER_SECRETS='+('1' if args.secrets else '0'),
                '--mount', f'type=bind,src={repo},dst=/repo,readonly',
                '--mount', f'type=bind,src={work}/gvisor.test,dst=/test-input,readonly',
                '--mount', f'type=bind,src={args.rootfs},dst=/image-input,readonly',
@@ -71,12 +82,16 @@ def main():
     # after its own loop retirement has been positively observed.
     if '{"measuredRoutedOwnedLoopDetached": true}' in result.stdout:
         subprocess.run(['docker', 'rm', name], capture_output=True, check=True, timeout=30)
-    validate_report(result.stdout, result.stderr, result.returncode)
+    validate_report(result.stdout, result.stderr, result.returncode, args.gateway, args.secrets)
     assert state['Status'] == 'exited' and state['ExitCode'] == 0 and not state['OOMKilled']
     print(json.dumps({'realPaperCompatibility': True, 'gameVersion': '1.21.8', 'paperBuild': 60, 'repetitions': 3,
                       'rootfsSHA256': ROOT, 'paperGuestSHA256': HELPER, 'inputs': INPUTS,
                       'serviceBinarySHA256': digest(work/'service.test'), 'workerBinarySHA256': digest(work/'download.test'),
                       'fixtureImage': args.image, 'deployed': False}, sort_keys=True))
+    if args.secrets:
+        print(json.dumps({'realPaperSecretInjectionAndRedaction': True, 'targetSHA256': SECRET_TARGET, 'repetitions': 3, 'deployed': False}, sort_keys=True))
+    if args.gateway:
+        print(json.dumps({'realPaperGatewayTerminalEvidence': True, 'gatewaySecretDeliveryAndRedaction': args.secrets, 'repetitions': 3, 'platformDatabaseAcceptance': False, 'objectStorageAcceptance': False, 'deployed': False}, sort_keys=True))
 
 
 if __name__ == '__main__':

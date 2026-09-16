@@ -192,7 +192,9 @@ setpriv --reuid "$task_uid" --regid "$task_gid" --clear-groups env "${session_en
   PROVENANCE_GVISOR_CGROUP_DRIVER=systemd-user PROVENANCE_SYSTEMD_RUN_PATH="$(command -v systemd-run)" \
   PROVENANCE_SYSTEMD_CGROUP_ROOT="$scope_root" \
   systemd-run --user --scope --collect --quiet --slice=app.slice --unit=pvm-driver \
-    timeout --foreground 180s "$fixture/gvisor-smoke.test" -test.run '^TestRunscSmoke$' -test.count=1 -test.v -test.timeout=150s > "$evidence/smoke.log" 2>&1
+    timeout --foreground 180s "$fixture/gvisor-smoke.test" -test.run '^TestRunscSmoke(NoNetworkV2)?$' -test.count=1 -test.v -test.timeout=150s > "$evidence/smoke.log" 2>&1
+grep -F -- '--- PASS: TestRunscSmokeNoNetworkV2/plain' "$evidence/smoke.log" >/dev/null
+grep -F -- '--- PASS: TestRunscSmokeNoNetworkV2/secrets' "$evidence/smoke.log" >/dev/null
 if [[ -n ${generation_scratch:-} ]]; then
   # Complete the original cgroup monitor before unrelated disposable-container
   # work. The existing exclusive identity/profile remain owned until cleanup.

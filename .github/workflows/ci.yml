@@ -37,6 +37,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_smoke_execution_identity.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_network_ci_identity.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_network_acceptance.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_measured_host_inventory.py -v
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - name: Build

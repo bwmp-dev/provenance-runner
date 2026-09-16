@@ -57,6 +57,8 @@ type MeasuredNetworkProcess struct {
 	cmd                                 *exec.Cmd
 	done                                chan struct{}
 	exitErr, closeErr                   error
+	pidDenials                          uint64
+	pidObserved                         bool
 	started, released, stopping, closed bool
 }
 
@@ -75,7 +77,7 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 		return nil, ErrMeasuredNetworkLaunch
 	}
 	m := config.Mapping
-	args := []string{job.GetLease().GetJobId(), strconv.FormatUint(uint64(m.UID), 10), strconv.FormatUint(uint64(m.GID), 10), strconv.FormatUint(uint64(m.OverflowUID), 10), strconv.FormatUint(uint64(m.OverflowGID), 10), config.PrivateRoot, config.Measurement.Snapshot().RootFS.SHA256, "embedded-executable"}
+	args := []string{job.GetLease().GetJobId(), strconv.FormatUint(uint64(m.UID), 10), strconv.FormatUint(uint64(m.GID), 10), strconv.FormatUint(uint64(m.OverflowUID), 10), strconv.FormatUint(uint64(m.OverflowGID), 10), config.PrivateRoot, config.Measurement.Snapshot().RootFS.SHA256, "embedded-executable", strconv.FormatUint(uint64(job.GetEffectivePolicy().GetResources().GetCpuMillis()), 10)}
 	if _, _, ok := measuredNetworkInputs(args); !ok {
 		return nil, ErrMeasuredNetworkLaunch
 	}
@@ -262,6 +264,8 @@ func (s *MeasuredNetworkProcess) Close(ctx context.Context) error {
 		if err := s.journal.Cleanup(ctx, s.scope); err != nil {
 			return errors.Join(ErrMeasuredNetworkLaunch, err)
 		}
+		denials, err := s.scope.CompletedPIDDenials()
+		s.pidDenials, s.pidObserved = denials, err == nil
 	}
 	if s.started {
 		select {

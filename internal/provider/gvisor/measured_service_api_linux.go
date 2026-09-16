@@ -10,6 +10,7 @@ import (
 
 	np "github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // These are trusted in-process provisioning/ownership types, NOT wire schemas.
@@ -63,4 +64,18 @@ func (c *measuredController) CheckIdle() error {
 		return errMeasuredSession
 	}
 	return nil
+}
+
+// LocalMaximum returns a copy of trusted provisioning only while actual
+// controller resources are ready and idle. It grants no execution authority.
+func (c *measuredController) LocalMaximum() (*p.EffectivePolicy, error) {
+	if c == nil {
+		return nil, errMeasuredSession
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.ready || c.stopping || c.closed || c.active != nil || c.resources == nil || !c.resourcesReady() || c.config.Boundary == nil || c.config.Boundary.maximum == nil {
+		return nil, errMeasuredSession
+	}
+	return proto.Clone(c.config.Boundary.maximum).(*p.EffectivePolicy), nil
 }

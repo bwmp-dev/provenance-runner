@@ -35,10 +35,16 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['--- PASS: TestMeasuredPaperServiceWithdrawalKernel (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel (1s)' for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperServiceEventRefusalKernel (1s)' for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel (1s)' for case in ('Secrets', 'SecretsMissing', 'SecretsExpired') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperWorkerKernel'+suffix+' (1s)' for suffix in ('', '/root-idle-barrier-after-retirement') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperWorkerSecretsKernel'+suffix+' (1s)' for suffix in ('', '/root-idle-barrier-after-retirement') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaper'+case+'Kernel/root-secret-capability-after-retirement (1s)' for case in ('Service', 'ServiceSecrets', 'ServiceSecretsMissing', 'ServiceSecretsExpired', 'ServiceWithdrawal', 'ServiceReleaseRefusal', 'ServiceEventRefusal', 'Daemon', 'Worker', 'WorkerSecrets') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaper'+case+'Kernel/root-maximum-after-retirement (1s)' for case in ('Service', 'ServiceSecrets', 'ServiceSecretsMissing', 'ServiceSecretsExpired', 'ServiceWithdrawal', 'ServiceReleaseRefusal', 'ServiceEventRefusal', 'Daemon', 'Worker', 'WorkerSecrets') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperServiceKernel/root-maximum-protocol/'+case+' (1s)' for case in ('valid', 'nonce', 'kind', 'short', 'files', 'eof', 'oversize', 'noncanonical', 'unknown') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperServiceKernel/root-secret-capability-protocol/'+case+' (1s)' for case in ('valid', 'nonce', 'idle', 'short', 'files', 'eof') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' (1s)' for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement') for _ in range(3)]
-        rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal') for _ in range(3)]
-        rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal', 'Secrets', 'SecretsMissing', 'SecretsExpired') for _ in range(3)]
+        rows += ['--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal (1s)' for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal', 'Secrets', 'SecretsMissing', 'SecretsExpired') for _ in range(3)]
         rows += ['--- PASS: TestMeasuredInputDownloadFixture (1s)' for _ in range(3)]
         for case in ('TestMeasuredNetworkSessionPaperGuest', 'TestMeasuredNetworkSessionPaperGuestRefusal'):
             rows += [f'--- PASS: {case}/root-result-transfer (1s)' for _ in range(3)]
@@ -60,7 +66,7 @@ class MeasuredAcceptanceTests(unittest.TestCase):
                 driver.validate_report('\n'.join(rows[:index]+rows[index+1:]), '', 0)
         for stdout, stderr, status in ((report, '', 1), (report+'\n--- SKIP: missing', '', 0),
                                        (report+'\n--- FAIL: ignored', '', 0),
-                                       (report+'x'*131072, '', 0), (report, 'x'*65537, 0)):
+                                       (report+'x'*196608, '', 0), (report, 'x'*65537, 0)):
             with self.assertRaises(AssertionError):
                 driver.validate_report(stdout, stderr, status)
 

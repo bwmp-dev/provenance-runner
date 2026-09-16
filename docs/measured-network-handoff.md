@@ -34,6 +34,14 @@ The command ignores runsc-managed cgroups because that outside aggregate boundar
 is the controller's responsibility. The command alone proves none of these
 controller obligations and is not exposed as a privileged service endpoint.
 
+The closed handoff also carries canonical CPU millicores derived from the
+authenticated job. After the launch gate, an OS-thread-locked child narrows its
+inherited affinity to `max(2, ceil(millicores/1000))` available CPUs before exec.
+This bounds runtime parallelism on large hosts; it grants no extra CPU time and
+does not replace or raise the owned cgroup's CPU, memory or PID limits. A host
+with fewer available CPUs retains that smaller set. The controller's affinity
+is untouched. See [runtime CPU budget](measured-runtime-cpu-budget.md).
+
 After gate release, the same retained-object mount implementation used by the
 network-disabled launcher revalidates the image hash, backing inode, loop mapping
 and read-only SquashFS mount, clones the retained mount into the private target,

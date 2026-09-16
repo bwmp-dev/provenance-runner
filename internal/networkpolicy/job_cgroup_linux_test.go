@@ -5,6 +5,7 @@ package networkpolicy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -29,6 +30,17 @@ func TestJobCgroupRefusesUnownedInput(t *testing.T) {
 		t.Fatal("ordinary directory accepted")
 	}
 	var absent *JobCgroup
+	if _, err := absent.CompletedPIDDenials(); err == nil {
+		t.Fatal("nil PID observation accepted")
+	}
+	for _, scope := range []*JobCgroup{{}, {removed: true}, {removed: true, pidSampled: true, pidSampleError: ErrResources}} {
+		if _, err := scope.CompletedPIDDenials(); err == nil {
+			t.Fatal("unavailable PID observation accepted")
+		}
+	}
+	if count, err := (&JobCgroup{removed: true, pidSampled: true, pidDenials: 7}).CompletedPIDDenials(); err != nil || count != 7 {
+		t.Fatal("frozen PID observation lost")
+	}
 	if fd, err := absent.LaunchFD(job); fd != nil || err == nil {
 		t.Fatal("absent scope granted launch")
 	}
@@ -154,6 +166,9 @@ func TestJobCgroupKernelLifecycle(t *testing.T) {
 	if err := scope.Cleanup(ctx); err != nil {
 		t.Fatal("kill descendants and remove", err)
 	}
+	if count, err := scope.CompletedPIDDenials(); err != nil || count != 0 {
+		t.Fatal("normal pre-cleanup PID observation", count, err)
+	}
 	if _, err := os.Stat("/sys/fs/cgroup/provenance-fixture-jobs/" + scope.name); !os.IsNotExist(err) {
 		t.Fatal("owned directory remains")
 	}
@@ -184,5 +199,59 @@ func TestJobCgroupKernelLifecycle(t *testing.T) {
 	if unexpected, err := sibling.LaunchFD(siblingJob); unexpected != nil || err == nil {
 		t.Fatal("wrong-lease refusal revived")
 	}
+	t.Run("pre-cleanup-pid-denial", func(t *testing.T) {
+		deniedJob := proto.Clone(job).(*p.JobSpecification)
+		deniedJob.Lease.JobId = "70000000-0000-4000-8000-000000000004"
+		denied, err := CreateJobCgroup(deniedJob, parent)
+		if denied != nil {
+			t.Cleanup(func() {
+				if err := denied.Cleanup(context.Background()); err != nil {
+					t.Error("denial fixture cleanup", err)
+				}
+			})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd, err := denied.LaunchFD(deniedJob)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fd.Close()
+		// Deliberate fault injection only into this newly owned disposable leaf.
+		// Production admission still refuses any drift from its exact limits.
+		if writeCgroupControl(denied.scope, "pids.max", "1") != nil {
+			t.Fatal("denial fixture bound")
+		}
+		holder := exec.Command("/bin/sleep", "60")
+		holder.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(fd.Fd()), Credential: &syscall.Credential{Uid: 60003, Gid: 60003, NoSetGroups: true}}
+		if err := holder.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = denied.Cleanup(context.Background()); _ = holder.Wait() }()
+		blocked := exec.Command("/bin/true")
+		blocked.SysProcAttr = holder.SysProcAttr
+		if err := blocked.Run(); !errors.Is(err, syscall.EAGAIN) {
+			t.Fatal("expected real cgroup PID denial", err)
+		}
+		if _, err := denied.CompletedPIDDenials(); err == nil {
+			t.Fatal("live scope reported completed observation")
+		}
+		if err := denied.Cleanup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		count, err := denied.CompletedPIDDenials()
+		if err != nil || count == 0 {
+			t.Fatal("real denial missing from frozen pre-cleanup observation", count, err)
+		}
+		late := exec.Command("/bin/true")
+		late.SysProcAttr = holder.SysProcAttr
+		if err := late.Run(); err == nil {
+			t.Fatal("removed denied scope revived")
+		}
+		if retained, err := denied.CompletedPIDDenials(); err != nil || retained != count {
+			t.Fatal("post-retirement event changed frozen counter")
+		}
+	})
 	t.Log("owned descendant killed, directory removed, stale launch FD refused, controller survived")
 }

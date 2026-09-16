@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/artifact"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	p "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -75,7 +76,7 @@ func (provider *Provider) PrepareMeasuredInputs(ctx context.Context, job *p.JobS
 		return nil, ErrMeasuredInputPlan
 	}
 	job = proto.Clone(job).(*p.JobSpecification)
-	if _, err := ProjectMeasuredJob(job); err != nil || len(job.TestSecrets) != 0 || job.EffectivePolicy == nil || job.EffectivePolicy.PreparationTimeout == nil {
+	if _, err := ProjectMeasuredJob(job); err != nil || testsecrets.ValidateSelection(job) != nil || job.EffectivePolicy == nil || job.EffectivePolicy.PreparationTimeout == nil {
 		return nil, ErrMeasuredInputPlan
 	}
 	budget := job.EffectivePolicy.PreparationTimeout.AsDuration()
@@ -92,7 +93,9 @@ func (provider *Provider) PrepareMeasuredInputs(ctx context.Context, job *p.JobS
 	if err != nil {
 		return nil, ErrMeasuredInputPlan
 	}
-	plan, err := provider.config.RuntimeSource.PrepareMeasuredRequest(raw, uint64(provider.config.MaximumPreparationBytes))
+	// This admits only immutable selection metadata. Values are acquired after
+	// authenticated root observation, never during downloads.
+	plan, err := provider.config.RuntimeSource.PrepareMeasuredRequestWithSecrets(raw, uint64(provider.config.MaximumPreparationBytes))
 	if err != nil {
 		return nil, ErrMeasuredInputPlan
 	}

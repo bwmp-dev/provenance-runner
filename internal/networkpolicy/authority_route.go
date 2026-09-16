@@ -66,6 +66,13 @@ func (s *AuthorityRoute) CheckJob(job *p.JobSpecification) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.checkJobLocked(job)
+}
+
+func (s *AuthorityRoute) checkJobLocked(job *p.JobSpecification) error {
+	if s.authority == nil || s.ctx == nil {
+		return ErrAuthority
+	}
 	other, err := NewAuthority(job)
 	if err != nil || s.withdrawn || s.ctx.Err() != nil {
 		return s.withdrawLocked(ErrAuthority)
@@ -82,6 +89,27 @@ func (s *AuthorityRoute) CheckJob(job *p.JobSpecification) error {
 		}
 	}
 	return nil
+}
+
+// CurrentLeaseExpiry returns the accepted lease ceiling only while this exact
+// attempt still has current authority. Late secret delivery must not reuse the
+// original offer's expiry after long preparation, or invent a renewed lease.
+// This observation does not renew authority or replace launch/cleanup checks.
+func (s *AuthorityRoute) CurrentLeaseExpiry(job *p.JobSpecification) (time.Time, error) {
+	if s == nil {
+		return time.Time{}, ErrAuthority
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkJobLocked(job); err != nil {
+		return time.Time{}, err
+	}
+	s.authority.mu.Lock()
+	defer s.authority.mu.Unlock()
+	if _, err := s.authority.deadlineLocked(time.Now()); err != nil {
+		return time.Time{}, err
+	}
+	return s.authority.lease.ExpiresAt.AsTime(), nil
 }
 
 func (s *AuthorityRoute) signal() {

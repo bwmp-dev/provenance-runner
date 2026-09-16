@@ -66,6 +66,9 @@ func realPaperFixtureJob(t *testing.T, java, prepared, server, target []byte) (*
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{57}, 32))
 	manifest = paper.SignedRuntime{Payload: raw, Signature: ed25519.Sign(key, append([]byte("provenance.paper-runtime/v1\n"), raw...))}
 	job.TargetPluginName = "ProvenanceSuccess"
+	if digest := sha256.Sum256(target); hex.EncodeToString(digest[:]) == "b84160a378c4e0eaa5f8ada6b0b05a825791c2baf89d11aff5304bf3f923a4b1" {
+		job.TargetPluginName = "ProvenanceSecretFixture"
+	}
 	job.Lease.ExpiresAt = timestamppb.New(time.Now().Add(10 * time.Minute))
 	job.Environment.ServerBinary = fixtureDigest(server)
 	job.Artifact.Digest, job.Artifact.SizeBytes = fixtureDigest(target), int64(len(target))
@@ -82,7 +85,7 @@ func realPaperFixtureJob(t *testing.T, java, prepared, server, target []byte) (*
 	config["resources"] = map[string]any{"cpuCores": 2, "memoryMiB": 2048, "diskMiB": 2048, "processes": 256, "wallTimeoutSeconds": 180, "logBytes": 1 << 20}
 	// Query the loaded plugin's local metadata. Bare "version" starts Paper's
 	// asynchronous internet update check, which this offline fixture denies.
-	config["tests"] = map[string]any{"startup": map[string]any{"timeoutSeconds": 120, "stabilizationSeconds": 1, "requirePluginEnabled": true, "shutdownTimeoutSeconds": 10, "requireCleanShutdown": true}, "console": []any{map[string]any{"id": "plugin-version", "command": "version ProvenanceSuccess", "timeoutSeconds": 10, "assertions": []any{map[string]any{"stream": "combined", "operator": "contains", "pattern": "ProvenanceSuccess version 1.0.0", "match": "present", "minimumOccurrences": 1}}}}}
+	config["tests"] = map[string]any{"startup": map[string]any{"timeoutSeconds": 120, "stabilizationSeconds": 1, "requirePluginEnabled": true, "shutdownTimeoutSeconds": 10, "requireCleanShutdown": true}, "console": []any{map[string]any{"id": "plugin-version", "command": "version " + job.TargetPluginName, "timeoutSeconds": 10, "assertions": []any{map[string]any{"stream": "combined", "operator": "contains", "pattern": job.TargetPluginName + " version 1.0.0", "match": "present", "minimumOccurrences": 1}}}}}
 	job.NormalizedConfigurationJson, err = json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +108,11 @@ func TestMeasuredPaperRealKernel(t *testing.T) {
 	if os.Getenv("PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE") != "1" {
 		t.Skip("explicit real Paper fixture required")
 	}
-	measuredPaperServiceKernel(t, "real")
+	mode := "real"
+	if os.Getenv("PROVENANCE_DISPOSABLE_REAL_PAPER_SECRETS") == "1" {
+		mode = "real-secrets"
+	}
+	measuredPaperServiceKernel(t, mode)
 }
 
 func TestRealPaperFixtureContract(t *testing.T) {

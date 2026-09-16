@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,7 +27,7 @@ var measuredNetworkJobID = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]
 // protection before releasing its launch barrier. No production provider calls
 // this command yet; network admission/measurement fences remain unchanged.
 //
-// Args are exactly job/UID/GID/overflow-UID/overflow-GID/private-root/image-SHA/mode.
+// Args are exactly job/UID/GID/overflow-UID/overflow-GID/private-root/image-SHA/mode/CPU-millis.
 // FDs 3..7 match the retained measured-root handoff; 8 and 9 are the controller's
 // network and mount namespaces, used only to refuse inherited ambient execution.
 // FD 10 is a read-only launch pipe: the controller writes exactly 's' and closes
@@ -39,6 +40,11 @@ func RunMeasuredNetworkChild(arguments []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "measured network handoff refused: inputs")
 		return runscFailureExitCode
 	}
+	// Affinity is per-thread. Keep the selected mask on the thread that execs
+	// runsc, whose descendants inherit it. No host or controller mask changes.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	cpuMillis, _ := strconv.ParseUint(arguments[8], 10, 32)
 	values := [4]uint32{}
 	for i := range values {
 		n, _ := strconv.ParseUint(arguments[i+1], 10, 32)
@@ -98,7 +104,7 @@ func RunMeasuredNetworkChild(arguments []string, stderr io.Writer) int {
 		if n, err := ready.Write([]byte{'r'}); err != nil || n != 1 || ready.Close() != nil {
 			return false
 		}
-		return awaitMeasuredNetworkGate(gate, time.Now().Add(30*time.Second))
+		return awaitMeasuredNetworkGate(gate, time.Now().Add(30*time.Second)) && limitMeasuredRuntimeCPUs(uint32(cpuMillis)) == nil
 	}
 	return runMeasuredChild(inputs, stderr, mapped, func(value []string) bool {
 		return os.Getenv("GVISOR_SIDECAR_BINARIES_DIR") == "" && os.Getenv("GVISOR_ENFORCE_RELEASE") == "" && slices.Equal(value, run)
@@ -126,7 +132,11 @@ func awaitMeasuredNetworkToken(gate *os.File, deadline time.Time, expected byte)
 }
 
 func measuredNetworkInputs(arguments []string) ([]string, []string, bool) {
-	if len(arguments) != 8 || !measuredNetworkJobID.MatchString(arguments[0]) || arguments[0] == "00000000-0000-0000-0000-000000000000" || arguments[7] != "embedded-executable" {
+	if len(arguments) != 9 || !measuredNetworkJobID.MatchString(arguments[0]) || arguments[0] == "00000000-0000-0000-0000-000000000000" || arguments[7] != "embedded-executable" {
+		return nil, nil, false
+	}
+	cpuMillis, err := strconv.ParseUint(arguments[8], 10, 32)
+	if err != nil || cpuMillis < 10 || cpuMillis > 64000 || strconv.FormatUint(cpuMillis, 10) != arguments[8] {
 		return nil, nil, false
 	}
 	ids := [4]uint64{}

@@ -18,7 +18,9 @@ def real_paper(jobs, state, bundle_state, bundles):
                              '-test.run=^TestMeasuredPaperRealKernel$', '-test.count=3', '-test.timeout=900s'],
                             env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                  'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1',
-                                 'PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE': '1'},
+                                 'PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE': '1',
+                                 'PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE': os.environ.get('PROVENANCE_DISPOSABLE_GATEWAY_FIXTURE', '0'),
+                                 'PROVENANCE_DISPOSABLE_REAL_PAPER_SECRETS': os.environ.get('PROVENANCE_DISPOSABLE_REAL_PAPER_SECRETS', '0')},
                             capture_output=True, text=True, timeout=910)
     assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
     print(result.stdout, end='', flush=True)
@@ -127,12 +129,14 @@ def main():
             assert stress.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 20
             print('{"measuredWorkerStressRepetitions": 20}', flush=True)
         service = subprocess.run(['/tmp/measured-service.test', '-test.v',
-                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal)?|Daemon|Worker)Kernel$',
-                                  '-test.count=3', '-test.timeout=120s'],
+                                  '-test.run=^TestMeasuredPaper(Service(Withdrawal|ReleaseRefusal|EventRefusal|Secrets|SecretsMissing|SecretsExpired)?|Daemon|Worker|WorkerSecrets)Kernel$',
+                                  '-test.count=3', '-test.timeout=210s'],
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                       'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
-                                 capture_output=True, text=True, timeout=130)
-        assert len(service.stdout) <= 65536 and len(service.stderr) <= 65536
+                                 capture_output=True, text=True, timeout=220)
+        # Repeated protocol subtests plus bounded root completion diagnostics.
+        # This limits the test transcript only, never guest output.
+        assert len(service.stdout) <= 131072 and len(service.stderr) <= 65536, (len(service.stdout), len(service.stderr))
         print(service.stdout, end='', flush=True)
         if service.returncode:
             raise RuntimeError('measured root service fixture failed: '+service.stderr[-4096:])
@@ -141,11 +145,22 @@ def main():
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceWithdrawalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceReleaseRefusalKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperServiceEventRefusalKernel ') == 3
+        for case in ('Secrets', 'SecretsMissing', 'SecretsExpired'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 3
+        assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel ') == 3
+        for case in ('Service', 'ServiceSecrets', 'ServiceSecretsMissing', 'ServiceSecretsExpired', 'ServiceWithdrawal', 'ServiceReleaseRefusal', 'ServiceEventRefusal', 'Daemon', 'Worker', 'WorkerSecrets'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaper'+case+'Kernel/root-secret-capability-after-retirement ') == 3
+            assert service.stdout.count('--- PASS: TestMeasuredPaper'+case+'Kernel/root-maximum-after-retirement ') == 3
+        for case in ('valid', 'nonce', 'kind', 'short', 'files', 'eof', 'oversize', 'noncanonical', 'unknown'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaperServiceKernel/root-maximum-protocol/'+case+' ') == 3
+        for case in ('valid', 'nonce', 'idle', 'short', 'files', 'eof'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaperServiceKernel/root-secret-capability-protocol/'+case+' ') == 3
+        assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel/root-idle-barrier-after-retirement ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel/root-idle-barrier-after-retirement ') == 3
         for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperDaemonKernel'+suffix+' ') == 3
-        for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal'):
+        for case in ('', 'Withdrawal', 'ReleaseRefusal', 'EventRefusal', 'Secrets', 'SecretsMissing', 'SecretsExpired'):
             assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-barrier-after-retirement ') == 3
             assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel/root-idle-response-refusal ') == 3
         result = subprocess.run(['/tmp/measured-route.test', '-test.v',

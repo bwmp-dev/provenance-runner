@@ -10,6 +10,7 @@ import (
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 type remoteJobAdapter interface {
@@ -20,16 +21,29 @@ type connectedWorker struct {
 	registry         *execution.Registry
 	adapter          remoteJobAdapter
 	measuredEndpoint string
+	measuredSecrets  bool
+	measuredMaximum  *runnerv1.EffectivePolicy
 	admission        sync.Mutex
 	cleanupFailed    bool
+	none             *connectedWorker
 }
 
 func (w *connectedWorker) SupportsTestSecretSource() bool {
-	if w == nil || w.measuredEndpoint != "" {
+	if w == nil {
 		return false
+	}
+	if w.measuredEndpoint != "" {
+		return w.measuredSecrets && w.none != nil && w.none.SupportsTestSecretSource()
 	}
 	provider, ok := w.adapter.(interface{ SupportsTestSecretSource() bool })
 	return ok && provider.SupportsTestSecretSource()
+}
+
+func (w *connectedWorker) MeasuredNetworkMaximum() *runnerv1.EffectivePolicy {
+	if w == nil || w.measuredEndpoint == "" || w.none == nil || w.measuredMaximum == nil {
+		return nil
+	}
+	return proto.Clone(w.measuredMaximum).(*runnerv1.EffectivePolicy)
 }
 
 func (w *connectedWorker) Execute(ctx context.Context, specification *runnerv1.JobSpecification, beforeExecute func(context.Context, execution.ExecutionStart) error) execution.Result {
@@ -51,6 +65,19 @@ func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.J
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseCleanup, execution.ClassificationInfrastructureFailure, "worker_cleanup_unconfirmed", errors.New("worker admission stopped after failed cleanup"))
 	}
 	if w.measuredEndpoint != "" {
+		policy := specification.GetEffectivePolicy()
+		noneV2 := policy.GetNetworkV2() != nil && policy.GetNetworkV2().GetMode() == runnerv1.NetworkMode_NETWORK_MODE_NONE
+		legacyNone := policy.GetNetworkV2() == nil && policy.GetNetwork() != nil && policy.GetNetwork().GetMode() == runnerv1.NetworkMode_NETWORK_MODE_NONE
+		if v2 && (noneV2 || legacyNone) {
+			if w.none == nil {
+				return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "isolated_none_provider_required", errors.New("no-network v2 provider is not provisioned"))
+			}
+			result := w.none.ExecuteV2(ctx, specification, beforeExecute)
+			if result.Cleanup != nil && !result.Cleanup.Succeeded {
+				w.cleanupFailed = true
+			}
+			return result
+		}
 		provider, ok := w.adapter.(interface {
 			ExecuteMeasured(context.Context, *runnerv1.JobSpecification, string, func(context.Context, execution.ExecutionStart) error) execution.Result
 		})
@@ -63,7 +90,17 @@ func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.J
 		}
 		return result
 	}
-	job, err := w.adapter.AdaptJob(specification)
+	adapt := w.adapter.AdaptJob
+	if v2 && specification.GetEffectivePolicy().GetNetworkV2() != nil {
+		provider, ok := w.adapter.(interface {
+			AdaptNoNetworkV2(*runnerv1.JobSpecification) (localjob.Job, error)
+		})
+		if !ok {
+			return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "isolated_none_v2_required", errors.New("no-network v2 adapter unavailable"))
+		}
+		adapt = provider.AdaptNoNetworkV2
+	}
+	job, err := adapt(specification)
 	if err != nil {
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "remote_job_adaptation_failed", err)
 	}
@@ -81,6 +118,9 @@ func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.J
 	}
 	result := executor.Execute(ctx, job)
 	result.TerminalContext = proofContext
+	if result.Cleanup != nil && !result.Cleanup.Succeeded {
+		w.cleanupFailed = true
+	}
 	return result
 }
 
@@ -96,5 +136,16 @@ func newConnectedWorker(registry *providerRegistry) (*connectedWorker, error) {
 	if !ok {
 		return nil, errors.New("Paper provider does not implement remote job adaptation")
 	}
-	return &connectedWorker{registry: registry.Registry, adapter: adapter, measuredEndpoint: registry.measuredEndpoint}, nil
+	result := &connectedWorker{registry: registry.Registry, adapter: adapter, measuredEndpoint: registry.measuredEndpoint, measuredSecrets: registry.measuredSecrets}
+	if registry.measuredMaximum != nil {
+		result.measuredMaximum = proto.Clone(registry.measuredMaximum).(*runnerv1.EffectivePolicy)
+	}
+	if registry.none != nil {
+		var err error
+		result.none, err = newConnectedWorker(registry.none)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
