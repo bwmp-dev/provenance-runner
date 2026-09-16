@@ -6,6 +6,12 @@ sealed observation of the complete original job. Only then can the execution
 helper call the trusted gateway source, with live authority checks before and
 after acquisition and a delivery expiry bounded by the accepted lease.
 
+Acquisition and redactor installation remain in PREPARING. Only afterwards may
+the gateway's start callback commit RUNNING; Java stays behind the closed root
+bootstrap gate until that acknowledgement completes. The preparation deadline,
+secret expiry and current authority are rechecked after the callback. This
+ordering is covered by the real gateway-secret composition fixture.
+
 The worker verifies ordered names and obtains independently owned read-only
 sealed descriptors. It builds a fresh collector from the delivered redaction
 values while the Java bootstrap gate remains closed, reattaches the live

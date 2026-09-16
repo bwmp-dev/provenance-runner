@@ -461,6 +461,12 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 			t.Fatal("gateway terminal acceptance marker missing")
 		}
 		t.Log("MEASURED_GATEWAY_PAPER_TERMINAL_OK")
+		if secrets {
+			if strings.Count(diagnostic.String(), "MEASURED_GATEWAY_PAPER_SECRETS_OK") != 1 {
+				t.Fatal("gateway secret acceptance marker missing")
+			}
+			t.Log("MEASURED_GATEWAY_PAPER_SECRETS_OK")
+		}
 	}
 	capabilityMode := "service-secrets-disabled"
 	if secrets {

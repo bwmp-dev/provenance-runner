@@ -17,10 +17,12 @@ one execution, confirmed cleanup, and an empty durable active/pending journal.
 
 This is **not** platform database, object-storage upload, or deployed scheduling
 acceptance. The gRPC transport is in-memory; no production credential is loaded.
-The fixture currently covers plain Paper only and explicitly refuses the
-`--gateway --secrets` combination. Independent real secret-injection/redaction
-acceptance remains separate. The intermittent synthetic worker failure is not
-claimed fixed by these passes.
+`--gateway --secrets` additionally requires a root-confirmed secret capability,
+one exact selected delivery while still PREPARING, and raw/base64 redaction in
+live gateway batches, the worker result and the complete compressed archive.
+The archived-log check runs before archive ownership passes to the gateway;
+it does not stand in for object-storage acceptance. The intermittent synthetic
+worker failure is not claimed fixed by these passes.
 
 ## Local observation, 2026-09-16
 
@@ -38,3 +40,36 @@ Initial fixture attempts were correctly refused for distinct job/execution IDs,
 equal rather than strictly later download expiry, and acknowledgement of a
 nondurable live event. Those fixture-server mistakes were corrected without
 relaxing production validation. No production service was changed by these tests.
+
+### Secret ordering regression
+
+The first three gateway-secret executions failed before Java startup: the
+measured client called the gateway's start acknowledgement before fetching
+secrets. That acknowledgement commits RUNNING, while the gateway client
+intentionally permits secret acquisition only during PREPARING. Separate
+standalone-worker and plain-gateway tests had not exercised this composition.
+
+The measured client now obtains secrets only after authenticated root observation
+and current authority, installs the redactor and delivers sealed descriptors
+while PREPARING, then obtains the start acknowledgement before releasing Java.
+The preparation deadline covers this entire sequence. Expiry and authority are
+checked both before and after the acknowledgement; root independently checks
+them at bootstrap. Missing or expired secret delivery must not call the start
+callback. Regression tests cover expiry, withdrawal, cancellation and refusal
+during acknowledgement. No gateway phase restriction was widened.
+
+After that ordering correction, three real gateway-secret executions passed
+(54.84, 55.14 and 52.60 seconds), including terminal ACK and all retirement
+markers. Service binary:
+`c4b78aaf1d036bc5ec1c8307d0679c79cd09982c18ecae6f127b7238703e8b86`;
+worker binary:
+`7fbad2afae3b83071b4ff4524a97f23d9743996ab536c0968320917b662946d6`.
+They used the pinned real image above and the synthetic secret target
+`b84160a378c4e0eaa5f8ada6b0b05a825791c2baf89d11aff5304bf3f923a4b1`.
+These are local observations, not production or released artifact attestations.
+
+The initial integration CI run `35144843411` also exposed an obsolete systemd
+driver mock: it emitted argv but not the newly required NONE-v2 pass markers.
+The mock now emits both expected markers and separately verifies that omitting
+either fails. Actual systemd/NONE-v2 acceptance still must pass; correcting the
+mock does not stand in for that check.

@@ -316,7 +316,10 @@ func serviceFixtureClient() {
 		return
 	}
 	if os.Args[3] != "complete" && os.Args[3] != "secrets" {
-		if err == nil || result != nil || !released || sawStart != (os.Args[3] == "withdraw") {
+		// Missing/expired secret delivery is still preparation: it must fail
+		// before committing the running/start acknowledgement.
+		wantReleased := os.Args[3] != "secrets-missing" && os.Args[3] != "secrets-expired"
+		if err == nil || result != nil || released != wantReleased || sawStart != (os.Args[3] == "withdraw") {
 			panic("refused session crossed its execution or completion boundary")
 		}
 		return

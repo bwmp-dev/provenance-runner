@@ -108,16 +108,16 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 	if err != nil || preparationCtx.Err() != nil {
 		return nil, ErrSession
 	}
-	executionCtx, stopExecution := context.WithTimeout(ctx, execution)
-	defer stopExecution()
-	if options.BeforeRelease != nil && options.BeforeRelease(executionCtx) != nil {
-		return nil, ErrSession
-	}
+	// Secret acquisition belongs to PREPARING. The gateway start callback
+	// commits RUNNING, after which its secret source deliberately refuses reads.
+	// Root observation and current authority are already required above; Java's
+	// bootstrap gate remains closed throughout this preparation.
+	var secretExpiry time.Time
 	if len(job.TestSecrets) > 0 {
 		if options.PrepareSecrets == nil || ts.ValidateSelection(job) != nil || guard.CheckJob(job) != nil {
 			return nil, ErrSession
 		}
-		descriptors, expires, err := options.PrepareSecrets(executionCtx, observation)
+		descriptors, expires, err := options.PrepareSecrets(preparationCtx, observation)
 		ceiling, authorityErr := guard.CurrentLeaseExpiry(job)
 		if err != nil || authorityErr != nil || !expires.After(time.Now()) || expires.After(ceiling) || len(descriptors) != len(job.TestSecrets) {
 			return nil, ErrSession
@@ -129,18 +129,29 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 			}
 			names[i], files[i] = descriptor.Name, descriptor.File
 		}
-		if forwarder.DeliverSecrets(executionCtx, names, files, expires) != nil {
+		if forwarder.DeliverSecrets(preparationCtx, names, files, expires) != nil {
 			return nil, ErrSession
 		}
+		secretExpiry = expires
 	} else if options.PrepareSecrets != nil {
 		return nil, ErrSession
 	}
 	if options.PrepareOutput != nil {
-		collector, err = options.PrepareOutput(executionCtx)
+		collector, err = options.PrepareOutput(preparationCtx)
 		if err != nil || collector == nil {
 			return nil, ErrSession
 		}
 	}
+	ready := func() bool {
+		return preparationCtx.Err() == nil && (secretExpiry.IsZero() || secretExpiry.After(time.Now())) && guard.CheckJob(job) == nil
+	}
+	// An acknowledgement wait cannot extend the delivery expiry or restore
+	// withdrawn authority. Root independently rechecks both at bootstrap.
+	if acknowledgePreparedRelease(preparationCtx, options.BeforeRelease, ready) != nil {
+		return nil, ErrSession
+	}
+	executionCtx, stopExecution := context.WithTimeout(ctx, execution)
+	defer stopExecution()
 	if executionCtx.Err() != nil || forwarder.Release(executionCtx) != nil {
 		return nil, ErrSession
 	}
@@ -175,4 +186,17 @@ func Run(ctx context.Context, channel *cc.Channel, guard *np.AuthorityRoute, opt
 		return nil, &SessionFailure{observation: observation, completion: completion}
 	}
 	return &SessionResult{observation: observation, completion: completion}, nil
+}
+
+func acknowledgePreparedRelease(ctx context.Context, before func(context.Context) error, ready func() bool) error {
+	if ctx == nil || ctx.Err() != nil || ready == nil || !ready() {
+		return ErrSession
+	}
+	if before != nil && before(ctx) != nil {
+		return ErrSession
+	}
+	if ctx.Err() != nil || !ready() {
+		return ErrSession
+	}
+	return nil
 }

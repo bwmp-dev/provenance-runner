@@ -15,6 +15,10 @@ class RealPaperAcceptanceTests(unittest.TestCase):
         driver.validate_report(report, '', 0)
         gateway_report = report+'\n'+('MEASURED_GATEWAY_PAPER_TERMINAL_OK\n'*3)
         driver.validate_report(gateway_report, '', 0, True)
+        driver.validate_report(gateway_report+'\n'+('MEASURED_GATEWAY_PAPER_SECRETS_OK\n'*3), '', 0, True, True)
+        for count in (0, 1, 2, 4):
+            with self.subTest(secret_markers=count), self.assertRaises(AssertionError):
+                driver.validate_report(gateway_report+'\n'+('MEASURED_GATEWAY_PAPER_SECRETS_OK\n'*count), '', 0, True, True)
         for count in (0, 1, 2, 4):
             with self.subTest(gateway_markers=count), self.assertRaises(AssertionError):
                 driver.validate_report(report+'\n'+('MEASURED_GATEWAY_PAPER_TERMINAL_OK\n'*count), '', 0, True)

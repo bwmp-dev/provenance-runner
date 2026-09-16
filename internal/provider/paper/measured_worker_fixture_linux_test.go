@@ -188,8 +188,8 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 		ctx = execution.WithObserver(ctx, observer)
 		ctx = execution.WithTestSecretSource(ctx, func(context.Context) (*ts.Files, time.Time, error) {
 			secretCalls++
-			if starts != 1 || secretCalls != 1 {
-				t.Error("secret acquired before release boundary or more than once")
+			if starts != 0 || secretCalls != 1 {
+				t.Error("secret acquired after start acknowledgement or more than once")
 			}
 			files, err := ts.New([]ts.Input{{Name: "license", Value: []byte("synthetic-session-secret")}})
 			return files, time.Now().Add(20 * time.Second), err

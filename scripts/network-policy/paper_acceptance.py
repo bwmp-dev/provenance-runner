@@ -25,12 +25,14 @@ def digest(path):
         return hashlib.file_digest(file, 'sha256').hexdigest()
 
 
-def validate_report(stdout, stderr, code, gateway=False):
+def validate_report(stdout, stderr, code, gateway=False, secrets=False):
     assert len(stdout) <= 65536 and len(stderr) <= 65536
     assert code == 0, stderr[-4096:]
     assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout
     if gateway:
         assert stdout.count('MEASURED_GATEWAY_PAPER_TERMINAL_OK') == 3
+        if secrets:
+            assert stdout.count('MEASURED_GATEWAY_PAPER_SECRETS_OK') == 3
     for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):
         assert stdout.count('--- PASS: TestMeasuredPaperRealKernel'+suffix+' ') == 3
     for marker in ('measuredRealPaperCompatibility', 'measuredHostUplinkJournalRetired', 'measuredBundleJournalRetired', 'measuredJobJournalRetired', 'exclusiveMeasuredJobScopesRemoved', 'measuredRoutedOwnedLoopDetached'):
@@ -46,8 +48,6 @@ def main():
     parser.add_argument('--secrets', action='store_true')
     parser.add_argument('--gateway', action='store_true')
     args = parser.parse_args()
-    if args.gateway and args.secrets:
-        parser.error('--gateway currently requires the plain Paper fixture')
     assert re.fullmatch('sha256:[a-f0-9]{64}', args.image)
     assert args.rootfs.is_absolute() and args.rootfs.resolve() == args.rootfs and digest(args.rootfs) == ROOT
     assert args.inputs.is_absolute() and args.inputs.resolve() == args.inputs
@@ -82,7 +82,7 @@ def main():
     # after its own loop retirement has been positively observed.
     if '{"measuredRoutedOwnedLoopDetached": true}' in result.stdout:
         subprocess.run(['docker', 'rm', name], capture_output=True, check=True, timeout=30)
-    validate_report(result.stdout, result.stderr, result.returncode, args.gateway)
+    validate_report(result.stdout, result.stderr, result.returncode, args.gateway, args.secrets)
     assert state['Status'] == 'exited' and state['ExitCode'] == 0 and not state['OOMKilled']
     print(json.dumps({'realPaperCompatibility': True, 'gameVersion': '1.21.8', 'paperBuild': 60, 'repetitions': 3,
                       'rootfsSHA256': ROOT, 'paperGuestSHA256': HELPER, 'inputs': INPUTS,
@@ -91,7 +91,7 @@ def main():
     if args.secrets:
         print(json.dumps({'realPaperSecretInjectionAndRedaction': True, 'targetSHA256': SECRET_TARGET, 'repetitions': 3, 'deployed': False}, sort_keys=True))
     if args.gateway:
-        print(json.dumps({'realPaperGatewayTerminalEvidence': True, 'repetitions': 3, 'platformDatabaseAcceptance': False, 'objectStorageAcceptance': False, 'deployed': False}, sort_keys=True))
+        print(json.dumps({'realPaperGatewayTerminalEvidence': True, 'gatewaySecretDeliveryAndRedaction': args.secrets, 'repetitions': 3, 'platformDatabaseAcceptance': False, 'objectStorageAcceptance': False, 'deployed': False}, sort_keys=True))
 
 
 if __name__ == '__main__':

@@ -56,8 +56,8 @@ CI's overall 15-minute job ceiling and every individual job limit are unchanged.
 
 These tests do not establish production provisioning or live scheduling
 acceptance. A separate [real gateway-to-Paper fixture](measured-gateway-paper-fixture.md)
-now covers plain Paper execution and terminal acknowledgement, but not the
-platform database, object storage or selected secrets over that same connection.
+now covers plain and selected-secret Paper execution and terminal acknowledgement,
+but not the platform database or object storage over that same connection.
 Those remaining boundaries are still activation gates.
 
 ### Local integration observations, 2026-09-16

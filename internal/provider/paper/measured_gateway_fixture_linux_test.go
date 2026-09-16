@@ -3,19 +3,25 @@
 package paper
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bwmp-dev/provenance-runner/internal/evidence"
 	"github.com/bwmp-dev/provenance-runner/internal/execution"
 	"github.com/bwmp-dev/provenance-runner/internal/gatewayclient"
 	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
@@ -35,7 +41,11 @@ type measuredGatewayFixtureWorker struct {
 	maximum  *p.EffectivePolicy
 	starts   atomic.Uint32
 	result   chan execution.Result
+	secrets  bool
+	verified chan error
 }
+
+func (w *measuredGatewayFixtureWorker) SupportsTestSecretSource() bool { return w.secrets }
 
 func (*measuredGatewayFixtureWorker) Execute(context.Context, *p.JobSpecification, func(context.Context, execution.ExecutionStart) error) execution.Result {
 	panic("fixture selected legacy execution")
@@ -48,6 +58,11 @@ func (w *measuredGatewayFixtureWorker) ExecuteV2(ctx context.Context, job *p.Job
 		w.starts.Add(1)
 		return before(ctx, start)
 	})
+	var verified error
+	if w.secrets {
+		verified = verifyGatewaySecretResult(result)
+	}
+	w.verified <- verified
 	w.result <- result
 	return result
 }
@@ -66,8 +81,12 @@ func (s *measuredGatewayFixtureServer) Connect(stream grpc.BidiStreamingServer[p
 // acceptance and intentionally does not claim object-storage upload acceptance.
 func runMeasuredGatewayFixture(t *testing.T, ctx context.Context, provider *Provider, endpoint string, job *p.JobSpecification) {
 	t.Helper()
-	if os.Getenv("PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE") != "1" || len(job.TestSecrets) != 0 {
-		t.Fatal("plain real Paper gateway fixture required")
+	if os.Getenv("PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE") != "1" {
+		t.Fatal("real Paper gateway fixture required")
+	}
+	secrets := len(job.TestSecrets) != 0
+	if secrets && (len(job.TestSecrets) != 1 || job.TestSecrets[0].Name != "license" || provider.CheckMeasuredSecrets(ctx, endpoint) != nil) {
+		t.Fatal("root-confirmed single fixture secret required")
 	}
 	const runnerID = "50000000-0000-4000-8000-000000000001"
 	// The direct-root fixture uses distinct identifiers; gateway offers use the
@@ -93,9 +112,10 @@ func runMeasuredGatewayFixture(t *testing.T, ctx context.Context, provider *Prov
 	if err != nil {
 		t.Fatal("root-confirmed gateway maximum", err)
 	}
-	worker := &measuredGatewayFixtureWorker{provider: provider, endpoint: endpoint, maximum: maximum, result: make(chan execution.Result, 1)}
+	worker := &measuredGatewayFixtureWorker{provider: provider, endpoint: endpoint, maximum: maximum, result: make(chan execution.Result, 1), secrets: secrets, verified: make(chan error, 1)}
 	serverResult := make(chan error, 1)
 	terminalSeen := false
+	secretRequests, redactedLive := 0, false
 	server := &measuredGatewayFixtureServer{connect: func(stream grpc.BidiStreamingServer[p.RunnerMessage, p.GatewayMessage]) (result error) {
 		defer func() { serverResult <- result }()
 		sequence := 0
@@ -135,6 +155,13 @@ func runMeasuredGatewayFixture(t *testing.T, ctx context.Context, provider *Prov
 			if err != nil {
 				return err
 			}
+			if logs := incoming.GetLogBatch(); secrets && logs != nil {
+				raw, err := proto.Marshal(logs)
+				if err != nil || containsGatewayFixtureSecret(raw) {
+					return errors.New("fixture live secret redaction failed")
+				}
+				redactedLive = redactedLive || bytes.Contains(raw, []byte(evidence.RedactionMarker))
+			}
 			if hb := incoming.GetHeartbeat(); hb != nil {
 				ack := &p.HeartbeatAcknowledgement{RunnerMessageId: incoming.MessageId, Sequence: hb.Sequence, CommittedAt: timestamppb.Now()}
 				if len(hb.ActiveLeases) != 0 {
@@ -156,6 +183,18 @@ func runMeasuredGatewayFixture(t *testing.T, ctx context.Context, provider *Prov
 				continue
 			}
 			switch {
+			case incoming.GetTestSecretsRequest() != nil:
+				request := incoming.GetTestSecretsRequest()
+				secretRequests++
+				if !secrets || !accepted || phase != p.JobPhase_JOB_PHASE_PREPARING || worker.starts.Load() != 0 || secretRequests != 1 || !proto.Equal(request.Lease, job.Lease) || !proto.Equal(request.Attempt, job.Attempt) {
+					return errors.New("fixture secret acquisition identity or release boundary invalid")
+				}
+				out := message()
+				out.Payload = &p.GatewayMessage_TestSecretsDelivery{TestSecretsDelivery: &p.TestSecretsDelivery{RequestMessageId: incoming.MessageId, Lease: job.Lease, Attempt: job.Attempt, ExpiresAt: timestamppb.New(time.Now().Add(20 * time.Second)), Secrets: []*p.TestSecretValue{{Reference: job.TestSecrets[0], Value: []byte("synthetic-session-secret")}}}}
+				if err := stream.Send(out); err != nil {
+					return err
+				}
+				continue
 			case incoming.GetLeaseAccepted() != nil:
 				if accepted || worker.starts.Load() != 0 {
 					return errors.New("fixture execution preceded acceptance acknowledgement")
@@ -225,6 +264,7 @@ func runMeasuredGatewayFixture(t *testing.T, ctx context.Context, provider *Prov
 		t.Fatal(err)
 	}
 	config.EnableNetworkPolicyV2, config.EnableTerminalEvidenceV2 = true, true
+	config.EnableTestSecrets = secrets
 	client, err := gatewayclient.NewWithWorker(config, p.NewRunnerGatewayClient(connection), worker)
 	if err != nil {
 		t.Fatal(err)
@@ -241,6 +281,9 @@ func runMeasuredGatewayFixture(t *testing.T, ctx context.Context, provider *Prov
 		t.Fatalf("measured gateway composition: client=%v server=%v terminal=%t starts=%d", runErr, serverErr, terminalSeen, worker.starts.Load())
 	}
 	result := <-worker.result
+	if err := <-worker.verified; err != nil {
+		t.Fatal(err)
+	}
 	if !result.Passed() || result.Cleanup == nil || !result.Cleanup.Succeeded || result.MeasuredNetwork == nil {
 		t.Fatal("gateway worker lost measured success or cleanup")
 	}
@@ -250,4 +293,35 @@ func runMeasuredGatewayFixture(t *testing.T, ctx context.Context, provider *Prov
 		t.Fatal("terminal acknowledgement did not retire durable gateway state")
 	}
 	fmt.Println("MEASURED_GATEWAY_PAPER_TERMINAL_OK")
+	if secrets {
+		if secretRequests != 1 || !redactedLive {
+			t.Fatal("gateway secret delivery or redacted live evidence missing")
+		}
+		fmt.Println("MEASURED_GATEWAY_PAPER_SECRETS_OK")
+	}
+}
+
+func containsGatewayFixtureSecret(raw []byte) bool {
+	value := []byte("synthetic-session-secret")
+	return bytes.Contains(raw, value) || bytes.Contains(raw, []byte(base64.StdEncoding.EncodeToString(value)))
+}
+
+// Runs before returning ownership of the archive to the gateway client.
+func verifyGatewaySecretResult(result execution.Result) error {
+	if result.Logs == nil || containsGatewayFixtureSecret([]byte(result.Logs.Stdout+result.Logs.Stderr)) || !strings.Contains(result.Logs.Stdout, evidence.RedactionMarker) || !strings.Contains(result.Logs.Stdout, "ROOT_SECRET_READ_ONLY_OK") {
+		return errors.New("gateway worker secret injection or result redaction failed")
+	}
+	if result.CompleteLog == nil || result.CompleteLog.Archive == nil || result.CompleteLog.State != "complete" {
+		return errors.New("gateway worker secret archive missing")
+	}
+	archive, err := gzip.NewReader(io.NewSectionReader(result.CompleteLog.Archive, 0, result.CompleteLog.CompressedBytes))
+	if err != nil {
+		return errors.New("gateway worker secret archive framing invalid")
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(archive, (16<<20)+1))
+	closeErr := archive.Close()
+	if readErr != nil || closeErr != nil || len(raw) > 16<<20 || containsGatewayFixtureSecret(raw) || !bytes.Contains(raw, []byte(evidence.RedactionMarker)) {
+		return errors.New("gateway worker archive redaction failed")
+	}
+	return nil
 }
