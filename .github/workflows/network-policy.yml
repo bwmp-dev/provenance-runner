@@ -92,7 +92,7 @@ jobs:
             2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/native-sentry-actuation.log"
       - name: Retain exact-head disposable packet evidence
         if: always() && env.PROVENANCE_NETWORK_EVIDENCE != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: network-policy-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.PROVENANCE_NETWORK_EVIDENCE }}
