@@ -53,7 +53,7 @@ func (b *measuredBundle) stageSecrets(ctx context.Context, job *p.JobSpecificati
 		return errMeasuredBundle
 	}
 	b.secretAttempted = true
-	dir, err := openBundleAt(j.secretParent, b.record.Job, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	dir, err := openBundleAt(j.secretParent, b.record.Job+"/files", unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return errMeasuredBundle
 	}

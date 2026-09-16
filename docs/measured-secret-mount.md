@@ -9,8 +9,11 @@ mount. A fixed 1-MiB metadata/content reserve is subtracted from the existing
 guest temporary-storage budget; a job too small for that reserve is refused.
 The immutable root must already provide the empty mountpoint.
 
-Before launch the empty child remains root-owned with mode 0550 and the mapped
-runtime's group. The runtime can traverse it but cannot change its permissions.
+Before launch the outer child remains root-owned with mode 0550 and the mapped
+runtime's group. It contains a root-owned 0555 inner directory, which alone is
+mounted into the guest. The outer directory restricts host access; the inner
+directory allows the guest's distinct non-root virtual identity to read files.
+Neither the gofer nor guest can change these directory permissions.
 The private one-shot `stageSecrets` hook rechecks durable bundle ownership and
 the child inode before copying sealed inputs. Failure consumes the attempt and
 leaves the files with the cleanup owner. Materialization and cleanup share the
