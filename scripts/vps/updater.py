@@ -19,6 +19,10 @@ STATE = Path('/var/lib/provenance-runner')
 WORK = ROOT/'update-state'
 UNIT = 'provenance-runner.service'
 USER = 'provenance-worker'
+MEASURED_PLAN = Path('/etc/provenance/measured-launch.json')
+MEASURED_CONFIG = Path('/etc/provenance/measured-service.json')
+MEASURED_UNIT = 'provenance-measured.service'
+MEASURED_CGROUP = Path('/sys/fs/cgroup/system.slice/provenance-measured.service')
 MAX_BINARY = 512*1024**2
 MAX_CATALOG = 256*1024
 USER_AGENT = 'Provenance-Hosted-Updater/1.0 (https://provenance.bwmp.dev)'
@@ -259,6 +263,111 @@ def local_quiet():
 
 def service(action):
     run('systemctl', action, UNIT)
+    if action == 'stop' and measured_enabled():
+        # The worker has stopped and closed its authenticated control channel.
+        # Wait for the root owner too; user-manager scopes cannot prove that
+        # root-owned job children and persistent cleanup are complete.
+        run('systemctl', 'stop', MEASURED_UNIT)
+        check(run('systemctl', 'show', MEASURED_UNIT, '--property=ActiveState', '--value').strip()
+              in (b'inactive', b'failed') and not MEASURED_CGROUP.exists(),
+              'Measured controller has not retired its owned groups')
+
+
+def measured_enabled():
+    present = [path.exists() or path.is_symlink() for path in (MEASURED_PLAN, MEASURED_CONFIG)]
+    check(present[0] == present[1], 'Incomplete measured provisioning')
+    return all(present)
+
+
+def measured_private(path):
+    raw = read(path)
+    info = path.stat()
+    check(info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o600, 'Measured configuration custody')
+    return raw
+
+
+def measured_snapshot(operation, old_hash, new_hash):
+    if not measured_enabled():
+        return None
+    check(str(uuid.UUID(operation)) == operation, 'Invalid measured update identity')
+    before = {'plan': measured_private(MEASURED_PLAN), 'config': measured_private(MEASURED_CONFIG)}
+    plan, config = decode(before['plan']), decode(before['config'])
+    check(type(plan['version']) is int and plan['version'] == 1 and
+          type(config['version']) is int and config['version'] == 1 and
+          plan['runner'] == {'path': str(ROOT/'runner'), 'sha256': old_hash} and
+          plan['config'] == {'path': str(MEASURED_CONFIG), 'sha256': hashlib.sha256(before['config']).hexdigest()} and
+          config['runnerSha256'] == old_hash, 'Measured before-image binding')
+    requirements = run('systemctl', 'show', UNIT, '--property=Requires', '--value').decode().split()
+    check(MEASURED_UNIT in requirements, 'Worker must require measured controller readiness')
+    for name, pin in plan.items():
+        if name == 'version':
+            continue
+        check(isinstance(pin, dict) and set(pin) == {'path', 'sha256'}, 'Measured launch pin')
+        path = Path(pin['path'])
+        protected(path)
+        check(path.stat().st_size <= MAX_BINARY and sha(path) == pin['sha256'], 'Measured launch input drift')
+    config['runnerSha256'] = new_hash
+    after = {'config': (json.dumps(config, sort_keys=True, separators=(',', ':'))+'\n').encode()}
+    plan['runner']['sha256'] = new_hash
+    plan['config']['sha256'] = hashlib.sha256(after['config']).hexdigest()
+    after['plan'] = (json.dumps(plan, sort_keys=True, separators=(',', ':'))+'\n').encode()
+    directory = WORK/('measured-'+operation)
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass  # An interrupted pre-journal staging may be resumed only exactly.
+    check(directory.resolve() == directory and directory.is_dir() and
+          stat.S_IMODE(directory.stat().st_mode) == 0o700, 'Measured snapshot directory')
+    record = {'version': 1, 'directory': directory.name, 'oldSha256': old_hash, 'newSha256': new_hash}
+    for state, items in (('before', before), ('after', after)):
+        record[state] = {}
+        for name, raw in items.items():
+            target = directory/(state+'-'+name+'.json')
+            if not target.exists() and not target.is_symlink():
+                # Exclusive creation prevents a retry from replacing evidence.
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, 'wb') as file:
+                    file.write(raw)
+                    file.flush()
+                    os.fsync(file.fileno())
+            check(measured_private(target) == raw, 'Retained measured snapshot drift')
+            record[state][name] = hashlib.sha256(raw).hexdigest()
+    for path in (directory, WORK):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return record
+
+
+def measured_projection(op, expected):
+    record = op.get('measured') if op else None
+    check(bool(record) == measured_enabled(), 'Measured transaction/provisioning mismatch')
+    if not record:
+        return None
+    check(set(record) == {'version', 'directory', 'oldSha256', 'newSha256', 'before', 'after'} and
+          type(record['version']) is int and record['version'] == 1 and
+          str(uuid.UUID(op['id'])) == op['id'] and record['directory'] == 'measured-'+op['id'] and
+          record['oldSha256'] == op['oldSha256'] and record['newSha256'] == op['release']['sha256'] and
+          expected in (record['oldSha256'], record['newSha256']), 'Measured transaction identity')
+    snapshots = {}
+    for state in ('before', 'after'):
+        check(set(record[state]) == {'plan', 'config'}, 'Measured snapshot fields')
+        snapshots[state] = {}
+        for name in ('plan', 'config'):
+            raw = measured_private(WORK/record['directory']/(state+'-'+name+'.json'))
+            check(hashlib.sha256(raw).hexdigest() == record[state][name], 'Measured snapshot digest')
+            snapshots[state][name] = raw
+    # Exactly the old/new images are legal, including a crash between either
+    # atomic JSON replacement. Never rewrite an unrelated operator edit.
+    for name, path in (('plan', MEASURED_PLAN), ('config', MEASURED_CONFIG)):
+        check(measured_private(path) in (snapshots['before'][name], snapshots['after'][name]),
+              'Unrecognized measured mixed state')
+    check(sha(ROOT/'runner') in (record['oldSha256'], record['newSha256']), 'Unrecognized measured binary')
+    check(run('systemctl', 'show', MEASURED_UNIT, '--property=ActiveState', '--value').strip()
+          in (b'inactive', b'failed') and not MEASURED_CGROUP.exists(), 'Measured owner must be stopped')
+    return snapshots['before' if expected == record['oldSha256'] else 'after']
 
 
 def no_scopes():
@@ -289,11 +398,15 @@ class Updater:
         # retained in the update journal for the selected binary's identity.
         atomic(ROOT/'installed.json', json.dumps(metadata).encode())
 
-    def switch(self, source, expected):
+    def switch(self, source, expected, op=None):
         protected(source)
         check(sha(source) == expected, 'Retained binary identity changed')
+        projection = measured_projection(op, expected)
         atomic(ROOT/'runner', source.read_bytes(), 0o755)
         self.metadata(expected)
+        if projection:
+            atomic(MEASURED_CONFIG, projection['config'])
+            atomic(MEASURED_PLAN, projection['plan'])
 
     def healthy(self, op, report):
         consecutive = 0
@@ -328,7 +441,7 @@ class Updater:
             service('start')
             return  # Let the retained worker flush its journal while still drained.
         no_scopes()
-        self.switch(WORK/(op['oldSha256']+'.elf'), op['oldSha256'])
+        self.switch(WORK/(op['oldSha256']+'.elf'), op['oldSha256'], op)
         service('start')
         if self.healthy(op, 'rollback-health'):
             self.finish(op, 'rolled_back')
@@ -375,16 +488,19 @@ class Updater:
                     self.client.download(release, downloaded)
                     atomic(target, downloaded.read_bytes(), 0o755)
             check(sha(target) == release['sha256'], 'Staged binary drift')
+            measured = measured_snapshot(command['operationId'], old_hash, release['sha256'])
         except (ValueError, TypeError, KeyError):
             self.client.poll(command['operationId'], 'failed')
             return  # No binary was replaced; backend retains drain for inspection.
         op = {'id': command['operationId'], 'release': release, 'oldSha256': old_hash, 'phase': 'staged'}
+        if measured:
+            op['measured'] = measured
         self.save(op)
         try:
             service('stop')
             check(local_quiet(), 'Pending terminal replay prevents update')
             no_scopes()
-            self.switch(target, release['sha256'])
+            self.switch(target, release['sha256'], op)
             op['phase'] = 'verifying'
             self.save(op)
             service('start')

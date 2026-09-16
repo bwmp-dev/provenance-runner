@@ -36,7 +36,7 @@ for attempt in {1..60}; do
   sleep 0.5
 done
 docker exec "$container" systemctl is-system-running --quiet
-for file in runtime-generation.py measured-rootfs-boot.py measured-runtime-selection.py test-measured-runtime-selection-fixture.py test-measured-rootfs-boot-fixture.py test-measured-rootfs-boot-wrapper.py measured-storage.py test-measured-storage-fixture.py; do
+for file in runtime-generation.py measured-rootfs-boot.py measured-runtime-selection.py test-measured-runtime-selection-fixture.py test-measured-rootfs-boot-fixture.py test-measured-rootfs-boot-wrapper.py measured-storage.py test-measured-storage-fixture.py measured-service-launch.py test-measured-service-launch-fixture.py; do
   docker cp "$scripts/$file" "$container:/opt/$file"
 done
 docker exec "$container" python3 -c 'from pathlib import Path; p=Path("/run/provenance-boot-disposable"); f=p.open("x"); f.write("measured-boot-disposable-only\n"); f.close()'
@@ -53,3 +53,4 @@ docker exec "$container" systemctl is-system-running --quiet
 timeout 120s docker exec "$container" python3 -B /opt/test-measured-rootfs-boot-wrapper.py verify-cleanup
 timeout 120s docker exec "$container" python3 -B /opt/test-measured-storage-fixture.py verify-cleanup
 timeout 240s docker exec "$container" python3 -B /opt/test-measured-runtime-selection-fixture.py
+timeout 240s docker exec "$container" python3 -B /opt/test-measured-service-launch-fixture.py

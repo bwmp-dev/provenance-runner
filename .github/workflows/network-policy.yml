@@ -42,6 +42,14 @@ jobs:
           [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
           python3 -B scripts/network-policy/acceptance.py --image "$image" \
             2>&1 | tee "${evidence}/packet-acceptance.log"
+      - name: Verify additive hosted egress boundary in disposable namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(< "${PROVENANCE_NETWORK_EVIDENCE}/fixture-image.txt")
+          bash -n scripts/test-measured-host-egress-fixture.sh
+          bash scripts/test-measured-host-egress-fixture.sh "$image" \
+            2>&1 | tee "${PROVENANCE_NETWORK_EVIDENCE}/host-egress-acceptance.log"
       - name: Exercise controlled DNS packets and firewall lifecycle
         shell: bash
         run: |
