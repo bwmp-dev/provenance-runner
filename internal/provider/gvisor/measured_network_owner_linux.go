@@ -75,7 +75,7 @@ func StartMeasuredNetworkProcess(ctx context.Context, config MeasuredNetworkLaun
 		return nil, ErrMeasuredNetworkLaunch
 	}
 	m := config.Mapping
-	args := []string{job.GetLease().GetJobId(), strconv.FormatUint(uint64(m.UID), 10), strconv.FormatUint(uint64(m.GID), 10), strconv.FormatUint(uint64(m.OverflowUID), 10), strconv.FormatUint(uint64(m.OverflowGID), 10), config.PrivateRoot, config.Measurement.Snapshot().RootFS.SHA256, "embedded-executable"}
+	args := []string{job.GetLease().GetJobId(), strconv.FormatUint(uint64(m.UID), 10), strconv.FormatUint(uint64(m.GID), 10), strconv.FormatUint(uint64(m.OverflowUID), 10), strconv.FormatUint(uint64(m.OverflowGID), 10), config.PrivateRoot, config.Measurement.Snapshot().RootFS.SHA256, "embedded-executable", strconv.FormatUint(uint64(job.GetEffectivePolicy().GetResources().GetCpuMillis()), 10)}
 	if _, _, ok := measuredNetworkInputs(args); !ok {
 		return nil, ErrMeasuredNetworkLaunch
 	}

@@ -556,7 +556,7 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		cmd.Env = []string{"PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1", "PROVENANCE_RETAINED_HELPER=holder"}
 		var ready, readyWriter *os.File
 		if sentry {
-			cmd = exec.CommandContext(ctx, "/proc/self/fd/5", MeasuredNetworkChildCommand, job, strconv.Itoa(int(uid)), strconv.Itoa(int(uid)), strconv.Itoa(int(uid+1)), strconv.Itoa(int(uid+1)), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable")
+			cmd = exec.CommandContext(ctx, "/proc/self/fd/5", MeasuredNetworkChildCommand, job, strconv.Itoa(int(uid)), strconv.Itoa(int(uid)), strconv.Itoa(int(uid+1)), strconv.Itoa(int(uid+1)), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable", "2000")
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
 			for i, path := range []string{lease.RootPath(), lease.SandboxPath(), lease.RunnerPath(), lease.ImagePath(), lease.LoopPath(), "/proc/self/ns/net", "/proc/self/ns/mnt"} {
 				flags := os.O_RDONLY

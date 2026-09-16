@@ -119,7 +119,7 @@ func TestMeasuredNetworkRootHandoff(t *testing.T) {
 			defer readyWriter.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			args := []string{MeasuredNetworkChildCommand, job, strconv.Itoa(ids[0]), strconv.Itoa(ids[1]), strconv.Itoa(ids[0] + 1), strconv.Itoa(ids[1] + 1), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable"}
+			args := []string{MeasuredNetworkChildCommand, job, strconv.Itoa(ids[0]), strconv.Itoa(ids[1]), strconv.Itoa(ids[0] + 1), strconv.Itoa(ids[1] + 1), privateRoot, lease.Snapshot().RootFS.SHA256, "embedded-executable", "2000"}
 			child := exec.CommandContext(ctx, "/proc/self/fd/5", args...)
 			child.ExtraFiles = append(files, gate, readyWriter)
 			child.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
