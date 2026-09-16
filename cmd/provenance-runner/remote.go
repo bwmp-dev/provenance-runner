@@ -22,6 +22,7 @@ type connectedWorker struct {
 	measuredEndpoint string
 	admission        sync.Mutex
 	cleanupFailed    bool
+	none             *connectedWorker
 }
 
 func (w *connectedWorker) SupportsTestSecretSource() bool {
@@ -51,6 +52,16 @@ func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.J
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseCleanup, execution.ClassificationInfrastructureFailure, "worker_cleanup_unconfirmed", errors.New("worker admission stopped after failed cleanup"))
 	}
 	if w.measuredEndpoint != "" {
+		if v2 && specification.GetEffectivePolicy().GetNetworkV2() != nil && specification.GetEffectivePolicy().GetNetworkV2().GetMode() == runnerv1.NetworkMode_NETWORK_MODE_NONE {
+			if w.none == nil {
+				return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "isolated_none_provider_required", errors.New("no-network v2 provider is not provisioned"))
+			}
+			result := w.none.ExecuteV2(ctx, specification, beforeExecute)
+			if result.Cleanup != nil && !result.Cleanup.Succeeded {
+				w.cleanupFailed = true
+			}
+			return result
+		}
 		provider, ok := w.adapter.(interface {
 			ExecuteMeasured(context.Context, *runnerv1.JobSpecification, string, func(context.Context, execution.ExecutionStart) error) execution.Result
 		})
@@ -63,7 +74,17 @@ func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.J
 		}
 		return result
 	}
-	job, err := w.adapter.AdaptJob(specification)
+	adapt := w.adapter.AdaptJob
+	if v2 && specification.GetEffectivePolicy().GetNetworkV2() != nil {
+		provider, ok := w.adapter.(interface {
+			AdaptNoNetworkV2(*runnerv1.JobSpecification) (localjob.Job, error)
+		})
+		if !ok {
+			return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "isolated_none_v2_required", errors.New("no-network v2 adapter unavailable"))
+		}
+		adapt = provider.AdaptNoNetworkV2
+	}
+	job, err := adapt(specification)
 	if err != nil {
 		return execution.FailedResult(specification.GetLease().GetJobId(), execution.PhaseValidation, execution.ClassificationInvalidJob, "remote_job_adaptation_failed", err)
 	}
@@ -81,6 +102,9 @@ func (w *connectedWorker) execute(ctx context.Context, specification *runnerv1.J
 	}
 	result := executor.Execute(ctx, job)
 	result.TerminalContext = proofContext
+	if result.Cleanup != nil && !result.Cleanup.Succeeded {
+		w.cleanupFailed = true
+	}
 	return result
 }
 
@@ -96,5 +120,13 @@ func newConnectedWorker(registry *providerRegistry) (*connectedWorker, error) {
 	if !ok {
 		return nil, errors.New("Paper provider does not implement remote job adaptation")
 	}
-	return &connectedWorker{registry: registry.Registry, adapter: adapter, measuredEndpoint: registry.measuredEndpoint}, nil
+	result := &connectedWorker{registry: registry.Registry, adapter: adapter, measuredEndpoint: registry.measuredEndpoint}
+	if registry.none != nil {
+		var err error
+		result.none, err = newConnectedWorker(registry.none)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }

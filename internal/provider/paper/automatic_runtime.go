@@ -133,6 +133,10 @@ func (s *RuntimeSource) fetchContext(ctx context.Context, e *runnerv1.ResolvedEn
 }
 
 func (p *Provider) adaptAutomaticJob(spec *runnerv1.JobSpecification) (localjob.Job, error) {
+	return p.adaptAutomaticJobVersion(spec, false)
+}
+
+func (p *Provider) adaptAutomaticJobVersion(spec *runnerv1.JobSpecification, noneV2 bool) (localjob.Job, error) {
 	manifest, c, err := p.config.RuntimeSource.fetch(spec.GetEnvironment())
 	if err != nil {
 		return localjob.Job{}, err
@@ -141,7 +145,7 @@ func (p *Provider) adaptAutomaticJob(spec *runnerv1.JobSpecification) (localjob.
 	copyProvider.config = p.config
 	copyProvider.config.RuntimeSource = nil
 	copyProvider.catalogs = map[string]resolvedCatalog{c.EnvironmentID: c}
-	job, err := copyProvider.AdaptJob(spec)
+	job, err := copyProvider.adaptJob(spec, noneV2)
 	if err != nil {
 		return job, err
 	}

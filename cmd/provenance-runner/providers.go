@@ -37,13 +37,14 @@ type providerRegistry struct {
 	*execution.Registry
 	instanceLocks    *instancelock.Set
 	measuredEndpoint string
+	none             *providerRegistry
 }
 
 func (r *providerRegistry) Close() error {
 	if r == nil {
 		return nil
 	}
-	return r.instanceLocks.Close()
+	return errors.Join(r.none.Close(), r.instanceLocks.Close())
 }
 
 func registryForProvider(ctx context.Context, providerName string, lookup environmentLookup) (*providerRegistry, error) {
@@ -60,6 +61,10 @@ func registryForLocalExecution(ctx context.Context, providerName string, lookup 
 
 func registryForProviderWithOptions(ctx context.Context, providerName string, lookup environmentLookup, options paperProviderOptions) (*providerRegistry, error) {
 	endpoint := lookup("PROVENANCE_MEASURED_SERVICE_SOCKET")
+	noneMode := lookup("PROVENANCE_MEASURED_NONE_PROVIDER")
+	if noneMode != "" && (noneMode != "isolated" || endpoint == "") {
+		return nil, errors.New("PROVENANCE_MEASURED_NONE_PROVIDER requires isolated and a measured service endpoint")
+	}
 	if endpoint != "" && (providerName != paper.ProviderName || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0)) {
 		return nil, errors.New("PROVENANCE_MEASURED_SERVICE_SOCKET must be an absolute clean Unix socket path for Paper")
 	}
@@ -77,7 +82,21 @@ func registryForProviderWithOptions(ctx context.Context, providerName string, lo
 	if err != nil {
 		return nil, errors.Join(err, instanceLocks.Close())
 	}
-	return &providerRegistry{Registry: registry, instanceLocks: instanceLocks, measuredEndpoint: endpoint}, nil
+	result := &providerRegistry{Registry: registry, instanceLocks: instanceLocks, measuredEndpoint: endpoint}
+	if noneMode == "isolated" {
+		// Explicitly retain the already provisioned no-network provider. It
+		// owns separate sandbox journals/locks, never the root network session.
+		result.none, err = registryForProviderWithOptions(ctx, providerName, func(name string) string {
+			if name == "PROVENANCE_MEASURED_SERVICE_SOCKET" || name == "PROVENANCE_MEASURED_NONE_PROVIDER" {
+				return ""
+			}
+			return lookup(name)
+		}, options)
+		if err != nil {
+			return nil, errors.Join(err, result.Close())
+		}
+	}
+	return result, nil
 }
 
 func paperProviderFromEnvironment(ctx context.Context, lookup environmentLookup, options paperProviderOptions) (*paper.Provider, *instancelock.Set, error) {

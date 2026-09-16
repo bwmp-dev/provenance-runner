@@ -16,6 +16,8 @@ import (
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
 	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
+	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -61,6 +63,23 @@ type normalizedResourceLimits struct {
 // AdaptJob converts an authoritative remote runner specification into the
 // existing bounded local execution request for this exact Paper provider.
 func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.Job, error) {
+	return p.adaptJob(specification, false)
+}
+
+// AdaptNoNetworkV2 is a separate admission path for the existing isolated
+// no-network provider. It preserves the original v2 specification and hashes;
+// it never rewrites a network-enabled job into a legacy none policy.
+func (p *Provider) AdaptNoNetworkV2(specification *runnerv1.JobSpecification) (localjob.Job, error) {
+	if p == nil || p.measuredOnly || specification == nil || specification.GetEffectivePolicy().GetNetwork() != nil || specification.GetEffectivePolicy().GetNetworkV2() == nil || specification.GetEffectivePolicy().GetNetworkV2().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE {
+		return localjob.Job{}, errors.New("isolated no-network v2 admission refused")
+	}
+	if _, err := terminalevidence.NewContextV2(specification); err != nil || testsecrets.ValidateSelection(specification) != nil {
+		return localjob.Job{}, errors.New("isolated no-network v2 identity refused")
+	}
+	return p.adaptJob(specification, true)
+}
+
+func (p *Provider) adaptJob(specification *runnerv1.JobSpecification, noneV2 bool) (localjob.Job, error) {
 	if p == nil {
 		return localjob.Job{}, errors.New("adapt Paper job: provider is nil")
 	}
@@ -68,7 +87,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 		return localjob.Job{}, errors.New("adapt Paper job: specification is nil")
 	}
 	if p.config.RuntimeSource != nil {
-		return p.adaptAutomaticJob(specification)
+		return p.adaptAutomaticJobVersion(specification, noneV2)
 	}
 	if specification.GetLease() == nil || specification.GetLease().GetJobId() == "" {
 		return localjob.Job{}, errors.New("adapt Paper job: lease.job_id is required")
@@ -89,7 +108,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 	if policy.GetSandbox() != runnerv1.SandboxKind_SANDBOX_KIND_GVISOR {
 		return localjob.Job{}, errors.New("adapt Paper job: effective_policy.sandbox must be gVisor")
 	}
-	if policy.GetNetworkV2() != nil || policy.GetNetwork() == nil || policy.GetNetwork().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE {
+	if (!noneV2 && (policy.GetNetworkV2() != nil || policy.GetNetwork() == nil || policy.GetNetwork().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE)) || (noneV2 && (policy.GetNetwork() != nil || policy.GetNetworkV2() == nil || policy.GetNetworkV2().GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE)) {
 		return localjob.Job{}, errors.New("adapt Paper job: effective_policy.network.mode must be none")
 	}
 	preparationTimeout, err := remoteTimeout("effective_policy.preparation_timeout", policy.GetPreparationTimeout())
@@ -113,7 +132,7 @@ func (p *Provider) AdaptJob(specification *runnerv1.JobSpecification) (localjob.
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
 
-	normalized, console, err := decodeNormalizedConfiguration(specification.GetNormalizedConfigurationJson())
+	normalized, console, err := decodeNormalizedConfigurationVersion(specification.GetNormalizedConfigurationJson(), noneV2)
 	if err != nil {
 		return localjob.Job{}, fmt.Errorf("adapt Paper job: %w", err)
 	}
