@@ -14,7 +14,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwmp-dev/provenance-runner/internal/localjob"
+	"github.com/bwmp-dev/provenance-runner/internal/networkpolicy"
 	"github.com/bwmp-dev/provenance-runner/internal/pluginname"
+	"github.com/bwmp-dev/provenance-runner/internal/terminalevidence"
 	"github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 	runnerv1 "github.com/bwmp-dev/provenance/gen/proto/provenance/runner/v1"
 	"google.golang.org/protobuf/proto"
@@ -48,6 +50,55 @@ func (r *OfferRejection) Error() string {
 // Protocol feature semantics are explicit at every call site; security-relevant
 // validation must never silently fall back to a legacy protocol mode.
 func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, jobCorrelationV1, objectUploadIdentity bool) *OfferRejection {
+	return validateOfferVersion(offer, config, now, leaseDuration, jobCorrelationV1, objectUploadIdentity, nil)
+}
+
+// validateNetworkV2Offer is a distinct admission path. The maximum must come
+// from trusted local provisioning, not the offer; advertised features must be
+// the exact negotiated session snapshot. It neither grants current authority
+// nor changes the frozen job. Production advertisement is a separate gate.
+func validateNetworkV2Offer(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, features []runnerv1.ProtocolFeature, maximum *runnerv1.NetworkPolicyV2) *OfferRejection {
+	seen := map[runnerv1.ProtocolFeature]bool{}
+	for _, feature := range features {
+		if feature < 1 || feature > 10 || seen[feature] {
+			return rejectUnsupported("network_v2_unavailable", "invalid network-v2 negotiation")
+		}
+		seen[feature] = true
+	}
+	for _, required := range []runnerv1.ProtocolFeature{
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_DURABLE_LEASE_ACKNOWLEDGEMENTS,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_JOB_CORRELATION_V1,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TERMINAL_EVIDENCE_V2,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_POLICY_V2,
+		runnerv1.ProtocolFeature_PROTOCOL_FEATURE_NETWORK_AUTHORITY_V2,
+	} {
+		if !advertisedFeature(features, required) {
+			return rejectUnsupported("network_v2_unavailable", "complete network-v2 negotiation is required")
+		}
+	}
+	if !config.EnableTerminalEvidenceV2 || config.DisableTerminalEvidence || networkpolicy.ValidateWireV2(maximum) != nil {
+		return rejectUnsupported("network_v2_unavailable", "network-v2 local boundary is unavailable")
+	}
+	config.EnableTestSecrets = config.EnableTestSecrets && advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_TEST_SECRETS_V1)
+	if rejection := validateOfferVersion(offer, config, now, leaseDuration, true, advertisedFeature(features, runnerv1.ProtocolFeature_PROTOCOL_FEATURE_OBJECT_UPLOAD_IDENTITY), maximum); rejection != nil {
+		return rejection
+	}
+	job := offer.Job
+	if testsecrets.ValidateSelection(job) != nil {
+		return rejectUnsupported("invalid_test_secret_selection", "test-secret references do not match normalized configuration")
+	}
+	if _, err := terminalevidence.NewContextV2(job); err != nil {
+		return rejectUnsupported("invalid_network_v2_context", "network-v2 configuration or immutable identity is invalid")
+	}
+	environment, err := proto.MarshalOptions{Deterministic: true}.Marshal(job.Environment)
+	actual := sha256.Sum256(environment)
+	if err != nil || !bytes.Equal(actual[:], job.Hashes.Environment.Value) {
+		return rejectUnsupported("environment_hash_mismatch", "resolved environment does not match its declared hash")
+	}
+	return nil
+}
+
+func validateOfferVersion(offer *runnerv1.LeaseOffer, config Config, now time.Time, leaseDuration time.Duration, jobCorrelationV1, objectUploadIdentity bool, networkMaximum *runnerv1.NetworkPolicyV2) *OfferRejection {
 	if offer == nil || offer.GetJob() == nil {
 		return rejectUnsupported("invalid_offer", "lease offer job is required")
 	}
@@ -99,7 +150,7 @@ func validateOffer(offer *runnerv1.LeaseOffer, config Config, now time.Time, lea
 	if rejection := validateOfferPluginNames(job); rejection != nil {
 		return rejection
 	}
-	if rejection := validateOfferPolicy(job.GetEffectivePolicy(), config.Resources); rejection != nil {
+	if rejection := validateOfferPolicyVersion(job.GetEffectivePolicy(), config.Resources, networkMaximum); rejection != nil {
 		return rejection
 	}
 	if rejection := validateOfferDownloads(job, offerExpiresAt, leaseExpiresAt); rejection != nil {
@@ -294,6 +345,10 @@ func validateOfferEnvironment(environment *runnerv1.ResolvedEnvironment) *OfferR
 }
 
 func validateOfferPolicy(policy *runnerv1.EffectivePolicy, maximum Resources) *OfferRejection {
+	return validateOfferPolicyVersion(policy, maximum, nil)
+}
+
+func validateOfferPolicyVersion(policy *runnerv1.EffectivePolicy, maximum Resources, networkMaximum *runnerv1.NetworkPolicyV2) *OfferRejection {
 	if policy == nil || policy.GetResources() == nil {
 		return rejectPolicy("invalid_policy", "effective policy and resources are required")
 	}
@@ -301,8 +356,14 @@ func validateOfferPolicy(policy *runnerv1.EffectivePolicy, maximum Resources) *O
 		return rejectPolicy("unsupported_sandbox", "effective sandbox is not supported by this runner")
 	}
 	network := policy.GetNetwork()
-	if policy.GetNetworkV2() != nil || network == nil || network.GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE || len(network.GetAllowlist()) != 0 || network.GetMaximumConnections() != 0 {
-		return rejectPolicy("unsupported_network", "effective network policy exceeds this runner's maximum")
+	if networkMaximum != nil {
+		if network != nil || !networkpolicy.WithinLocalMaximumV2(policy.GetNetworkV2(), networkMaximum) {
+			return rejectPolicy("unsupported_network", "effective network-v2 policy exceeds this runner's maximum")
+		}
+	} else {
+		if policy.GetNetworkV2() != nil || network == nil || network.GetMode() != runnerv1.NetworkMode_NETWORK_MODE_NONE || len(network.GetAllowlist()) != 0 || network.GetMaximumConnections() != 0 {
+			return rejectPolicy("unsupported_network", "effective network policy exceeds this runner's maximum")
+		}
 	}
 	resources := policy.GetResources()
 	if resources.GetCpuMillis() == 0 || resources.GetMemoryBytes() == 0 || resources.GetDiskBytes() == 0 || resources.GetProcessCount() == 0 {
