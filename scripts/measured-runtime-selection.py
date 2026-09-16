@@ -37,12 +37,15 @@ def hook(p):
 def load(path, sha):
     p = g.read_json(path, sha)
     require(isinstance(p, dict), 'selection plan object')
+    require(type(p.get('version')) is int and p['version'] in (1, 2), 'selection plan version')
+    rollback_field = 'legacyRootfs' if p['version'] == 1 else 'previousBootPlan'
     require(set(p) == {'version', 'bootPlan', 'helper', 'generationHelper', 'wrapper',
                        'updater', 'runner', 'environmentBefore', 'environmentAfter',
-                       'hookBefore', 'legacyRootfs'}, 'selection plan fields')
-    require(type(p['version']) is int and p['version'] == 1, 'selection plan version')
+                       'hookBefore', rollback_field}, 'selection plan fields')
     pins = ('bootPlan', 'helper', 'generationHelper', 'wrapper', 'updater', 'runner',
             'environmentBefore', 'environmentAfter', 'hookBefore')
+    if p['version'] == 2:
+        pins += ('previousBootPlan',)
     paths = []
     for name in pins:
         item = p[name]
@@ -71,6 +74,15 @@ def load(path, sha):
     before = Path(p['environmentBefore']['path']).read_bytes()
     after = Path(p['environmentAfter']['path']).read_bytes()
     require(b.render_environment(boot, before) == after, 'unrelated environment change')
+    if p['version'] == 2:
+        previous = previous_boot(p, boot)
+        expected = b.runtime_values(previous)
+        actual, _ = b.environment(before, expected)
+        require(all(actual.get(k) == v for k, v in expected.items()),
+                'expected previous measured environment required')
+        require(Path(p['hookBefore']['path']).read_bytes() ==
+                hook(p | {'bootPlan': p['previousBootPlan']}), 'previous measured hook binding')
+        return p, boot
     legacy = p['legacyRootfs']
     require(isinstance(legacy, dict) and set(legacy) == {'path', 'treeSha256'} and
             legacy['path'] == str(ROOT / 'rootfs') and
@@ -84,6 +96,18 @@ def load(path, sha):
                     'PROVENANCE_MEASURED_ROOTFS_IMAGE', 'PROVENANCE_MEASURED_LOOP_DEVICE')),
             'expected legacy environment required')
     return p, boot
+
+
+def previous_boot(p, boot):
+    previous = b.load_plan(p['previousBootPlan']['path'],
+                           p['previousBootPlan']['sha256'], require_selection=False)
+    require(previous['version'] == 2 and all(previous[k] == boot[k] for k in
+            ('uid', 'gid', 'userUnit', 'runtimeEnvironment', 'runsc')),
+            'previous runtime binding drift')
+    require(previous['generation'] != boot['generation'] and
+            previous['image']['sha256'] != boot['image']['sha256'],
+            'distinct measured generations required')
+    return previous
 
 
 def drain(path, sha, plan_sha):
@@ -103,6 +127,8 @@ def drain(path, sha, plan_sha):
 
 def quiet(p, boot):
     b.loaded_unit(boot, 'mountUnit', lambda *args: b.run('systemctl', *args))
+    if p.get('version') == 2:
+        b.loaded_unit(previous_boot(p, boot), 'mountUnit', lambda *args: b.run('systemctl', *args))
     for name in ('wrapper', 'updater'):
         b.loaded_unit(p, name, lambda *args: b.run('systemctl', *args))
         unit = Path(p[name]['path']).name
@@ -173,10 +199,18 @@ def transition(p, boot, action, check):
     state(p, boot)
     # Exact retained legacy tree is required for either direction. It is not
     # silently reprovisioned, and rollback doesn't claim a weaker tree is valid.
-    g.legacy({'legacyRootfs': p['legacyRootfs']})
+    previous = previous_boot(p, boot) if p.get('version') == 2 else None
+    if previous is None:
+        g.legacy({'legacyRootfs': p['legacyRootfs']})
+    else:
+        # A rotation must retain a verified, mounted rollback target. Never
+        # recreate a missing previous generation or detach either image.
+        b.execute(previous, 'verify')
     for target, data in items:
         check()
         state(p, boot)
+        if previous is not None:
+            b.execute(previous, 'verify')
         current = g.fingerprint(target)['sha256']
         if current != digest(data):
             g.replace_file(target, current, data)
@@ -185,6 +219,9 @@ def transition(p, boot, action, check):
     if action == 'select':
         b.selected_environment(boot)
         b.execute(boot, 'ensure')
+    elif previous is not None:
+        b.selected_environment(previous)
+        b.execute(previous, 'verify')
     # Rollback deliberately retains the inactive generation/mount for diagnosis.
     # It never detaches a device, edits the binary or starts the legacy runner.
 
@@ -206,17 +243,24 @@ def main():
     require(stat.S_IMODE(lock.stat().st_mode) == 0o600 and lock.stat().st_nlink == 1,
             'updater lock custody')
     fd = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
-    generation = os.open(boot['generation'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    paths = {boot['generation']}
+    if p['version'] == 2:
+        paths.add(previous_boot(p, boot)['generation'])
+    generations = []
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(generation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for path in sorted(paths):
+            generation = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            generations.append(generation)
+            fcntl.flock(generation, fcntl.LOCK_EX | fcntl.LOCK_NB)
         p, boot = load(args.plan, args.plan_sha256)
         def check():
             drain(args.drain, args.drain_sha256, args.plan_sha256)
             quiet(p, boot)
         transition(p, boot, args.action, check)
     finally:
-        os.close(generation)
+        for generation in reversed(generations):
+            os.close(generation)
         os.close(fd)
     print(json.dumps({'action': args.action, 'planSha256': args.plan_sha256,
                       'runnerStarted': False, 'generationRetained': True}))
