@@ -83,3 +83,23 @@ checks passed. Publication remains paused for investigation of main's
 intermittent worker CI failure; none of these local passes supersedes that
 failed check. Actual isolated no-network-v2 acceptance, full gateway-to-Paper
 composition and production activation remain outstanding.
+
+The integration was subsequently rebased onto
+`870f3ac1508eec9bb8480371eb80e34c65cbb2a6` (root-completion diagnostics and
+twenty-repetition worker CI stress). That main revision's CI and disposable
+systemd checks passed. The original intermittent worker failure remains
+unexplained and still blocks production activation; successful stress does not
+establish a root-cause fix.
+
+The rebased integration passed the full race suite and vet, and three real
+Paper executions with secret injection and redaction. The latter used service
+binary `e01bb0efb74e118231e7694bca6aeed746460951ab0b9124fc81bdc92a8164a5`
+and worker `32ac6d638ec0a07d7419080d674a6a2880be6f8f08ec05878efa66acb4910b71`,
+with the same pinned real image and secret target above.
+
+An initial combined stress run completed all twenty worker repetitions but its
+subsequent service report exceeded the former 64-KiB harness transcript bound.
+That run is not accepted as a full-suite pass. The service report now has a
+128-KiB bound and the combined service/recovery report has a 192-KiB bound;
+stderr remains 64 KiB. These are test harness transcripts, not guest log limits.
+All repetition, refusal, retirement and missing-marker assertions remain required.

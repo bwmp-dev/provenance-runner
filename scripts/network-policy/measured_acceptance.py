@@ -28,9 +28,9 @@ def fixture_workspace():
 
 
 def validate_report(stdout, stderr, status, worker_stress=False):
-    # Bounded harness transcript, not guest logs: the expanded repeated secret
-    # recovery cases exceed the former 64-KiB report envelope.
-    assert len(stdout) <= 131072 and len(stderr) <= 65536
+    # Bounded harness transcript, not guest logs: repeated protocol cases and
+    # root completion diagnostics share this envelope with recovery tests.
+    assert len(stdout) <= 196608 and len(stderr) <= 65536
     assert status == 0, stderr[-4096:]
     if worker_stress:
         assert stdout.count('{"measuredWorkerStressRepetitions": 20}') == 1
@@ -170,7 +170,7 @@ def main():
             created.append(runtime_name)
             result = subprocess.run(['docker', 'start', '--attach', runtime_name],
                                     capture_output=True, text=True, timeout=870 if args.worker_stress else 650)
-            assert len(result.stdout) <= 131072 and len(result.stderr) <= 65536
+            assert len(result.stdout) <= 196608 and len(result.stderr) <= 65536
             print(result.stdout, end='')
             validate_report(download.stdout + result.stdout, download.stderr + result.stderr, result.returncode, args.worker_stress)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]

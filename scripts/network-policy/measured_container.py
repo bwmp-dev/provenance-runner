@@ -133,7 +133,9 @@ def main():
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                       'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1'},
                                  capture_output=True, text=True, timeout=220)
-        assert len(service.stdout) <= 65536 and len(service.stderr) <= 65536
+        # Repeated protocol subtests plus bounded root completion diagnostics.
+        # This limits the test transcript only, never guest output.
+        assert len(service.stdout) <= 131072 and len(service.stderr) <= 65536, (len(service.stdout), len(service.stderr))
         print(service.stdout, end='', flush=True)
         if service.returncode:
             raise RuntimeError('measured root service fixture failed: '+service.stderr[-4096:])
