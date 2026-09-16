@@ -61,6 +61,7 @@ type Config struct {
 }
 
 type Provider struct {
+	measuredOnly   bool
 	config         Config
 	catalogs       map[string]resolvedCatalog
 	inputPolicy    sourcePolicy
@@ -84,13 +85,29 @@ func catalogRemoteIdentity(catalog Catalog) string {
 }
 
 func New(config Config) (*Provider, error) {
+	return newProvider(config, false)
+}
+
+// NewMeasured owns downloads only; launch ownership belongs to the root service.
+func NewMeasured(config Config) (*Provider, error) {
+	if config.RuntimeSource == nil || config.Sandbox != nil || config.Workspaces != nil || config.AllowHostileFixtures {
+		return nil, errors.New("measured Paper provider requires signed runtime source and separate root service")
+	}
+	provider, err := newProvider(config, true)
+	if err == nil {
+		provider.measuredOnly = true
+	}
+	return provider, err
+}
+
+func newProvider(config Config, measured bool) (*Provider, error) {
 	if config.ArtifactCache == nil || config.PaperCache == nil || config.JavaCache == nil || config.ProbeCache == nil || config.RuntimeCache == nil {
 		return nil, errors.New("create Paper provider: artifact, Paper, Java, probe, and prepared runtime caches are required")
 	}
-	if config.Workspaces == nil {
+	if config.Workspaces == nil && !measured {
 		return nil, errors.New("create Paper provider: workspace manager is required")
 	}
-	if config.Sandbox == nil {
+	if config.Sandbox == nil && !measured {
 		return nil, errors.New("create Paper provider: isolated workload provider is required")
 	}
 	if config.MaximumArtifactBytes == 0 {
@@ -235,6 +252,9 @@ type resolvedConfiguration struct {
 }
 
 func (p *Provider) Resolve(ctx context.Context, request execution.Request) (execution.Environment, error) {
+	if p.measuredOnly {
+		return nil, invalidEnvironment(errors.New("measured provider cannot resolve legacy local workloads"))
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
