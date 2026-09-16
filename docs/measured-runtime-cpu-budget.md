@@ -34,3 +34,13 @@ inherited kernel affinity and the new Go process's CPU visibility while proving
 the parent's affinity is unchanged. Disposable stress and complete kernel,
 gateway/Paper, exact-head CI and post-merge acceptance remain required before
 production activation; unit tests alone do not complete this release gate.
+
+Before closing process admission during cleanup, the root-owned leaf also
+captures its own bounded `pids.events` scalar. The immutable observation is
+available only after leaf retirement. A missing/invalid observation or a nonzero
+denial count makes a completed measured execution an infrastructure failure,
+even if runsc returned an ordinary exit code. Cleanup still proceeds if reading
+the counter fails; the absence of evidence never becomes evidence of zero
+denials. Denials introduced by cleanup or later stale-descriptor attempts do
+not alter the captured value. A disposable kernel regression deliberately fills
+a one-task leaf and checks actual `EAGAIN`, retirement, and the frozen counter.

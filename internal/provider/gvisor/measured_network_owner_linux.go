@@ -57,6 +57,8 @@ type MeasuredNetworkProcess struct {
 	cmd                                 *exec.Cmd
 	done                                chan struct{}
 	exitErr, closeErr                   error
+	pidDenials                          uint64
+	pidObserved                         bool
 	started, released, stopping, closed bool
 }
 
@@ -262,6 +264,8 @@ func (s *MeasuredNetworkProcess) Close(ctx context.Context) error {
 		if err := s.journal.Cleanup(ctx, s.scope); err != nil {
 			return errors.Join(ErrMeasuredNetworkLaunch, err)
 		}
+		denials, err := s.scope.CompletedPIDDenials()
+		s.pidDenials, s.pidObserved = denials, err == nil
 	}
 	if s.started {
 		select {

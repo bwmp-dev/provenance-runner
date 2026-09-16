@@ -23,11 +23,20 @@ func TestCompletedOutcomeDistinguishesExactExitFromInfrastructure(t *testing.T) 
 	}
 	done := make(chan struct{})
 	close(done)
-	process := &MeasuredNetworkProcess{cmd: command, done: done, exitErr: exitErr}
+	process := &MeasuredNetworkProcess{cmd: command, done: done, exitErr: exitErr, pidObserved: true}
 	job := &measuredControllerJob{controller: &measuredController{}, session: &measuredNetworkSession{process: process}, retired: true, reason: exitErr}
 	if code, infra, err := job.CompletedProcessOutcome(); err != nil || code != 7 || infra {
 		t.Fatal("nonzero exit mislabeled", err)
 	}
+	process.pidDenials = 1
+	if code, infra, err := job.CompletedProcessOutcome(); err != nil || code != 7 || !infra {
+		t.Fatal("runtime PID exhaustion mislabeled as plugin failure", err)
+	}
+	process.pidDenials, process.pidObserved = 0, false
+	if code, infra, err := job.CompletedProcessOutcome(); err != nil || code != 7 || !infra {
+		t.Fatal("missing PID observation accepted", err)
+	}
+	process.pidObserved = true
 	for _, reason := range []error{context.Canceled, errors.Join(exitErr, ErrRouterOwner), &exec.ExitError{ProcessState: command.ProcessState}} {
 		job.reason = reason
 		if code, infra, err := job.CompletedProcessOutcome(); err != nil || code != 7 || !infra {

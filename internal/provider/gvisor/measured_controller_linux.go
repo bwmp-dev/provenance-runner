@@ -400,6 +400,14 @@ func (j *measuredControllerJob) completedProcessOutcome() (int, bool, error) {
 			infrastructure = false
 		}
 	}
+	process.mu.Lock()
+	if !process.pidObserved || process.pidDenials != 0 {
+		// The host runtime aggregate exhausted its task budget, or its
+		// observation is unavailable. Do not blame this on plugin compatibility,
+		// even if the runtime recovered enough to return an ordinary exit.
+		infrastructure = true
+	}
+	process.mu.Unlock()
 	return code, infrastructure, nil
 }
 

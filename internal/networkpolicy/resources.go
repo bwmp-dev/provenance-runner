@@ -16,6 +16,17 @@ const MappedRuntimeProcessReserve uint64 = 17
 type resourceLimits struct{ cpuMillis, memoryBytes, processes uint64 }
 type resourceState struct{ quota, period, memory, processes uint64 }
 
+func parsePIDDenials(raw string) (uint64, error) {
+	if !strings.HasPrefix(raw, "max ") || !strings.HasSuffix(raw, "\n") {
+		return 0, ErrResources
+	}
+	value, ok := resourceNumber(strings.TrimPrefix(raw, "max "), true)
+	if !ok {
+		return 0, ErrResources
+	}
+	return value, nil
+}
+
 func resourceNumber(raw string, zero bool) (uint64, bool) {
 	if len(raw) > 32 {
 		return 0, false
