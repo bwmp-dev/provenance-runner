@@ -28,7 +28,10 @@ func stageMeasuredSecrets(ctx context.Context, directory *os.File, descriptors [
 	}
 	var st unix.Stat_t
 	var fs unix.Statfs_t
-	if unix.Fstat(int(directory.Fd()), &st) != nil || st.Mode != unix.S_IFDIR|0700 || st.Uid != 0 || st.Gid != 0 || st.Nlink == 0 || unix.Fstatfs(int(directory.Fd()), &fs) != nil || fs.Type != unix.TMPFS_MAGIC {
+	if unix.Fstat(int(directory.Fd()), &st) != nil || st.Uid != 0 || st.Nlink == 0 || unix.Fstatfs(int(directory.Fd()), &fs) != nil || fs.Type != unix.TMPFS_MAGIC {
+		return errMeasuredBundle
+	}
+	if !((st.Mode == unix.S_IFDIR|0700 && st.Gid == 0) || ((st.Mode == unix.S_IFDIR|0550 || st.Mode == unix.S_IFDIR|0555) && st.Gid == mapping.GID)) {
 		return errMeasuredBundle
 	}
 	view, err := openBundleAt(directory, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
@@ -92,7 +95,11 @@ func stageMeasuredSecrets(ctx context.Context, directory *os.File, descriptors [
 	}
 	// The mapped gofer can read/traverse, but cannot create or replace entries.
 	// The future OCI mount must independently enforce ro,nosuid,nodev,noexec.
-	if ctx.Err() != nil || !expires.After(time.Now()) || directory.Chown(0, int(mapping.GID)) != nil || directory.Chmod(0550) != nil {
+	finalMode := os.FileMode(0550)
+	if st.Mode == unix.S_IFDIR|0555 {
+		finalMode = 0555
+	}
+	if ctx.Err() != nil || !expires.After(time.Now()) || directory.Chown(0, int(mapping.GID)) != nil || directory.Chmod(finalMode) != nil {
 		return errMeasuredBundle
 	}
 	return nil

@@ -54,6 +54,7 @@ type measuredBundleJournal struct {
 	ready, closed                    bool
 	secretParent                     *os.File
 	secretBoot                       string
+	secretPath                       string
 	secretParentDev, secretParentIno uint64
 }
 
@@ -65,6 +66,7 @@ type measuredBundle struct {
 	retired           bool
 	prepared          *measuredBundlePreparation
 	preparationFailed bool
+	secretAttempted   bool
 }
 
 func (b *measuredBundle) matchesPrivateRoot(path string) bool {

@@ -13,10 +13,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmp-dev/provenance-runner/internal/controlchannel"
 	"github.com/bwmp-dev/provenance-runner/internal/guestoutput"
 	"github.com/bwmp-dev/provenance-runner/internal/provider/paper"
+	ts "github.com/bwmp-dev/provenance-runner/internal/testsecrets"
 )
 
 func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c measuredSessionConfig, input, out, output *os.File) {
@@ -27,6 +29,17 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 	if c.Launch.Measurement.ValidatePaperGuestTarget() != nil {
 		t.Fatal("unmeasured Paper helper")
 	}
+	diagnostic, err := os.CreateTemp("/tmp", "measured-secret-mount-diagnostic-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		diagnostic.Close()
+		if !t.Failed() {
+			_ = os.Remove(diagnostic.Name())
+		}
+	})
+	c.Launch.Stderr = diagnostic
 	seed, _ := measuredControllerSessionFixture(t, ctx, c)
 	if seed.Close(ctx) != nil {
 		t.Fatal("seed controller retirement")
@@ -134,12 +147,32 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 		t.Fatal("fixture output deadline")
 	}
 	if guestoutput.ReadStartup(output) != nil {
-		t.Fatal("measured helper startup synchronization")
+		_, _ = diagnostic.Seek(0, 0)
+		raw, _ := io.ReadAll(io.LimitReader(diagnostic, 4096))
+		t.Fatalf("measured helper startup synchronization: %s", raw)
 	}
 	observation, err := owned.ObserveRuntime(ctx)
 	if err != nil || observation == nil {
 		t.Fatal("live Paper helper kernel observation", err)
 	}
+	t.Run("late-sealed-secret-mount", func(t *testing.T) {
+		owner, err := ts.New([]ts.Input{{Name: "license", Value: []byte("synthetic-late-guest-secret")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer owner.Close()
+		views, err := owner.ReadOnlyDescriptors()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer views[0].File.Close()
+		if owned.bundle.stageSecrets(ctx, c.Launch.Job, views, time.Now().Add(time.Minute)) != nil {
+			t.Fatal("late materialization")
+		}
+		if owned.bundle.stageSecrets(ctx, c.Launch.Job, views, time.Now().Add(time.Minute)) == nil {
+			t.Fatal("repeated materialization")
+		}
+	})
 	// Bootstrap is supplied only after the helper is running and its retained
 	// runtime objects have been observed; readiness alone is not evidence.
 	if _, err = input.Write(raw); err != nil {
@@ -176,7 +209,11 @@ func measuredPaperGuestFixture(t *testing.T, ctx context.Context, mode string, c
 		}
 	} else {
 		if waitErr != nil || claimedExit != 0 || claimedInfrastructure || !strings.Contains(stdout.String(), "synthetic Paper guest prepared") || !strings.Contains(stderr.String(), "synthetic Paper guest stderr") || string(transcript.EventBytes()) != "{\"syntheticPaperEvent\":true}\n" {
-			t.Fatal("Paper preparation or framed result failed", waitErr)
+			diagnostic := stderr.String()
+			if len(diagnostic) > 4096 {
+				diagnostic = diagnostic[len(diagnostic)-4096:]
+			}
+			t.Fatalf("Paper preparation or framed result failed: %v; synthetic guest stderr: %s", waitErr, diagnostic)
 		}
 	}
 	if !owned.bundle.retired || owned.Release(ctx) == nil || controller.Close(ctx) != nil || c.Uplinks.Recover(ctx) != nil {

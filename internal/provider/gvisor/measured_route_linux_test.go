@@ -320,7 +320,28 @@ func testMeasuredAuthorityRouteSentry(t *testing.T, authorityMode string) {
 		bundleParent.Close()
 		t.Fatal(err)
 	}
-	bundles, err := openMeasuredBundleJournal(bundleParent, bundleState, journal)
+	var bundles *measuredBundleJournal
+	if strings.HasPrefix(authorityMode, "session-paper-guest") {
+		secretRoot, createErr := os.MkdirTemp("/dev/shm", "measured-guest-secrets-")
+		if createErr != nil || os.Chmod(secretRoot, 0711) != nil {
+			t.Fatal("secret fixture root")
+		}
+		t.Cleanup(func() {
+			if !t.Failed() {
+				if err := os.Remove(secretRoot); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+		secretParent, openErr := os.Open(secretRoot)
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		bundles, err = OpenMeasuredBundleJournalWithSecrets(bundleParent, bundleState, secretParent, journal)
+		secretParent.Close()
+	} else {
+		bundles, err = openMeasuredBundleJournal(bundleParent, bundleState, journal)
+	}
 	bundleParent.Close()
 	bundleState.Close()
 	if err != nil {
