@@ -27,11 +27,13 @@ def fixture_workspace():
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def validate_report(stdout, stderr, status):
+def validate_report(stdout, stderr, status, worker_stress=False):
     # Bounded harness transcript, not guest logs: the expanded repeated secret
     # recovery cases exceed the former 64-KiB report envelope.
     assert len(stdout) <= 131072 and len(stderr) <= 65536
     assert status == 0, stderr[-4096:]
+    if worker_stress:
+        assert stdout.count('{"measuredWorkerStressRepetitions": 20}') == 1
     assert '{"measuredRoutedOwnedLoopDetached": true}' in stdout
     assert '{"exclusiveMeasuredJobScopesRemoved": true}' in stdout
     assert '{"measuredJobJournalRetired": true}' in stdout
@@ -82,6 +84,7 @@ def main():
     parser.add_argument('--image', required=True)
     parser.add_argument('--builder', required=True)
     parser.add_argument('--go', default='go')
+    parser.add_argument('--worker-stress', action='store_true')
     args = parser.parse_args()
     assert re.fullmatch(r'sha256:[0-9a-f]{64}', args.image)
     builder = Path(args.builder).resolve(strict=True)
@@ -150,16 +153,18 @@ def main():
                        '--mount', f'type=bind,src={work}/gvisor.test,dst=/test-input,readonly',
                        '--mount', f'type=bind,src={work}/image.squashfs,dst=/image-input,readonly',
                        '--mount', f'type=bind,src={work},dst=/state-input',
+                       *(['--env', 'PROVENANCE_DISPOSABLE_WORKER_STRESS=1'] if args.worker_stress else []),
                        args.image, '/repo/scripts/network-policy/measured_container.py', '/test-input', '/image-input']
             subprocess.run(command, check=True, capture_output=True, timeout=30)
             created.append(runtime_name)
             result = subprocess.run(['docker', 'start', '--attach', runtime_name],
-                                    capture_output=True, text=True, timeout=560)
+                                    capture_output=True, text=True, timeout=760 if args.worker_stress else 560)
             assert len(result.stdout) <= 131072 and len(result.stderr) <= 65536
             print(result.stdout, end='')
-            validate_report(download.stdout + result.stdout, download.stderr + result.stderr, result.returncode)
+            validate_report(download.stdout + result.stdout, download.stderr + result.stderr, result.returncode, args.worker_stress)
             assert subprocess.check_output(['docker', 'inspect', '--format', '{{.State.ExitCode}}', runtime_name], text=True).strip() == '0', result.stderr[-4096:]
             print(json.dumps({'measuredRoutedSentry': True, 'measuredRootService': True,
+                              'workerStressRepetitions': 20 if args.worker_stress else 0,
                               'measuredWorkerDownloads': True,
                               'downloadBinarySHA256': hashlib.sha256((work/'download.test').read_bytes()).hexdigest(),
                               'serviceBinarySHA256': hashlib.sha256((work/'service.test').read_bytes()).hexdigest(),

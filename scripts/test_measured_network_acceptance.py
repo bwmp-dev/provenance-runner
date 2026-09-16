@@ -50,6 +50,11 @@ class MeasuredAcceptanceTests(unittest.TestCase):
         rows += ['--- PASS: TestMeasuredBundleJournalKernelRecovery/'+suffix+' (1s)' for suffix in ('preparation-failure-is-job-local', 'prepared-drift-configuration', 'prepared-drift-resolver', 'prepared-drift-input', 'prepared-drift-identity', 'prepared-drift-private-root') for _ in range(3)]
         report = '\n'.join(rows)
         driver.validate_report(report, '', 0)
+        stress = '{"measuredWorkerStressRepetitions": 20}\n'
+        driver.validate_report(stress+report, '', 0, worker_stress=True)
+        for prefix in ('', '{"measuredWorkerStressRepetitions": 19}\n', stress+stress):
+            with self.assertRaises(AssertionError):
+                driver.validate_report(prefix+report, '', 0, worker_stress=True)
         for index in range(len(rows)):
             with self.subTest(missing=index), self.assertRaises(AssertionError):
                 driver.validate_report('\n'.join(rows[:index]+rows[index+1:]), '', 0)

@@ -46,6 +46,10 @@ type Server struct {
 	worker         uint32
 	maximum        uint64
 	failed, closed bool
+	// In-package disposable fixtures may observe retirement failures. This is
+	// unset in every constructor and cannot be enabled by configuration or wire
+	// input. It never receives guest bytes, input descriptors or secret values.
+	fixtureCompletion func(int, bool, error, error, error, error)
 }
 
 func New(ctx context.Context, config Config) (*Server, error) {
@@ -358,6 +362,9 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 		}
 	}
 	completion, err := cc.EncodeCompletion(exit, infrastructure)
+	if s.fixtureCompletion != nil {
+		s.fixtureCompletion(exit, infrastructure, waitErr, relayErr, diagnosticErr, context.Cause(jobCtx))
+	}
 	if err != nil {
 		return ErrService
 	}
