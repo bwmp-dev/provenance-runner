@@ -50,6 +50,14 @@ def main():
     assert os.getuid() == 0 and Path('/.dockerenv').is_file()
     assert sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo']
     assert Path('/proc/self/cgroup').read_text() == '0::/\n'
+    # Match the proposed persistent staging mount's executable-device policy.
+    # This is a private container bind mount; never remount its host source.
+    assert os.path.ismount('/state-input')
+    run('mount', '-o', 'remount,bind,nosuid,nodev,noexec', '/state-input', '/state-input')
+    flags = os.statvfs('/state-input').f_flag
+    required = os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC
+    assert flags & required == required and not flags & os.ST_RDONLY
+    print('{"measuredPersistentStagingNoexec": true}', flush=True)
     cgroup = Path('/sys/fs/cgroup')
     controller = cgroup/'provenance-fixture-controller'
     jobs = cgroup/'provenance-fixture-jobs'
