@@ -37,6 +37,7 @@ type providerRegistry struct {
 	*execution.Registry
 	instanceLocks    *instancelock.Set
 	measuredEndpoint string
+	measuredSecrets  bool
 	none             *providerRegistry
 }
 
@@ -62,6 +63,10 @@ func registryForLocalExecution(ctx context.Context, providerName string, lookup 
 func registryForProviderWithOptions(ctx context.Context, providerName string, lookup environmentLookup, options paperProviderOptions) (*providerRegistry, error) {
 	endpoint := lookup("PROVENANCE_MEASURED_SERVICE_SOCKET")
 	noneMode := lookup("PROVENANCE_MEASURED_NONE_PROVIDER")
+	secretMode := lookup("PROVENANCE_MEASURED_TEST_SECRETS")
+	if secretMode != "" && (secretMode != "enabled" || endpoint == "" || noneMode != "isolated") {
+		return nil, errors.New("PROVENANCE_MEASURED_TEST_SECRETS requires enabled, a measured endpoint, and isolated none provider")
+	}
 	if noneMode != "" && (noneMode != "isolated" || endpoint == "") {
 		return nil, errors.New("PROVENANCE_MEASURED_NONE_PROVIDER requires isolated and a measured service endpoint")
 	}
@@ -87,7 +92,7 @@ func registryForProviderWithOptions(ctx context.Context, providerName string, lo
 		// Explicitly retain the already provisioned no-network provider. It
 		// owns separate sandbox journals/locks, never the root network session.
 		result.none, err = registryForProviderWithOptions(ctx, providerName, func(name string) string {
-			if name == "PROVENANCE_MEASURED_SERVICE_SOCKET" || name == "PROVENANCE_MEASURED_NONE_PROVIDER" {
+			if name == "PROVENANCE_MEASURED_SERVICE_SOCKET" || name == "PROVENANCE_MEASURED_NONE_PROVIDER" || name == "PROVENANCE_MEASURED_TEST_SECRETS" {
 				return ""
 			}
 			return lookup(name)
@@ -95,6 +100,19 @@ func registryForProviderWithOptions(ctx context.Context, providerName string, lo
 		if err != nil {
 			return nil, errors.Join(err, result.Close())
 		}
+	}
+	if secretMode == "enabled" {
+		provider, _ := result.Provider(paper.ProviderName)
+		readiness, ok := provider.(interface {
+			CheckMeasuredSecrets(context.Context, string) error
+		})
+		if !ok {
+			return nil, errors.Join(errors.New("measured secret readiness unavailable"), result.Close())
+		}
+		if err := readiness.CheckMeasuredSecrets(ctx, endpoint); err != nil {
+			return nil, errors.Join(err, result.Close())
+		}
+		result.measuredSecrets = true
 	}
 	return result, nil
 }

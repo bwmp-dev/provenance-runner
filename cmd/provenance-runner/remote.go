@@ -20,14 +20,18 @@ type connectedWorker struct {
 	registry         *execution.Registry
 	adapter          remoteJobAdapter
 	measuredEndpoint string
+	measuredSecrets  bool
 	admission        sync.Mutex
 	cleanupFailed    bool
 	none             *connectedWorker
 }
 
 func (w *connectedWorker) SupportsTestSecretSource() bool {
-	if w == nil || w.measuredEndpoint != "" {
+	if w == nil {
 		return false
+	}
+	if w.measuredEndpoint != "" {
+		return w.measuredSecrets && w.none != nil && w.none.SupportsTestSecretSource()
 	}
 	provider, ok := w.adapter.(interface{ SupportsTestSecretSource() bool })
 	return ok && provider.SupportsTestSecretSource()
@@ -120,7 +124,7 @@ func newConnectedWorker(registry *providerRegistry) (*connectedWorker, error) {
 	if !ok {
 		return nil, errors.New("Paper provider does not implement remote job adaptation")
 	}
-	result := &connectedWorker{registry: registry.Registry, adapter: adapter, measuredEndpoint: registry.measuredEndpoint}
+	result := &connectedWorker{registry: registry.Registry, adapter: adapter, measuredEndpoint: registry.measuredEndpoint, measuredSecrets: registry.measuredSecrets}
 	if registry.none != nil {
 		var err error
 		result.none, err = newConnectedWorker(registry.none)

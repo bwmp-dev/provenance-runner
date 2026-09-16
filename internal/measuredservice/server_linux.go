@@ -139,13 +139,20 @@ func (s *Server) Serve(ctx context.Context, channel *cc.Channel) (result error) 
 			_ = file.Close()
 		}
 	}()
-	if len(request.IdleNonce) != 0 {
+	if len(request.IdleNonce) != 0 || len(request.SecretNonce) != 0 {
 		// Serve holds admission throughout this probe. A previous Serve must
 		// finish its deferred controller cleanup before this lock is available.
 		if s.controller.CheckIdle() != nil || s.measurement.ValidatePaperGuestTarget() != nil {
 			return ErrService
 		}
-		return channel.Send(cc.Packet{Kind: cc.IdleConfirmed, Sequence: 1, Payload: request.IdleNonce}, time.Now().Add(5*time.Second))
+		kind, nonce := cc.IdleConfirmed, request.IdleNonce
+		if len(request.SecretNonce) != 0 {
+			if !s.secrets || !s.controller.SupportsTestSecretStorage() || s.measurement.ValidateTestSecretTarget() != nil {
+				return ErrService
+			}
+			kind, nonce = cc.SecretConfirmed, request.SecretNonce
+		}
+		return channel.Send(cc.Packet{Kind: kind, Sequence: 1, Payload: nonce}, time.Now().Add(5*time.Second))
 	}
 	send := &sender{channel: channel}
 	stopKeep, keepDone := keepalive(jobCtx, send, cancel)

@@ -27,6 +27,15 @@ var errMeasuredWorker = errors.New("measured_worker_session_refused")
 // CheckMeasuredService is a fresh authenticated startup idle barrier. It
 // reserves no slot; the connected worker still serializes execution admission.
 func (provider *Provider) CheckMeasuredService(ctx context.Context, endpoint string) error {
+	return checkMeasuredService(ctx, endpoint, false)
+}
+
+// CheckMeasuredSecrets requires a separate root-authenticated capability reply.
+func (provider *Provider) CheckMeasuredSecrets(ctx context.Context, endpoint string) error {
+	return checkMeasuredService(ctx, endpoint, true)
+}
+
+func checkMeasuredService(ctx context.Context, endpoint string, secrets bool) error {
 	if ctx == nil || ctx.Err() != nil || !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || len(endpoint) > 107 || strings.ContainsRune(endpoint, 0) {
 		return errMeasuredWorker
 	}
@@ -36,7 +45,11 @@ func (provider *Provider) CheckMeasuredService(ctx context.Context, endpoint str
 	if err != nil {
 		return errMeasuredWorker
 	}
-	if measuredclient.CheckIdle(ctx, channel) != nil {
+	check := measuredclient.CheckIdle
+	if secrets {
+		check = measuredclient.CheckSecrets
+	}
+	if check(ctx, channel) != nil {
 		return errMeasuredWorker
 	}
 	return nil

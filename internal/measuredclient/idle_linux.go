@@ -16,6 +16,17 @@ import (
 // receipt for publication, or permission to resume expired authority. Callers
 // must first stop and join their prior session and serialize local admission.
 func CheckIdle(ctx context.Context, channel *cc.Channel) error {
+	return checkCapability(ctx, channel, cc.IdleCheck, cc.IdleConfirmed)
+}
+
+// CheckSecrets confirms root-owned secret storage and the pinned guest target
+// are ready at this instant. It reserves nothing and authorizes no secret fetch.
+// Old services and ordinary idle replies fail closed.
+func CheckSecrets(ctx context.Context, channel *cc.Channel) error {
+	return checkCapability(ctx, channel, cc.SecretCheck, cc.SecretConfirmed)
+}
+
+func checkCapability(ctx context.Context, channel *cc.Channel, request, response cc.Kind) error {
 	if channel == nil {
 		return ErrSession
 	}
@@ -31,14 +42,14 @@ func CheckIdle(ctx context.Context, channel *cc.Channel) error {
 		deadline = end
 	}
 	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil || channel.Send(cc.Packet{Kind: cc.IdleCheck, Sequence: 1, Payload: nonce}, deadline) != nil {
+	if _, err := rand.Read(nonce); err != nil || channel.Send(cc.Packet{Kind: request, Sequence: 1, Payload: nonce}, deadline) != nil {
 		return ErrSession
 	}
 	packet, err := channel.Receive(deadline)
 	for _, file := range packet.Files {
 		_ = file.Close()
 	}
-	if err != nil || ctx.Err() != nil || len(packet.Files) != 0 || packet.Kind != cc.IdleConfirmed || packet.Sequence != 1 || !bytes.Equal(packet.Payload, nonce) {
+	if err != nil || ctx.Err() != nil || len(packet.Files) != 0 || packet.Kind != response || packet.Sequence != 1 || !bytes.Equal(packet.Payload, nonce) {
 		return ErrSession
 	}
 	return nil

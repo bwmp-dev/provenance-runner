@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 		case "service-client":
 			serviceFixtureClient()
 			return
-		case "service-idle":
+		case "service-idle", "service-secrets-enabled", "service-secrets-disabled":
 			if len(os.Args) != 3 || os.Getuid() != 65532 || os.Getgid() != 65532 || os.Getenv("PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE") != "1" {
 				panic("disposable idle client required")
 			}
@@ -66,8 +66,12 @@ func TestMain(m *testing.M) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if measuredclient.CheckIdle(ctx, channel) != nil {
-				panic("root idle barrier refused after cleanup")
+			if os.Args[1] == "service-idle" {
+				if measuredclient.CheckIdle(ctx, channel) != nil {
+					panic("root idle barrier refused after cleanup")
+				}
+			} else if err := measuredclient.CheckSecrets(ctx, channel); (err == nil) != (os.Args[1] == "service-secrets-enabled") {
+				panic("root secret capability does not match actual provisioning")
 			}
 			return
 		}

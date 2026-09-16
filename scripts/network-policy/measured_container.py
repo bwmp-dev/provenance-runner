@@ -146,6 +146,10 @@ def main():
             assert service.stdout.count('--- PASS: TestMeasuredPaperService'+case+'Kernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel ') == 3
+        for case in ('Service', 'ServiceSecrets', 'ServiceSecretsMissing', 'ServiceSecretsExpired', 'ServiceWithdrawal', 'ServiceReleaseRefusal', 'ServiceEventRefusal', 'Daemon', 'Worker', 'WorkerSecrets'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaper'+case+'Kernel/root-secret-capability-after-retirement ') == 3
+        for case in ('valid', 'nonce', 'idle', 'short', 'files', 'eof'):
+            assert service.stdout.count('--- PASS: TestMeasuredPaperServiceKernel/root-secret-capability-protocol/'+case+' ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerSecretsKernel/root-idle-barrier-after-retirement ') == 3
         assert service.stdout.count('--- PASS: TestMeasuredPaperWorkerKernel/root-idle-barrier-after-retirement ') == 3
         for suffix in ('', '/root-config-permissions', '/root-config-pin-refusal', '/root-idle-barrier-after-retirement'):

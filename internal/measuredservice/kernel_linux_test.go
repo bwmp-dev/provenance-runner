@@ -120,6 +120,9 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal("empty supplementary groups")
 	}
 	t.Run("root-idle-response-refusal", idleRefusalFixture)
+	if mode == "complete" {
+		t.Run("root-secret-capability-protocol", secretProbeRefusalFixture)
+	}
 	budget, maximumInput := 45*time.Second, uint64(64<<20)
 	realPaper := mode == "real" || mode == "real-secrets"
 	if realPaper {
@@ -449,28 +452,38 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if (serveErr != nil) != (clientMode != "complete" && clientMode != "secrets" && clientMode != "reject-events") || clientErr != nil {
 		t.Fatal("signed service execution", serveErr, clientErr, diagnostic.String())
 	}
-	t.Run("root-idle-barrier-after-retirement", func(t *testing.T) {
-		probe := exec.CommandContext(ctx, clientPath, "service-idle", filepath.Join(root, cc.SocketName))
-		probe.Env = command.Env
-		probe.SysProcAttr = command.SysProcAttr
-		var output bytes.Buffer
-		probe.Stderr = &output
-		done := make(chan error, 1)
-		go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); done <- probe.Run() }()
-		var serveErr error
-		if daemon == nil {
-			channel, err := listener.Accept(time.Now().Add(5 * time.Second))
-			if err != nil {
-				cancel()
-				<-done
-				t.Fatal("idle probe admission", err)
+	capabilityMode := "service-secrets-disabled"
+	if secrets {
+		capabilityMode = "service-secrets-enabled"
+	}
+	for _, probeMode := range []string{"service-idle", capabilityMode} {
+		probeName := "root-idle-barrier-after-retirement"
+		if probeMode != "service-idle" {
+			probeName = "root-secret-capability-after-retirement"
+		}
+		t.Run(probeName, func(t *testing.T) {
+			probe := exec.CommandContext(ctx, clientPath, probeMode, filepath.Join(root, cc.SocketName))
+			probe.Env = command.Env
+			probe.SysProcAttr = command.SysProcAttr
+			var output bytes.Buffer
+			probe.Stderr = &output
+			done := make(chan error, 1)
+			go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); done <- probe.Run() }()
+			var serveErr error
+			if daemon == nil {
+				channel, err := listener.Accept(time.Now().Add(5 * time.Second))
+				if err != nil {
+					cancel()
+					<-done
+					t.Fatal("idle probe admission", err)
+				}
+				serveErr = server.Serve(ctx, channel)
 			}
-			serveErr = server.Serve(ctx, channel)
-		}
-		if clientErr := <-done; serveErr != nil || clientErr != nil {
-			t.Fatal("authenticated idle barrier", serveErr, clientErr, output.String())
-		}
-	})
+			if clientErr := <-done; clientErr != nil || (daemon == nil && (serveErr != nil) != (probeMode == "service-secrets-disabled")) {
+				t.Fatal("authenticated idle barrier", serveErr, clientErr, output.String())
+			}
+		})
+	}
 	if daemon != nil {
 		if daemon.Close(ctx) != nil {
 			t.Fatal("daemon retirement")
