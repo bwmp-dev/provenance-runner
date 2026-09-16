@@ -106,7 +106,11 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal("empty supplementary groups")
 	}
 	t.Run("root-idle-response-refusal", idleRefusalFixture)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	budget, maximumInput := 45*time.Second, uint64(64<<20)
+	if mode == "real" {
+		budget, maximumInput = 300*time.Second, 512<<20
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	root, err := os.MkdirTemp("/tmp", "measured-service-")
 	if err != nil {
@@ -183,12 +187,22 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	java := fixtureArchive(t, "jre/bin/java", executable, 0755)
 	prepared := fixtureArchive(t, "cache/patched.jar", []byte("synthetic prepared"), 0600)
+	paperBytes, targetBytes := []byte("synthetic paper"), []byte("synthetic target")
+	if mode == "real" {
+		java = realPaperInput(t, "java.tar.gz", "968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03", 64<<20)
+		prepared = realPaperInput(t, "prepared-runtime.tar.gz", "bd8ba32e4ec988a09335b868a9585c94ca75600e445f37825fd8339bee45d69c", 256<<20)
+		paperBytes = realPaperInput(t, "paper.jar", "8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e", 64<<20)
+		targetBytes = realPaperInput(t, "target.jar", "a0c881f0a9e2229143ae8cfcc5fd019de02ce96504fe66c29f90eb13aad004ba", 1<<20)
+	}
 	probe, err := os.ReadFile("/opt/provenance-fixture/paper-probe.jar")
 	digest := sha256.Sum256(probe)
 	if err != nil || int64(len(probe)) != paper.AlphaProbeSizeBytes || hex.EncodeToString(digest[:]) != paper.AlphaProbeSHA256 {
 		t.Fatal("accepted probe fixture identity")
 	}
 	source, manifest, job := serviceFixtureJob(t, java, prepared)
+	if mode == "real" {
+		source, manifest, job = realPaperFixtureJob(t, java, prepared, paperBytes, targetBytes)
+	}
 	limits := job.EffectivePolicy.Resources
 	controls := [][2]string{{"cpu.max", strconv.FormatUint(2*uint64(limits.CpuMillis)*100, 10) + " 100000"}, {"cpu.max.burst", "0"}, {"memory.max", strconv.FormatUint(2*limits.MemoryBytes, 10)}, {"memory.swap.max", "0"}, {"pids.max", strconv.FormatUint(2*(uint64(limits.ProcessCount)+np.MappedRuntimeProcessReserve), 10)}, {"cgroup.max.descendants", "2"}, {"cgroup.max.depth", "1"}, {"memory.oom.group", "1"}}
 	for _, control := range controls {
@@ -259,7 +273,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller, err := gvisor.OpenMeasuredController(ctx, gvisor.MeasuredControllerConfig{Bundles: bundles, Uplinks: uplinks, Measurement: lease, Boundary: boundary, Tools: tools, Resolver: fixtureResolver{}, BundleRoot: bundlePath, MaximumInputBytes: 64 << 20})
+	controller, err := gvisor.OpenMeasuredController(ctx, gvisor.MeasuredControllerConfig{Bundles: bundles, Uplinks: uplinks, Measurement: lease, Boundary: boundary, Tools: tools, Resolver: fixtureResolver{}, BundleRoot: bundlePath, MaximumInputBytes: maximumInput})
 	if controller != nil {
 		t.Cleanup(func() {
 			if controller.Close(context.Background()) != nil {
@@ -270,7 +284,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(ctx, Config{Controller: controller, Measurement: lease, RuntimeSource: source, WorkerUID: 65532, MaximumInputBytes: 64 << 20})
+	server, err := New(ctx, Config{Controller: controller, Measurement: lease, RuntimeSource: source, WorkerUID: 65532, MaximumInputBytes: maximumInput})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,11 +297,11 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := source.DeriveMeasuredInputPlan(job, manifest, 64<<20)
+	plan, err := source.DeriveMeasuredInputPlan(job, manifest, maximumInput)
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents := map[string][]byte{"java.tar.gz": java, "paper.jar": []byte("synthetic paper"), "provenance-probe.jar": probe, "prepared-runtime.tar.gz": prepared, "target.jar": []byte("synthetic target"), "provenance-test-plan.json": plan.ProbePlan()}
+	contents := map[string][]byte{"java.tar.gz": java, "paper.jar": paperBytes, "provenance-probe.jar": probe, "prepared-runtime.tar.gz": prepared, "target.jar": targetBytes, "provenance-test-plan.json": plan.ProbePlan()}
 	write := func(name string, raw []byte) *os.File {
 		path := filepath.Join(root, name)
 		fixtureFiles = append(fixtureFiles, path)
@@ -328,14 +342,14 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	var daemon *Daemon
 	var daemonDone chan error
 	clientMode := mode
-	if mode == "daemon" || mode == "worker" {
+	if mode == "daemon" || mode == "worker" || mode == "real" {
 		clientMode = "complete"
 		// Retire the manual fixture provisioner before testing the complete
 		// daemon's reopening/recovery of these same owned, empty journals.
 		if listener.Close() != nil || server.Close(ctx) != nil || uplinks.Close() != nil || bundles.Close() != nil || groups.Close() != nil {
 			t.Fatal("retire fixture provisioner before daemon")
 		}
-		daemon = openFixtureDaemon(t, ctx, root, state, bundlePath, lease, tools, source, job)
+		daemon = openFixtureDaemon(t, ctx, root, state, bundlePath, lease, tools, source, job, maximumInput)
 		listener, server = daemon.listener, daemon.server
 		daemonDone = make(chan error, 1)
 		go func() { daemonDone <- daemon.Serve() }()
@@ -350,14 +364,21 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), clientMode)
 	command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1"}
-	if mode == "worker" {
+	if mode == "worker" || mode == "real" {
 		command = exec.CommandContext(ctx, "/tmp/measured-worker.test", "-test.run=^TestMeasuredWorkerRootFixture$", "-test.timeout=40s")
 		command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1", "PROVENANCE_DISPOSABLE_WORKER_ROOT_SOCKET=" + filepath.Join(root, cc.SocketName)}
+		if mode == "real" {
+			command.Args[len(command.Args)-1] = "-test.timeout=290s"
+			command.Env = append(command.Env, "PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE=1")
+		}
 	}
 	command.ExtraFiles = files
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
 	var diagnostic bytes.Buffer
 	command.Stderr = &diagnostic
+	if mode == "worker" || mode == "real" {
+		command.Stdout = &diagnostic
+	}
 	clientDone := make(chan error, 1)
 	go func() { runtime.LockOSThread(); defer runtime.UnlockOSThread(); clientDone <- command.Run() }()
 	var serveErr error

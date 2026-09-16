@@ -68,7 +68,7 @@ func fixtureTCPResolver(t *testing.T) string {
 
 // This helper runs only inside the disposable root kernel fixture. Public
 // synthetic pins are selected by that fixture, never by an execution request.
-func openFixtureDaemon(t *testing.T, ctx context.Context, socket, state, bundle string, lease *runtimeidentity.Lease, tools np.RouteTools, source *paper.RuntimeSource, job *p.JobSpecification) *Daemon {
+func openFixtureDaemon(t *testing.T, ctx context.Context, socket, state, bundle string, lease *runtimeidentity.Lease, tools np.RouteTools, source *paper.RuntimeSource, job *p.JobSpecification, maximumInput uint64) *Daemon {
 	t.Helper()
 	alias, err := os.MkdirTemp("/tmp", "daemon-journals-")
 	if err != nil {
@@ -87,6 +87,7 @@ func openFixtureDaemon(t *testing.T, ctx context.Context, socket, state, bundle 
 		}
 	})
 	config := fixtureDaemonConfig(t)
+	config.MaximumInputBytes = maximumInput
 	config.SocketDirectory = socket
 	config.CgroupParent = "/sys/fs/cgroup/provenance-fixture-jobs"
 	config.CgroupState = filepath.Join(alias, "cgroups")
