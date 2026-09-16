@@ -27,6 +27,7 @@ def main():
     for name in ('rootfs', 'manifest', 'runsc'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--go', required=True)
+    parser.add_argument('--updater', action='store_true')
     args = parser.parse_args()
     assert re.fullmatch('sha256:[a-f0-9]{64}', args.image)
     manifest = json.loads(args.manifest.read_text())
@@ -65,10 +66,15 @@ def main():
         for name in ('measured-service-launch.py', 'measured-rootfs-boot.py', 'runtime-generation.py',
                      'measured-storage.py', 'measured-host-inventory.py', 'test-measured-daemon-systemd-fixture.py'):
             run('docker', 'cp', str(repo / 'scripts' / name), container + ':/opt/' + name)
+        if args.updater:
+            run('docker', 'cp', str(repo / 'scripts/vps/updater.py'), container + ':/opt/updater.py')
+            run('docker', 'cp', str(repo / 'scripts/test-measured-updater-systemd-fixture.py'),
+                container + ':/opt/test-measured-updater-systemd-fixture.py')
         run('docker', 'exec', container, 'python3', '-I', '-c',
             'from pathlib import Path; p=Path("/run/provenance-daemon-disposable"); '
             'f=p.open("x"); f.write("hosted-daemon-disposable-only\\n"); f.close()')
-        result = subprocess.run(['docker', 'exec', container, 'python3', '-I',
+        environment = ['env', 'PROVENANCE_DISPOSABLE_MEASURED_UPDATER=1'] if args.updater else []
+        result = subprocess.run(['docker', 'exec', container, *environment, 'python3', '-I',
             '/opt/test-measured-daemon-systemd-fixture.py'], capture_output=True, text=True, timeout=300)
         assert len(result.stdout) <= 131072 and len(result.stderr) <= 16384
         print(result.stdout, end='', flush=True)
@@ -76,6 +82,8 @@ def main():
         assert result.stdout.count('--- PASS: TestHostedMeasuredSystemdReadiness ') == 3
         assert '"actualHostedDaemonReadinessAndRestart": true' in result.stdout
         assert '"hostedDaemonOwnedMountsLoopsAndGroupsAbsent": true' in result.stdout
+        if args.updater:
+            assert '"signedMeasuredUpdateAndRollback": true' in result.stdout
         successful = True
     finally:
         assert run('docker', 'inspect', '--format', '{{index .Config.Labels "provenance.fixture"}}', container) == 'hosted-measured-daemon'

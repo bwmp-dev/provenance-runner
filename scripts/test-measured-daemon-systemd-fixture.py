@@ -160,6 +160,11 @@ def main():
             assert not list((s.DATA / 'bundles').iterdir())
             for name in ('cgroups', 'bundle-journal', 'uplinks'):
                 assert [p.name for p in (s.DATA / name).iterdir()] == ['.lock']
+        if os.environ.get('PROVENANCE_DISPOSABLE_MEASURED_UPDATER') == '1':
+            updater_spec = importlib.util.spec_from_file_location('updater_fixture', '/opt/test-measured-updater-systemd-fixture.py')
+            updater_fixture = importlib.util.module_from_spec(updater_spec)
+            updater_spec.loader.exec_module(updater_fixture)
+            updater_fixture.exercise()
         print(json.dumps({'actualHostedDaemonReadinessAndRestart': True, 'workerUid': 994,
             'repetitions': 3, 'rootImageSha256': manifest['sha256'],
             'privateGatewayCredentialsLoaded': False, 'jobExecutionTested': False,
