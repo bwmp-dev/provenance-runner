@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -178,6 +179,7 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 	starts := 0
 	secretCalls := 0
 	observer := &measuredSecretFixtureObserver{}
+	encodedSecret := base64.StdEncoding.EncodeToString([]byte("synthetic-session-secret"))
 	if len(job.TestSecrets) > 0 {
 		ctx = execution.WithObserver(ctx, observer)
 		ctx = execution.WithTestSecretSource(ctx, func(context.Context) (*ts.Files, time.Time, error) {
@@ -218,13 +220,13 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 		t.Fatalf("worker composition: starts=%d classification=%s phase=%s failure=%v cleanup=%v", starts, result.Classification, result.Phase, result.Failure, result.Cleanup)
 	}
 	if len(job.TestSecrets) > 0 {
-		if secretCalls != 1 || strings.Contains(result.Logs.Stdout, "synthetic-session-secret") || !strings.Contains(result.Logs.Stdout, evidence.RedactionMarker) || !strings.Contains(result.Logs.Stdout, "ROOT_SECRET_READ_ONLY_OK") {
+		if secretCalls != 1 || strings.Contains(result.Logs.Stdout+result.Logs.Stderr, "synthetic-session-secret") || strings.Contains(result.Logs.Stdout+result.Logs.Stderr, encodedSecret) || !strings.Contains(result.Logs.Stdout, evidence.RedactionMarker) || !strings.Contains(result.Logs.Stdout, "ROOT_SECRET_READ_ONLY_OK") {
 			t.Fatal("late worker injection or redaction failed")
 		}
 		observer.mu.Lock()
 		live := observer.logs.String()
 		observer.mu.Unlock()
-		if strings.Contains(live, "synthetic-session-secret") || !strings.Contains(live, evidence.RedactionMarker) {
+		if strings.Contains(live, "synthetic-session-secret") || strings.Contains(live, encodedSecret) || !strings.Contains(live, evidence.RedactionMarker) {
 			t.Fatal("late live redaction failed")
 		}
 		if result.CompleteLog == nil || result.CompleteLog.Archive == nil || result.CompleteLog.State != "complete" {
@@ -236,7 +238,7 @@ func TestMeasuredWorkerRootFixture(t *testing.T) {
 		}
 		complete, readErr := io.ReadAll(io.LimitReader(archive, (16<<20)+1))
 		closeErr := archive.Close()
-		if readErr != nil || closeErr != nil || len(complete) > 16<<20 || bytes.Contains(complete, []byte("synthetic-session-secret")) || !bytes.Contains(complete, []byte(evidence.RedactionMarker)) {
+		if readErr != nil || closeErr != nil || len(complete) > 16<<20 || bytes.Contains(complete, []byte("synthetic-session-secret")) || bytes.Contains(complete, []byte(encodedSecret)) || !bytes.Contains(complete, []byte(evidence.RedactionMarker)) {
 			t.Fatal("late archive redaction failed")
 		}
 	}

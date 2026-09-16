@@ -29,7 +29,8 @@ mount targets use UID/GID 65532. It installs or activates nothing on the host.
 
 - Normalized source: `c9a44780f9e5ae2d33be83a1a5b69c8fc95fddc99d86d327b74f6adaaab08095`
 - Helper: `69991043ce8c4c640163d70e484b4b1af009f3e82bc6e847d97815a464b81275`
-- Root image: `94862cd9a2d88c29421e281166cf59a7190336eb1c0365cdb7fca55e89f8f361`
+- Original no-secret root image: `94862cd9a2d88c29421e281166cf59a7190336eb1c0365cdb7fca55e89f8f361`
+- Current root with the fixed empty secret mountpoint: `6d0a79fcd156c39a1b362cc4295367989ef72ccbb6a475aad399228b3211c32e`
 
 `stage-paper-compatibility-assets.py` verifies the pinned official Java and Paper
 archives plus the known fixture plugin. It creates a deterministic, bounded
@@ -61,6 +62,26 @@ idle barrier. The driver checks journal and cgroup retirement, exact owned loop
 detachment and container exit status, including OOM status. Failure evidence is
 retained. It never adopts or detaches an unrelated host loop device.
 
-The complete synthetic service/kernel suite remains separately mandatory. This
-test is not a claim that all Paper versions, measured secrets, production host
-provisioning, protocol activation or deployment acceptance are complete.
+## Selected-secret acceptance
+
+The current root was built reproducibly twice on 2026-09-16. The `--secrets`
+variant uses `build-secret-paper-fixture.py` to compile the repository's trusted
+synthetic source with annotation processing disabled and pinned Paper/Adventure
+API jars. Compilation does not run the fixture. The fixture executes only inside
+the disposable measured guest, reads the selected `license` file, requires that
+overwriting it fails, and emits synthetic raw and Base64 values for redaction.
+It uses the local command `version ProvenanceSecretFixture`.
+
+All three secret-bearing real-Paper runs passed on 2026-09-16, including one late
+source call per job, live and compressed-archive redaction, full Paper lifecycle
+and command validation, sealed terminal evidence and cgroup/journal/loop
+retirement. Accepted identities:
+
+- Fixture JAR: `b84160a378c4e0eaa5f8ada6b0b05a825791c2baf89d11aff5304bf3f923a4b1`
+- Root service: `d839e1fa95d8869b0a8de41c9826a80bef1115e47b497d765e1f60204a2a3238`
+- Worker fixture: `b2118c1846396abfdbb4d10ae8e95a0543e42cf4d5b6a55d71c9ed0047fb2841`
+
+The source callback here is synthetic, not the production gateway. The complete
+synthetic service/kernel suite remains separately mandatory. Neither variant
+claims all Paper versions, production host provisioning, protocol activation or
+deployment acceptance. No host service was installed or changed by these tests.

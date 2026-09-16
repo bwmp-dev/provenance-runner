@@ -121,7 +121,8 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	t.Run("root-idle-response-refusal", idleRefusalFixture)
 	budget, maximumInput := 45*time.Second, uint64(64<<20)
-	if mode == "real" {
+	realPaper := mode == "real" || mode == "real-secrets"
+	if realPaper {
 		budget, maximumInput = 300*time.Second, 512<<20
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
@@ -202,11 +203,14 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	java := fixtureArchive(t, "jre/bin/java", executable, 0755)
 	prepared := fixtureArchive(t, "cache/patched.jar", []byte("synthetic prepared"), 0600)
 	paperBytes, targetBytes := []byte("synthetic paper"), []byte("synthetic target")
-	if mode == "real" {
+	if realPaper {
 		java = realPaperInput(t, "java.tar.gz", "968c283e104059dae86ea1d670672a80170f27a39529d815843ec9c1f0fa2a03", 64<<20)
 		prepared = realPaperInput(t, "prepared-runtime.tar.gz", "bd8ba32e4ec988a09335b868a9585c94ca75600e445f37825fd8339bee45d69c", 256<<20)
 		paperBytes = realPaperInput(t, "paper.jar", "8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e", 64<<20)
 		targetBytes = realPaperInput(t, "target.jar", "a0c881f0a9e2229143ae8cfcc5fd019de02ce96504fe66c29f90eb13aad004ba", 1<<20)
+		if mode == "real-secrets" {
+			targetBytes = realPaperInput(t, "secret-target.jar", "b84160a378c4e0eaa5f8ada6b0b05a825791c2baf89d11aff5304bf3f923a4b1", 1<<20)
+		}
 	}
 	probe, err := os.ReadFile("/opt/provenance-fixture/paper-probe.jar")
 	digest := sha256.Sum256(probe)
@@ -214,7 +218,10 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		t.Fatal("accepted probe fixture identity")
 	}
 	source, manifest, job := serviceFixtureJob(t, java, prepared)
-	secrets := strings.HasPrefix(mode, "secrets") || mode == "worker-secrets"
+	if realPaper {
+		source, manifest, job = realPaperFixtureJob(t, java, prepared, paperBytes, targetBytes)
+	}
+	secrets := strings.HasPrefix(mode, "secrets") || mode == "worker-secrets" || mode == "real-secrets"
 	if secrets {
 		var config map[string]any
 		if json.Unmarshal(job.NormalizedConfigurationJson, &config) != nil {
@@ -227,9 +234,6 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 		}
 		job.Hashes.Configuration = fixtureDigest(job.NormalizedConfigurationJson)
 		job.TestSecrets = []*p.TestSecretReference{{Name: "license", SecretId: "b1111111-1111-4111-8111-111111111111", Version: 1}}
-	}
-	if mode == "real" {
-		source, manifest, job = realPaperFixtureJob(t, java, prepared, paperBytes, targetBytes)
 	}
 	limits := job.EffectivePolicy.Resources
 	controls := [][2]string{{"cpu.max", strconv.FormatUint(2*uint64(limits.CpuMillis)*100, 10) + " 100000"}, {"cpu.max.burst", "0"}, {"memory.max", strconv.FormatUint(2*limits.MemoryBytes, 10)}, {"memory.swap.max", "0"}, {"pids.max", strconv.FormatUint(2*(uint64(limits.ProcessCount)+np.MappedRuntimeProcessReserve), 10)}, {"cgroup.max.descendants", "2"}, {"cgroup.max.depth", "1"}, {"memory.oom.group", "1"}}
@@ -391,7 +395,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	var daemon *Daemon
 	var daemonDone chan error
 	clientMode := mode
-	if mode == "daemon" || mode == "worker" || mode == "worker-secrets" || mode == "real" {
+	if mode == "daemon" || mode == "worker" || mode == "worker-secrets" || realPaper {
 		clientMode = "complete"
 		// Retire the manual fixture provisioner before testing the complete
 		// daemon's reopening/recovery of these same owned, empty journals.
@@ -414,10 +418,10 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	}
 	command := exec.CommandContext(ctx, clientPath, "service-client", filepath.Join(root, cc.SocketName), clientMode)
 	command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1"}
-	if mode == "worker" || mode == "worker-secrets" || mode == "real" {
+	if mode == "worker" || mode == "worker-secrets" || realPaper {
 		command = exec.CommandContext(ctx, "/tmp/measured-worker.test", "-test.run=^TestMeasuredWorkerRootFixture$", "-test.timeout=40s")
 		command.Env = []string{"PATH=/usr/bin:/bin", "PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE=1", "PROVENANCE_DISPOSABLE_WORKER_ROOT_SOCKET=" + filepath.Join(root, cc.SocketName)}
-		if mode == "real" {
+		if realPaper {
 			command.Args[len(command.Args)-1] = "-test.timeout=290s"
 			command.Env = append(command.Env, "PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE=1")
 		}
@@ -426,7 +430,7 @@ func measuredPaperServiceKernel(t *testing.T, mode string) {
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532, NoSetGroups: true}, Pdeathsig: syscall.SIGKILL}
 	var diagnostic bytes.Buffer
 	command.Stderr = &diagnostic
-	if mode == "worker" || mode == "worker-secrets" || mode == "real" {
+	if mode == "worker" || mode == "worker-secrets" || realPaper {
 		command.Stdout = &diagnostic
 	}
 	clientDone := make(chan error, 1)

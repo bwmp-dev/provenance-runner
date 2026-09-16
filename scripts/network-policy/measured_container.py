@@ -18,7 +18,8 @@ def real_paper(jobs, state, bundle_state, bundles):
                              '-test.run=^TestMeasuredPaperRealKernel$', '-test.count=3', '-test.timeout=900s'],
                             env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
                                  'PROVENANCE_DISPOSABLE_MEASURED_SENTRY_FIXTURE': '1',
-                                 'PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE': '1'},
+                                 'PROVENANCE_DISPOSABLE_REAL_PAPER_FIXTURE': '1',
+                                 'PROVENANCE_DISPOSABLE_REAL_PAPER_SECRETS': os.environ.get('PROVENANCE_DISPOSABLE_REAL_PAPER_SECRETS', '0')},
                             capture_output=True, text=True, timeout=910)
     assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536
     print(result.stdout, end='', flush=True)
