@@ -149,6 +149,7 @@ def main():
     write(s.PLAN, json.dumps(plan).encode())
     try:
         for _ in range(3):
+            b.run('systemctl', 'stop', 'user@994.service')
             # Model cold-boot mount ordering, not only a warm daemon restart.
             # The private alias deliberately names an unrelated device number;
             # no global loop node/backing is touched or opened through it.
@@ -167,6 +168,7 @@ def main():
             b.run('systemctl', 'start', service.name)
             assert b.run('systemctl', 'show', service.name, '--property=ActiveState', '--value') == 'active'
             assert Path(boot['loop']).stat().st_rdev != os.makedev(7, 1048575)
+            assert b.run('systemctl', 'is-active', 'user@994.service') == 'active'
             b.execute(boot, 'verify')
             result = b.run('runuser', '-u', 'provenance-worker', '--', 'env',
                 'PROVENANCE_DISPOSABLE_HOSTED_DAEMON=1', '/opt/client.test', '-test.v',
@@ -186,6 +188,7 @@ def main():
         print(json.dumps({'actualHostedDaemonReadinessAndRestart': True, 'workerUid': 994,
             'repetitions': 3, 'rootImageSha256': manifest['sha256'],
             'coldMountStartAndStaleLoopAliasRepaired': True,
+            'workerManagerDependencyRestored': True,
             'privateGatewayCredentialsLoaded': False, 'jobExecutionTested': False,
             'productionActivation': False}), flush=True)
     except Exception:

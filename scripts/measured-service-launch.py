@@ -27,7 +27,7 @@ ROLES = {'provenance-job': 262144, 'provenance-job-overflow': 262145,
 
 
 def unit_bytes(boot, disk, secret):
-    names = ' '.join(Path(p['mountUnit']['path']).name for p in (boot, disk, secret))
+    names = 'user@994.service ' + ' '.join(Path(p['mountUnit']['path']).name for p in (boot, disk, secret))
     return ('[Unit]\nDescription=Provenance measured root controller\nRequires=' + names +
             '\nAfter=' + names + '\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=root\nGroup=root\n'
             'ExecStartPre=/usr/bin/python3 -I /opt/provenance-runner/measured-service-launch.py prepare-boot\n'

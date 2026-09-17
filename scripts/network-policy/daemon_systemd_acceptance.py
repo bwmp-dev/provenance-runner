@@ -82,6 +82,7 @@ def main():
         assert result.stdout.count('--- PASS: TestHostedMeasuredSystemdReadiness ') == 3
         assert '"actualHostedDaemonReadinessAndRestart": true' in result.stdout
         assert '"coldMountStartAndStaleLoopAliasRepaired": true' in result.stdout
+        assert '"workerManagerDependencyRestored": true' in result.stdout
         assert '"hostedDaemonOwnedMountsLoopsAndGroupsAbsent": true' in result.stdout
         if args.updater:
             assert '"signedMeasuredUpdateAndRollback": true' in result.stdout

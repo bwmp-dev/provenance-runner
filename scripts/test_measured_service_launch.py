@@ -20,7 +20,8 @@ class LaunchTests(unittest.TestCase):
         units = [{'mountUnit': {'path': '/etc/systemd/system/' + name + '.mount'}}
                  for name in ('image', 'storage', 'secrets')]
         unit = s.unit_bytes(*units).decode()
-        for required in ('Requires=image.mount storage.mount secrets.mount\n',
+        for required in ('Requires=user@994.service image.mount storage.mount secrets.mount\n',
+                         'After=user@994.service image.mount storage.mount secrets.mount\n',
                          'Type=notify\nNotifyAccess=main\n', 'DelegateSubgroup=controller\n',
                          'MemoryMax=12G\nMemorySwapMax=0\n', 'TasksMax=2048\n',
                          'SendSIGKILL=no\nTimeoutStopSec=infinity\n',

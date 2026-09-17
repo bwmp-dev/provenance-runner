@@ -70,8 +70,9 @@ existing recovery rules remain authoritative. Socket runtime directories are
 preserved across service restarts. Mount dependencies stop in reverse order after
 the daemon; neither the launcher nor daemon force-detaches operator storage.
 
-Its native `ExecStartPre` runs `prepare-boot` after the three required mounts are
-active and before daemon measurement. The same pinned plan, units, helpers and
+Its native `ExecStartPre` runs `prepare-boot` after the three required mounts and
+the explicitly required/ordered `user@994.service` manager are active, and before
+daemon measurement. The same pinned plan, units, helpers and
 identity checks apply. This phase requires systemd's actual `activating/start-pre`
 state, verifies persistent/secret storage and invokes the existing stopped-worker
 image preparation boundary to repair only the private loop-device alias. It never
@@ -101,8 +102,8 @@ mount/loop/cgroup/container cleanup are required. The first real-daemon run
 correctly refused loosely chosen aggregate limits; deriving the exact existing
 eight-control contract corrected provisioning, without weakening the daemon.
 
-Each cycle now starts with all three owned mounts stopped and a deliberately
-stale **private** loop alias. Required mounts must start and the native pre-start
+Each cycle now starts with the worker manager and all three owned mounts stopped
+and a deliberately stale **private** loop alias. Required mounts must start and the native pre-start
 phase must repair that alias before authenticated daemon readiness succeeds.
 No global loop device is modified through the stale alias. The controller-only
 resource fixture explicitly omits this phase because it has synthetic tmpfs
