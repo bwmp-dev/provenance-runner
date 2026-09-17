@@ -27,7 +27,42 @@ class LaunchTests(unittest.TestCase):
                          'RuntimeDirectoryPreserve=yes\n'):
             self.assertIn(required, unit)
         self.assertNotIn('EnvironmentFile=', unit)
-        self.assertNotIn('ExecStartPre=', unit)
+        self.assertIn('ExecStartPre=/usr/bin/python3 -I /opt/provenance-runner/measured-service-launch.py prepare-boot\n', unit)
+
+    def test_boot_preparation_requires_native_prestart_and_ready_mounts(self):
+        p={'unit':{'path':'/etc/systemd/system/provenance-measured.service'}}
+        boot={'mountUnit':{'path':'/etc/systemd/system/image.mount'}}
+        disk={'mountUnit':{'path':'/etc/systemd/system/storage.mount'}}
+        calls=[]
+        def run(*args):
+            calls.append(args)
+            if args[2]=='provenance-measured.service':
+                return 'start-pre' if args[3]=='--property=SubState' else 'activating'
+            return 'active'
+        with patch.object(s,'load_inputs',return_value=(p,boot,disk,{})), \
+                patch.object(s.b,'run',side_effect=run), patch.object(s.storage,'execute') as storage, \
+                patch.object(s,'verify_secrets') as secrets, patch.object(s.b,'execute') as image:
+            s.prepare_boot()
+        storage.assert_called_once_with(disk,'verify')
+        secrets.assert_called_once_with(p)
+        image.assert_called_once_with(boot,'ensure')
+
+    def test_boot_preparation_refuses_outside_prestart_before_repair(self):
+        p={'unit':{'path':'/etc/systemd/system/provenance-measured.service'}}
+        with patch.object(s,'load_inputs',return_value=(p,{}, {},{})), \
+                patch.object(s.b,'run',return_value='active'), patch.object(s.b,'execute') as image, \
+                self.assertRaises(s.g.Refusal):
+            s.prepare_boot()
+        image.assert_not_called()
+
+    def test_boot_preparation_refuses_missing_required_mount(self):
+        p={'unit':{'path':'/etc/systemd/system/provenance-measured.service'}}
+        plan={'mountUnit':{'path':'/etc/systemd/system/image.mount'}}
+        with patch.object(s,'load_inputs',return_value=(p,plan,plan,{})), \
+                patch.object(s.b,'run',side_effect=['activating','start-pre','inactive']), \
+                patch.object(s.b,'execute') as image, self.assertRaises(s.g.Refusal):
+            s.prepare_boot()
+        image.assert_not_called()
 
     def test_secret_unit_is_bounded_volatile_and_nonswappable(self):
         unit = s.secret_unit_bytes().decode()
