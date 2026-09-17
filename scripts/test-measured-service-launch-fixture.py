@@ -108,7 +108,10 @@ def main():
         write(path, body)
         units.append({'mountUnit': pin(path), 'mountpoint': str(target)})
     service = Path('/etc/systemd/system/provenance-measured.service')
-    unit = s.unit_bytes(*units).replace(
+    # Controller-only resource fixture: no hosted worker manager or real boot
+    # plan. Actual dependency/pre-start acceptance lives in the daemon fixture.
+    unit = s.unit_bytes(*units).replace(b'user@994.service ', b'').replace(
+        b'ExecStartPre=/usr/bin/python3 -I /opt/provenance-runner/measured-service-launch.py prepare-boot\n', b'').replace(
         b'ExecStart=/usr/bin/python3 -I /opt/provenance-runner/measured-service-launch.py\n',
         b'ExecStart=/usr/bin/python3 -I /opt/test-measured-service-launch-fixture.py child\n')
     write(service, unit)

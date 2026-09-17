@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned systemd root-service entrypoint. Never installs, mounts or drains."""
+"""Pinned root-service boot preparation and launch. Never installs or drains."""
 import hashlib
 import grp
 import importlib.util
@@ -27,9 +27,10 @@ ROLES = {'provenance-job': 262144, 'provenance-job-overflow': 262145,
 
 
 def unit_bytes(boot, disk, secret):
-    names = ' '.join(Path(p['mountUnit']['path']).name for p in (boot, disk, secret))
+    names = 'user@994.service ' + ' '.join(Path(p['mountUnit']['path']).name for p in (boot, disk, secret))
     return ('[Unit]\nDescription=Provenance measured root controller\nRequires=' + names +
             '\nAfter=' + names + '\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=root\nGroup=root\n'
+            'ExecStartPre=/usr/bin/python3 -I /opt/provenance-runner/measured-service-launch.py prepare-boot\n'
             'ExecStart=/usr/bin/python3 -I /opt/provenance-runner/measured-service-launch.py\n'
             'Delegate=cpu memory pids\nDelegateSubgroup=controller\n'
             'CPUQuota=600%\nCPUQuotaPeriodSec=100ms\nMemoryMax=12G\nMemorySwapMax=0\n'
@@ -144,7 +145,7 @@ def verify_secrets(p):
             'secret memory/inode capacity')
 
 
-def load():
+def load_inputs():
     info = g.protected(PLAN).stat()
     require(info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1,
             'launch plan custody')
@@ -181,6 +182,28 @@ def load():
     b.loaded_unit(p, 'unit', lambda *args: b.run('systemctl', *args))
     config = configuration(p, boot)
     verify_identities(config, p['inventoryHelper']['path'])
+    return p, boot, disk, config
+
+
+def prepare_boot():
+    # Native Requires/After ordering starts this controller before the worker's
+    # own ExecStartPre. Repair the private loop alias here, not in that later
+    # worker hook. A previously mounted image may receive another loop number
+    # after a cold boot; the global loop device is never detached or changed.
+    p, boot, disk, _ = load_inputs()
+    for key, expected in (('ActiveState', 'activating'), ('SubState', 'start-pre')):
+        require(b.run('systemctl', 'show', Path(p['unit']['path']).name,
+                      '--property=' + key, '--value') == expected, 'root pre-start phase required')
+    for plan in (boot, disk):
+        require(b.run('systemctl', 'show', Path(plan['mountUnit']['path']).name,
+                      '--property=ActiveState', '--value') == 'active', 'required mount must be ready')
+    storage.execute(disk, 'verify')
+    verify_secrets(p)
+    b.execute(boot, 'ensure')  # Includes stopped-worker/scope checks before repair.
+
+
+def load():
+    p, boot, disk, config = load_inputs()
     storage.execute(disk, 'verify')
     b.execute(boot, 'verify')
     verify_secrets(p)
@@ -249,7 +272,14 @@ def prepare_cgroups(resources):
 
 
 def main():
-    require(len(sys.argv) == 1 and os.getuid() == os.geteuid() == 0, 'closed root entrypoint')
+    require(sys.argv[1:] in ([], ['prepare-boot']) and os.getuid() == os.geteuid() == 0,
+            'closed root entrypoint')
+    if sys.argv[1:] == ['prepare-boot']:
+        os.environ.clear()
+        os.environ.update(PATH='/usr/sbin:/usr/bin:/sbin:/bin', LC_ALL='C')
+        os.setgroups([])
+        prepare_boot()
+        return
     notify = os.environ.get('NOTIFY_SOCKET')
     require(notify == '/run/systemd/notify', 'root systemd readiness socket required')
     os.environ.clear()

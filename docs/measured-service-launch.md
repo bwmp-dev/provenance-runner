@@ -2,9 +2,10 @@
 
 The root-only `measured-service-launch.py` entrypoint binds the existing measured
 daemon to verified hosted storage, image selection, identities and systemd
-delegation. It accepts no command-line overrides and reads only the protected
-root:root `0600` plan `/etc/provenance/measured-launch.json`. It never formats,
-mounts, drains, changes forwarding, loads gateway/marketplace credentials, starts
+delegation. It accepts only launch (no arguments) or the fixed `prepare-boot`
+phase, with no path overrides, and reads only the protected root:root `0600`
+plan `/etc/provenance/measured-launch.json`. It never formats,
+drains, changes forwarding, loads gateway/marketplace credentials, starts
 the worker or installs units. Provisioning and activation remain separate.
 
 The version-1 plan contains `{path,sha256}` pins for `runner`, `config`,
@@ -69,6 +70,17 @@ existing recovery rules remain authoritative. Socket runtime directories are
 preserved across service restarts. Mount dependencies stop in reverse order after
 the daemon; neither the launcher nor daemon force-detaches operator storage.
 
+Its native `ExecStartPre` runs `prepare-boot` after the three required mounts and
+the explicitly required/ordered `user@994.service` manager are active, and before
+daemon measurement. The same pinned plan, units, helpers and
+identity checks apply. This phase requires systemd's actual `activating/start-pre`
+state, verifies persistent/secret storage and invokes the existing stopped-worker
+image preparation boundary to repair only the private loop-device alias. It never
+changes a global loop mapping. A worker's later pre-start hook cannot do this:
+native worker `Requires`/`After` waits for the root controller first, including
+during signed updates. The root unit therefore owns this boot readiness step;
+removing the worker's dependency or relying on warm loop-number reuse is invalid.
+
 ## Acceptance
 
 The standard networkless systemd fixture exercises actual delegated placement,
@@ -89,6 +101,24 @@ checks as UID994. Socket removal, empty retired journals/bundles, and exact owne
 mount/loop/cgroup/container cleanup are required. The first real-daemon run
 correctly refused loosely chosen aggregate limits; deriving the exact existing
 eight-control contract corrected provisioning, without weakening the daemon.
+
+Each cycle now starts with the worker manager and all three owned mounts stopped
+and a deliberately stale **private** loop alias. Required mounts must start and the native pre-start
+phase must repair that alias before authenticated daemon readiness succeeds.
+No global loop device is modified through the stale alias. The controller-only
+resource fixture explicitly omits this phase because it has synthetic tmpfs
+mounts and no real boot plan; it is not cold-start evidence.
+
+On 2026-09-17, the three actual cold-mount cycles and the signed-update,
+health-rollback and interrupted-config recovery fixture passed with root image
+`9f9b1b3e9812f6fc1e28d872aebe406a8fba22257cdc53d9ebfb0a1632493ec9` and
+runsc `456ea862b62b48bb7ff27ae38c262b52315bf3d68ea0733164e4817cadc518a1`.
+The local fixture runner was
+`ab0b49748fa7fadee7071d639b7cbf3413c1772daaa9ddb67085878fe2c9d747`;
+client `255a3fc2d2eebf9aafb705414d0c1a7642f6ac8f9e1840cbe6a7c67591fe04dc`.
+Owned mounts, loops, groups and the disposable container were removed. These
+are local acceptance observations, not a released runner attestation or physical
+production-host reboot.
 
 This test loads only synthetic public trust material and no gateway credentials.
 It is startup/restart readiness, not job execution, physical host reboot, real
