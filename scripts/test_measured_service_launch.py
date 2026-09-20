@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('launch', Path(__file__).with_name('measured-service-launch.py'))
@@ -9,6 +11,33 @@ spec.loader.exec_module(s)
 
 
 class LaunchTests(unittest.TestCase):
+    def test_uplink_rule_refuses_missing_changed_shadowed_or_dropin_rule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / s.UPLINK_LINK.name
+            with patch.object(s, 'UPLINK_LINK', path), patch.object(s, 'LINK_DIRS', (root,)), \
+                    patch.object(s.g, 'protected', return_value=SimpleNamespace(
+                        stat=lambda: SimpleNamespace(st_gid=0, st_mode=0o100644, st_nlink=1),
+                        read_bytes=path.read_bytes)):
+                with self.assertRaises(FileNotFoundError):
+                    s.verify_uplink_link()
+                path.write_bytes(s.uplink_link_bytes())
+                s.verify_uplink_link()
+                path.write_bytes(s.uplink_link_bytes().replace(b'none', b'persistent'))
+                with self.assertRaises(s.g.Refusal):
+                    s.verify_uplink_link()
+                path.write_bytes(s.uplink_link_bytes())
+                earlier = root / '00-a.link'
+                earlier.write_text('[Match]\nOriginalName=*\n')
+                with self.assertRaises(s.g.Refusal):
+                    s.verify_uplink_link()
+                earlier.unlink()
+                override = root / (path.name + '.d')
+                override.mkdir()
+                (override / 'override.conf').write_text('[Link]\nMACAddressPolicy=persistent\n')
+                with self.assertRaises(s.g.Refusal):
+                    s.verify_uplink_link()
+
     def test_resource_bounds_are_canonical_and_not_booleans(self):
         for value in (1, '1', 4000, '4000'):
             s.numeric(value, 4000)

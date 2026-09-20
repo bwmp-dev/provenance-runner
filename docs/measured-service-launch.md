@@ -127,3 +127,33 @@ the candidate image and noexec staging has separate acceptance evidence. Live
 activation still requires a fresh coordinator drain, matching backend/runner
 capability and image policy, signed runner installation, verified unit ordering,
 concrete network provisioning and end-to-end execution/recovery evidence.
+
+
+## Host uplink identity and udev
+
+Before starting the controller, provision `/etc/systemd/network/00-provenance-uplink.link`
+with the exact bytes returned by `uplink_link_bytes()` in the accepted launcher,
+owned by root:root, mode 0644, with no hard links. Reload udev rules before any
+new job admission. The rule matches only veth devices in the reserved host-uplink
+name space (`ph` followed by thirteen characters); it preserves their kernel MAC
+and name. The fifteen-character glob is intentional: longer bracket-expanded
+patterns can be rejected by systemd, making a match section broader than intended.
+
+The default `99-default.link` uses `MACAddressPolicy=persistent`, which can change
+the host peer's MAC after it crosses namespaces. The retained identity then fails
+validation and cleanup correctly refuses to adopt the changed interface. Startup
+now refuses a missing/altered preservation rule, earlier link rules requiring
+reconciliation, or rule overrides. The runner's link ownership checks are unchanged.
+See [systemd's link policy](https://www.freedesktop.org/software/systemd/man/latest/systemd.link.html).
+
+`test-measured-uplink-link-fixture.py` reproduces the default mutation with the real
+udev builtin in an explicitly disposable networkless guest. It verifies three
+owned names, three nonmatching names, repeated events, altered-rule refusal and
+complete fixture link removal. CI runs it in the runtime baseline guest.
+
+Do not delete a retained uplink journal or overwrite a changed live MAC to bypass
+cleanup. Drain admission, preserve the failed attempt evidence, and establish that
+all job processes are gone before an audited cold controller recovery. Recovery
+must observe kernel removal of the old peer and retire its own journal before
+capacity can return. A preservation rule fixes future creation; it does not prove
+recovery of an already failed execution.

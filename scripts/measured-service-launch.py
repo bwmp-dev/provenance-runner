@@ -26,6 +26,33 @@ ROLES = {'provenance-job': 262144, 'provenance-job-overflow': 262145,
          'provenance-router': 262146, 'provenance-router-overflow': 262147}
 
 
+UPLINK_LINK = Path('/etc/systemd/network/00-provenance-uplink.link')
+LINK_DIRS = tuple(Path(p) for p in ('/etc/systemd/network', '/run/systemd/network',
+                                   '/usr/local/lib/systemd/network', '/usr/lib/systemd/network'))
+
+
+def uplink_link_bytes():
+    # HostUplink retains the kernel-created MAC as part of its ownership proof.
+    # The default persistent-MAC policy races that proof after a namespace move.
+    pattern = 'ph' + '?' * 13
+    return ('[Match]\nOriginalName=' + pattern + '\nKind=veth\n\n'
+            '[Link]\nNamePolicy=keep\nMACAddressPolicy=none\n').encode()
+
+
+def verify_uplink_link():
+    path = g.protected(UPLINK_LINK)
+    info = path.stat()
+    require(info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o644 and info.st_nlink == 1,
+            'uplink link rule custody')
+    require(path.read_bytes() == uplink_link_bytes(), 'uplink link rule contents')
+    # No earlier rule or drop-in may silently replace these fixed semantics.
+    for directory in LINK_DIRS:
+        require(not any(p.name < UPLINK_LINK.name for p in directory.glob('*.link')),
+                'earlier link rule requires operator reconciliation')
+        for name in ('link.d', UPLINK_LINK.name + '.d'):
+            require(not any((directory / name).glob('*.conf')), 'uplink link rule override')
+
+
 def unit_bytes(boot, disk, secret):
     names = 'user@994.service ' + ' '.join(Path(p['mountUnit']['path']).name for p in (boot, disk, secret))
     return ('[Unit]\nDescription=Provenance measured root controller\nRequires=' + names +
@@ -182,6 +209,7 @@ def load_inputs():
     b.loaded_unit(p, 'unit', lambda *args: b.run('systemctl', *args))
     config = configuration(p, boot)
     verify_identities(config, p['inventoryHelper']['path'])
+    verify_uplink_link()
     return p, boot, disk, config
 
 

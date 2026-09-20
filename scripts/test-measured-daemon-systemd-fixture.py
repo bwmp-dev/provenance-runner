@@ -50,6 +50,9 @@ def main():
         b.run('groupadd', '--gid', str(identity), name)
         b.run('useradd', '--system', '--no-create-home', '--no-log-init', '--uid', str(identity),
               '--gid', name, '--home-dir', '/nonexistent', '--shell', '/usr/sbin/nologin', name)
+    s.UPLINK_LINK.parent.mkdir(parents=True, exist_ok=True)
+    s.UPLINK_LINK.write_bytes(s.uplink_link_bytes())
+    s.UPLINK_LINK.chmod(0o644)
     directory(s.ROOT)
     directory(s.PLAN.parent)
     for name in ('measured-service-launch.py', 'measured-rootfs-boot.py', 'runtime-generation.py',
