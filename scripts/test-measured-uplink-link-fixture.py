@@ -37,6 +37,12 @@ def main():
     assert os.geteuid() == 0 and Path('/.dockerenv').is_file()
     assert len(json.loads(run('ip', '-j', 'link'))) == 1
     assert not launch.UPLINK_LINK.exists()
+    # Prevent the guest daemon from racing our before/after measurement. The
+    # real builtin is invoked synchronously for each exact fixture interface.
+    queued = Path('/proc/1/comm').read_text().strip() == 'systemd'
+    if queued:
+        run('systemctl', 'start', 'systemd-udevd.service')
+        run('udevadm', 'control', '--stop-exec-queue')
     probe('ph0123456789abc', False)
     launch.UPLINK_LINK.parent.mkdir(parents=True, exist_ok=True)
     with launch.UPLINK_LINK.open('xb') as f:
@@ -58,6 +64,8 @@ def main():
     finally:
         launch.UPLINK_LINK.unlink()
     assert len(json.loads(run('ip', '-j', 'link'))) == 1
+    if queued:
+        run('udevadm', 'control', '--start-exec-queue')
     print(json.dumps({'defaultPolicyMutationReproduced': True,
         'ownedIdentitiesPreserved': 3, 'unrelatedInterfacesUnchangedByRule': 3,
         'alteredRuleRefused': True, 'allFixtureLinksRemoved': True}))
