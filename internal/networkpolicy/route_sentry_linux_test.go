@@ -106,18 +106,26 @@ func TestRetainedRouteFixtureHelper(t *testing.T) {
 }
 
 func TestRetainedRouteSentryActuation(t *testing.T) {
-	testRetainedRouteSentryActuation(t, "")
+	testRetainedRouteSentryActuation(t, "", runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST)
 }
 
 func TestAuthorityRouteSentryWithdrawal(t *testing.T) {
-	testRetainedRouteSentryActuation(t, "withdrawal")
+	testRetainedRouteSentryActuation(t, "withdrawal", runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST)
 }
 
 func TestAuthorityRouteSentryExpiry(t *testing.T) {
-	testRetainedRouteSentryActuation(t, "expiry")
+	testRetainedRouteSentryActuation(t, "expiry", runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST)
 }
 
-func testRetainedRouteSentryActuation(t *testing.T, authorityMode string) {
+func TestRestrictedAuthorityRouteSentryWithdrawal(t *testing.T) {
+	testRetainedRouteSentryActuation(t, "withdrawal", runnerv1.NetworkMode_NETWORK_MODE_RESTRICTED)
+}
+
+func TestRestrictedAuthorityRouteSentryExpiry(t *testing.T) {
+	testRetainedRouteSentryActuation(t, "expiry", runnerv1.NetworkMode_NETWORK_MODE_RESTRICTED)
+}
+
+func testRetainedRouteSentryActuation(t *testing.T, authorityMode string, networkMode runnerv1.NetworkMode) {
 	t.Helper()
 	if os.Getenv("PROVENANCE_DISPOSABLE_SENTRY_FIXTURE") != "1" {
 		t.Skip("explicit disposable Sentry fixture required")
@@ -356,7 +364,7 @@ func testRetainedRouteSentryActuation(t *testing.T, authorityMode string) {
 	}
 	policy := &runnerv1.EffectivePolicy{Sandbox: runnerv1.SandboxKind_SANDBOX_KIND_GVISOR, Requirement: runnerv1.EnvironmentRequirement_ENVIRONMENT_REQUIREMENT_REQUIRED,
 		Resources: &runnerv1.ResourceLimits{CpuMillis: 2000, MemoryBytes: 2 << 30, DiskBytes: 4 << 30, ProcessCount: 256}, PreparationTimeout: durationpb.New(time.Minute), ExecutionTimeout: durationpb.New(time.Minute), GracefulShutdownTimeout: durationpb.New(10 * time.Second),
-		NetworkV2: &runnerv1.NetworkPolicyV2{Mode: runnerv1.NetworkMode_NETWORK_MODE_ALLOWLIST, MaximumConnections: 16, MaximumBytesPerSecond: 65536, Permissions: []*runnerv1.NetworkPermissionV2{{Hostname: "fixture.example.com", Port: 8080, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_TCP}, {Hostname: "fixture.example.com", Port: 8081, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_UDP}}}}
+		NetworkV2: &runnerv1.NetworkPolicyV2{Mode: networkMode, MaximumConnections: 16, MaximumBytesPerSecond: 65536, Permissions: []*runnerv1.NetworkPermissionV2{{Hostname: "fixture.example.com", Port: 8080, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_TCP}, {Hostname: "fixture.example.com", Port: 8081, Transport: runnerv1.NetworkTransportV2_NETWORK_TRANSPORT_V2_UDP}}}}
 	raw, err = (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
 	if err != nil {
 		t.Fatal(err)
