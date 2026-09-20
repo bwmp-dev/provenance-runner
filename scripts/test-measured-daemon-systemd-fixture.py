@@ -142,6 +142,30 @@ def main():
                 'permissions': [{'hostname': 'example.com', 'port': 443, 'transport': 'NETWORK_TRANSPORT_V2_TCP'}]}}}
     configpath = s.PLAN.parent / 'measured-service.json'
     write(configpath, json.dumps(config).encode())
+    # Reproduce the production worker/mapped-identity distinction with real DAC.
+    # The generation stays 0710 and its protected image stays unreadable to jobs.
+    def access_as(name):
+        code = '''import json,os,sys
+from pathlib import Path
+p=Path(sys.argv[1]);out={}
+for key,operation in [('rootSearch',lambda:os.close(os.open(p/'rootfs',os.O_PATH|os.O_DIRECTORY))),
+                      ('generationList',lambda:os.listdir(p)),
+                      ('imageRead',lambda:os.close(os.open(p/'image.squashfs',os.O_RDONLY))),
+                      ('imageWrite',lambda:os.close(os.open(p/'image.squashfs',os.O_WRONLY)))]:
+ try:operation();out[key]=True
+ except PermissionError:out[key]=False
+print(json.dumps(out))'''
+        return json.loads(b.run('runuser', '-u', name, '--', 'python3', '-I', '-c', code, str(generation)))
+    assert not access_as('provenance-job')['rootSearch']
+    os.setxattr(generation, 'system.posix_acl_access', s.generation_acl_bytes(config['workload']['UID']),
+                follow_symlinks=False)
+    s.verify_generation_traversal(boot, config)
+    assert access_as('provenance-job') == {'rootSearch': True, 'generationList': False,
+                                         'imageRead': False, 'imageWrite': False}
+    for name in ('provenance-job-overflow', 'provenance-router', 'provenance-router-overflow'):
+        assert not any(access_as(name).values())
+    print(json.dumps({'mappedGenerationTraversalReproducedAndFixed': True,
+                      'onlyMappedWorkloadSearchGranted': True}), flush=True)
     plan = {'version': 1, 'runner': pin(s.ROOT / 'runner'), 'config': pin(configpath),
         'bootPlan': pin(bootpath), 'storagePlan': pin(diskpath), 'unit': pin(service),
         'secretMount': pin(secretunit), 'launcher': pin(s.ROOT / 'measured-service-launch.py'),
@@ -173,6 +197,8 @@ def main():
             assert Path(boot['loop']).stat().st_rdev != os.makedev(7, 1048575)
             assert b.run('systemctl', 'is-active', 'user@994.service') == 'active'
             b.execute(boot, 'verify')
+            s.verify_generation_traversal(boot, config)
+            assert access_as('provenance-job')['rootSearch']
             result = b.run('runuser', '-u', 'provenance-worker', '--', 'env',
                 'PROVENANCE_DISPOSABLE_HOSTED_DAEMON=1', '/opt/client.test', '-test.v',
                 '-test.run=^TestHostedMeasuredSystemdReadiness$', '-test.count=1')

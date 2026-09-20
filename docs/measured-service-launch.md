@@ -129,6 +129,28 @@ capability and image policy, signed runner installation, verified unit ordering,
 concrete network provisioning and end-to-end execution/recovery evidence.
 
 
+## Mapped workload access to the selected image
+
+The selected generation remains root-owned, worker-group-owned and mode `0710`.
+Before starting the measured controller, the operator must install the exact Linux
+access ACL returned by `generation_acl_bytes(config['workload']['UID'])` on that
+generation directory, using `os.setxattr(..., 'system.posix_acl_access', ...)` with
+symlink following disabled. The launcher verifies that ACL and refuses any default
+ACL. It never installs or repairs grants during startup.
+
+The grant adds search permission only for mapped workload UID `262144`. It preserves
+worker-group search and denies access to other identities. It does not grant image
+read/write, directory listing, router access, or inherited access to future files.
+The mapped child must reopen the retained mount's kernel path before cloning it
+into its private namespace; a worker-only generation directory prevents that
+handoff even though the root controller and ordinary worker can measure the image.
+Every newly selected generation needs this explicit provisioning step.
+
+The disposable daemon fixture reproduces the missing traversal permission with the
+real mapped identity, verifies the narrow grant and denied reads/writes/listing,
+and repeats verification across three cold starts. Image bytes, image mode, UID
+maps and kernel object identity checks remain independently enforced.
+
 ## Host uplink identity and udev
 
 Before starting the controller, provision `/etc/systemd/network/00-provenance-uplink.link`
