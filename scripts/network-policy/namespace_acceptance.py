@@ -10,6 +10,23 @@ import tempfile
 import uuid
 
 
+SENTRY_CASES = (
+    'RetainedRouteSentryActuation',
+    'AuthorityRouteSentryWithdrawal',
+    'AuthorityRouteSentryExpiry',
+    'RestrictedAuthorityRouteSentryWithdrawal',
+    'RestrictedAuthorityRouteSentryExpiry',
+)
+
+
+def validate_sentry_report(stdout, stderr, status):
+    assert status == 0, 'live Sentry fixture failed'
+    assert len(stdout) <= 65536 and len(stderr) <= 65536, 'bounded Sentry report exceeded'
+    assert '--- SKIP:' not in stdout and '--- FAIL:' not in stdout, 'Sentry acceptance must not skip or fail'
+    for case in SENTRY_CASES:
+        assert stdout.count('--- PASS: Test' + case + ' ') == 3, 'required repeated live Sentry case missing: ' + case
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image',required=True)
@@ -30,23 +47,22 @@ def main():
             subprocess.run(['docker','create','--name',container,'--network','none','--memory','512m' if args.sentry else '128m','--cpus','1','--pids-limit','256' if args.sentry else '128',
                 '--cap-drop','ALL','--cap-add','CHOWN','--cap-add','SETFCAP','--cap-add','SYS_ADMIN','--cap-add','NET_ADMIN','--cap-add','SETUID','--cap-add','SETGID','--cap-add','SYS_PTRACE',
                 '--security-opt','apparmor=unconfined','--security-opt','seccomp=unconfined',
-                '-e','PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1',*extra,'--entrypoint','sleep',args.image,'180'],check=True,stdout=subprocess.DEVNULL,timeout=15)
+                '-e','PROVENANCE_DISPOSABLE_NETWORK_FIXTURE=1',*extra,'--entrypoint','sleep',args.image,'300'],check=True,stdout=subprocess.DEVNULL,timeout=15)
             subprocess.run(['docker','cp',str(binary),container+':/namespace.test'],check=True,timeout=15)
             subprocess.run(['docker','start',container],check=True,stdout=subprocess.DEVNULL,timeout=15)
             # The controller-death fixture executes this copied object through
             # the production protected-tool boundary, which requires UID 0.
             subprocess.run(['docker','exec',container,'chown','0:0','/namespace.test'],check=True,timeout=15)
-            selection='^Test(RetainedRouteSentryActuation|AuthorityRouteSentryWithdrawal|AuthorityRouteSentryExpiry)$' if args.sentry else '^Test(MappedChildNamespaceKernelOwnership|RetainedRouteKernelActuation|RetainedCommandControllerDeath)$'
-            result=subprocess.run(['docker','exec',container,'/namespace.test','-test.v','-test.run='+selection,'-test.count=3','-test.timeout=150s' if args.sentry else '-test.timeout=45s'],capture_output=True,text=True,timeout=160 if args.sentry else 55)
+            selection='^Test(' + '|'.join(SENTRY_CASES) + ')$' if args.sentry else '^Test(MappedChildNamespaceKernelOwnership|RetainedRouteKernelActuation|RetainedCommandControllerDeath)$'
+            result=subprocess.run(['docker','exec',container,'/namespace.test','-test.v','-test.run='+selection,'-test.count=3','-test.timeout=240s' if args.sentry else '-test.timeout=45s'],capture_output=True,text=True,timeout=250 if args.sentry else 55)
             assert len(result.stdout)<=65536 and len(result.stderr)<=65536, 'bounded namespace report exceeded'
             if result.returncode:
                 raise RuntimeError('disposable namespace fixture failed: '+result.stdout[-8192:]+result.stderr[-1024:])
             assert '--- SKIP:' not in result.stdout, 'namespace acceptance must not skip'
             if args.sentry:
-                assert result.stdout.count('--- PASS: TestRetainedRouteSentryActuation ')==3, 'required live native actuation case missing'
-                for case in ('AuthorityRouteSentryWithdrawal','AuthorityRouteSentryExpiry'):
-                    assert result.stdout.count('--- PASS: Test'+case+' ')==3, 'required live authority case missing'
-                print(json.dumps({'retainedRouteLiveSentry':True,'establishedFlowsSurviveRenewal':True,'establishedAndNewFlowsDeniedAfterWithdrawal':True,'liveEndpointDuringWithdrawal':True,'ownedFirewallRemoved':True,'currentAuthorityDeadlineReduction':True,'currentAuthorityWithdrawalAndExpiry':True,'withdrawnAuthorityCannotResume':True,'repetitions':3},sort_keys=True))
+                validate_sentry_report(result.stdout, result.stderr, result.returncode)
+                print(result.stdout, end='')
+                print(json.dumps({'restrictedAndAllowlistLiveSentry':True,'retainedRouteLiveSentry':True,'establishedFlowsSurviveRenewal':True,'establishedAndNewFlowsDeniedAfterWithdrawal':True,'liveEndpointDuringWithdrawal':True,'ownedFirewallRemoved':True,'currentAuthorityDeadlineReduction':True,'currentAuthorityWithdrawalAndExpiry':True,'withdrawnAuthorityCannotResume':True,'repetitions':3},sort_keys=True))
                 return
             cases=('retained-job-and-living-child','wrong-mapping','inherited-controller-network','not-direct-child','close-references-only','supplementary-group-refused')
             assert result.stdout.count('--- PASS: TestRetainedCommandControllerDeath ')==3, 'required command-death case missing'

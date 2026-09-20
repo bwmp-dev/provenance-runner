@@ -150,18 +150,25 @@ func TestInvalidPolicyHasNoPermissiveDefaults(t *testing.T) {
 
 func TestSensitiveAddressesCannotAcquireBinding(t *testing.T) {
 	denied := []string{"0.0.0.1", "10.0.0.1", "100.100.100.200", "127.0.0.1", "169.254.169.254", "172.31.255.255", "192.0.0.9", "192.0.2.1", "192.88.99.1", "192.168.1.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1", "255.255.255.255", "93.184.216.34", "::", "::1", "::ffff:1.1.1.1", "64:ff9b::a00:1", "64:ff9b:1::1", "100::1", "2001::1", "2001:db8::1", "2002:7f00:1::1", "3fff::1", "5f00::1", "fc00::1", "fe80::1", "ff02::1", "2606:4700:ffff::1"}
-	for _, address := range denied {
-		t.Run(address, func(t *testing.T) {
-			b := binder(t, responder(func(m *dnsmessage.Message) {
-				ip := netip.MustParseAddr(address)
-				if (ip.Is4() && m.Questions[0].Type == dnsmessage.TypeA) || (!ip.Is4() && m.Questions[0].Type == dnsmessage.TypeAAAA) {
-					m.Answers = append(m.Answers, record("api.example.com", address, 60))
+	for _, mode := range []string{"restricted", "allowlist"} {
+		for _, address := range denied {
+			t.Run(mode+"/"+address, func(t *testing.T) {
+				policy := options()
+				policy.Mode = mode
+				b, err := New(policy, responder(func(m *dnsmessage.Message) {
+					ip := netip.MustParseAddr(address)
+					if (ip.Is4() && m.Questions[0].Type == dnsmessage.TypeA) || (!ip.Is4() && m.Questions[0].Type == dnsmessage.TypeAAAA) {
+						m.Answers = append(m.Answers, record("api.example.com", address, 60))
+					}
+				}))
+				if err != nil {
+					t.Fatal(err)
 				}
-			}))
-			if _, err := b.Resolve(context.Background(), "api.example.com"); !errors.Is(err, ErrDenied) {
-				t.Fatalf("mixed answer admitted: %v", err)
-			}
-		})
+				if _, err := b.Resolve(context.Background(), "api.example.com"); !errors.Is(err, ErrDenied) {
+					t.Fatalf("mixed answer admitted: %v", err)
+				}
+			})
+		}
 	}
 }
 

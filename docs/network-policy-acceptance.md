@@ -1,10 +1,10 @@
 # Controlled network address-binding foundation
 
-Status: Address-binding and inactive routed-firewall foundations; not production
-runtime enforcement or WP-11A acceptance.
-The production runner still advertises and enforces `network=none`. This package
-has no production caller, production firewall actuator, namespace manager or
-capability flag. The owned lifecycle below is exercised by disposable actuators.
+This is the historical record of the address-binding and routed-firewall
+foundations. Its statements about inactive callers and future runtime gates
+describe those incremental checkpoints, not the current deployment.
+See [WP-11A acceptance](wp-11a-acceptance.md) for the current requirement map,
+composed enforcement evidence and explicit acceptance limits.
 
 ## Inputs and ownership
 

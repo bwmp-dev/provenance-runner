@@ -1,5 +1,5 @@
-// Package networkpolicy prepares bounded address bindings for future workload
-// enforcement. It has no production callers and never installs packet rules.
+// Package networkpolicy binds controlled DNS answers to job-scoped network
+// policy and enforces them through retained namespace and firewall ownership.
 package networkpolicy
 
 import (
@@ -61,7 +61,7 @@ type Binder struct {
 }
 
 // Binding is immutable evidence of validated resolution, NOT packet permission.
-// A future actuator must separately verify job ownership, install restrictions
+// The actuator must separately verify job ownership, install restrictions
 // and caps, withdraw old rules on refresh failure, and destroy them at job end.
 type Binding struct {
 	job, hostname   string

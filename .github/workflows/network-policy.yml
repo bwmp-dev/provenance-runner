@@ -62,6 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 -B -m unittest scripts/test_namespace_acceptance.py
           image=$(< "${PROVENANCE_NETWORK_EVIDENCE}/fixture-image.txt")
           [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]
           python3 -B scripts/network-policy/namespace_acceptance.py --image "$image" \
