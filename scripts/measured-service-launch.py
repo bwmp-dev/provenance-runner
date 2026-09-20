@@ -9,6 +9,7 @@ from pathlib import Path
 import pwd
 import re
 import stat
+import struct
 import subprocess
 import sys
 
@@ -51,6 +52,27 @@ def verify_uplink_link():
                 'earlier link rule requires operator reconciliation')
         for name in ('link.d', UPLINK_LINK.name + '.d'):
             require(not any((directory / name).glob('*.conf')), 'uplink link rule override')
+
+
+def generation_acl_bytes(uid):
+    require(type(uid) is int and uid == ROLES['provenance-job'], 'mapped image traversal identity')
+    # Linux POSIX ACL: retain owner rwx, worker-group search and no other access.
+    # The single mapped workload gets search only, never image read/write or listing.
+    undefined = 0xffffffff
+    entries = ((1, 7, undefined), (2, 1, uid), (4, 1, undefined),
+               (16, 1, undefined), (32, 0, undefined))
+    return struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
+
+
+def verify_generation_traversal(boot, config):
+    generation = g.protected(boot['generation'], True)
+    info = generation.stat()
+    require(info.st_gid == boot['gid'] and stat.S_IMODE(info.st_mode) == 0o710,
+            'mapped image traversal custody')
+    require(os.getxattr(generation, 'system.posix_acl_access', follow_symlinks=False) ==
+            generation_acl_bytes(config['workload']['UID']), 'mapped image traversal ACL')
+    require('system.posix_acl_default' not in os.listxattr(generation, follow_symlinks=False),
+            'image generation must not inherit access grants')
 
 
 def unit_bytes(boot, disk, secret):
@@ -210,6 +232,7 @@ def load_inputs():
     config = configuration(p, boot)
     verify_identities(config, p['inventoryHelper']['path'])
     verify_uplink_link()
+    verify_generation_traversal(boot, config)
     return p, boot, disk, config
 
 

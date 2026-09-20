@@ -11,6 +11,30 @@ spec.loader.exec_module(s)
 
 
 class LaunchTests(unittest.TestCase):
+    def test_generation_traversal_requires_one_exact_search_only_identity(self):
+        boot = {'generation': '/fixture/generation', 'gid': 981}
+        config = {'workload': {'UID': 262144}}
+        generation = SimpleNamespace(stat=lambda: SimpleNamespace(st_gid=981, st_mode=0o40710))
+        expected = s.generation_acl_bytes(262144)
+        with patch.object(s.g, 'protected', return_value=generation), \
+                patch.object(s.os, 'getxattr', return_value=expected) as access, \
+                patch.object(s.os, 'listxattr', return_value=['system.posix_acl_access']) as names:
+            s.verify_generation_traversal(boot, config)
+            for value in (b'', expected[:-1], expected.replace(b'\x02\x00\x01\x00', b'\x02\x00\x05\x00')):
+                access.return_value = value
+                with self.assertRaises(s.g.Refusal):
+                    s.verify_generation_traversal(boot, config)
+            access.return_value = expected
+            names.return_value = ['system.posix_acl_access', 'system.posix_acl_default']
+            with self.assertRaises(s.g.Refusal):
+                s.verify_generation_traversal(boot, config)
+            access.side_effect = OSError('missing ACL')
+            with self.assertRaises(OSError):
+                s.verify_generation_traversal(boot, config)
+        for uid in (True, 994, 262145, 262146, '262144'):
+            with self.assertRaises(s.g.Refusal):
+                s.generation_acl_bytes(uid)
+
     def test_uplink_rule_refuses_missing_changed_shadowed_or_dropin_rule(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
