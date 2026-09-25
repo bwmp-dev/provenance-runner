@@ -46,6 +46,60 @@ jobs:
       - name: Build
         run: go build ./cmd/provenance-runner
 
+  image-scan:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
+    env:
+      # Pinned Trivy release and the published SHA-256 of its Linux-64bit
+      # tarball. Bump both together.
+      TRIVY_VERSION: 0.74.0
+      TRIVY_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned Trivy
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          archive="${RUNNER_TEMP}/trivy.tar.gz"
+          install_dir="${RUNNER_TEMP}/trivy-${TRIVY_VERSION}"
+          curl --fail --location --silent --show-error \
+            --output "${archive}" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          printf '%s  %s\n' "${TRIVY_SHA256}" "${archive}" | sha256sum --check --strict -
+          mkdir --parents "${install_dir}"
+          tar --extract --gzip --file "${archive}" --directory "${install_dir}" trivy
+          echo "TRIVY_BIN=${install_dir}/trivy" >> "${GITHUB_ENV}"
+          "${install_dir}/trivy" --version
+      # The runner ships as a Go binary and systemd units, not a published
+      # container image; the images built elsewhere in CI (network-policy
+      # fixtures, measured rootfs) are ephemeral test scaffolding. Scan the
+      # repository root filesystem — Go module dependencies, Dockerfiles and
+      # deployment config, and committed secrets — which is what a runner
+      # container image or VPS bundle is built from. govulncheck remains the
+      # reachability-aware Go scan; Trivy adds config and secret coverage.
+      # --skip-files excludes the five root-by-design CI test-fixture
+      # Dockerfiles that boot systemd as PID 1 to prepare measured/baseline
+      # root filesystems (DS-0002 "non-root USER" does not apply; they build no
+      # published or hosted image). Every other Dockerfile and config file is
+      # still scanned. See docs/security/threat-model.md.
+      - name: Trivy filesystem scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${TRIVY_BIN}" filesystem \
+            --scanners vuln,misconfig,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            --skip-files "scripts/runtime-baseline-fixture.Dockerfile,scripts/runtime-generation-fixture.Dockerfile,scripts/measured-daemon-systemd.Dockerfile,scripts/network-policy/Dockerfile,scripts/network-policy/Dockerfile.sentry" \
+            --format table \
+            .
+
   runtime-baseline:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 15
