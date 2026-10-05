@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out runner candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
 
@@ -47,7 +47,7 @@ jobs:
           cache: false
 
       - name: Check out pinned probe and fixture source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: bwmp-dev/provenance
           ref: f82dcbf8244354059731ba533f73909ed5528bbd
@@ -58,7 +58,7 @@ jobs:
         run: test "$(git -C _plan03-fixtures-source rev-parse HEAD)" = "${PLAN03_TOOLKIT_SHA}"
 
       - name: Set up fixture Node runtime
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: _plan03-fixtures-source/.node-version
 
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload exact-head exit-gate evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: plan03-exit-gate-${{ env.PLAN03_CANDIDATE_SHA }}
           path: ${{ env.PLAN03_EVIDENCE_ROOT }}
