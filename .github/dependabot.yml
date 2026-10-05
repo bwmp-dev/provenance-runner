@@ -11,6 +11,11 @@ updates:
       # and every update job fails with dependency_file_not_resolvable.
       # The pinned pseudo-version is advanced deliberately with protocol work.
       - dependency-name: github.com/bwmp-dev/provenance/gen/proto
+      # grpc-go 1.84.0 reintroduced GO-2026-6443 (server panic on a missing
+      # :authority/Host). 1.83.2 is clean; skip 1.84.x until a fixed release.
+      - dependency-name: google.golang.org/grpc
+        versions:
+          - "1.84.x"
     groups:
       go-dependencies:
         patterns:
