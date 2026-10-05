@@ -8,7 +8,8 @@ class NetworkCIIdentityTests(unittest.TestCase):
         workflows = Path(__file__).resolve().parents[1]/'.github/workflows'
         count = 0
         for path in workflows.glob('*.yml'):
-            for setup in path.read_text().split('uses: actions/setup-go@v5')[1:]:
+            for setup in path.read_text().split('uses: actions/setup-go@')[1:]:
+                self.assertRegex(setup, r'\A[0-9a-f]{40} # v\d', path.name)
                 settings = setup.split('      - ', 1)[0]
                 self.assertRegex(settings, r'(?m)^          cache: false$', path.name)
                 count += 1
@@ -23,7 +24,7 @@ class NetworkCIIdentityTests(unittest.TestCase):
 
     def test_cache_is_not_archived_from_the_shared_host(self):
         workflow = (Path(__file__).resolve().parents[1]/'.github/workflows/network-policy.yml').read_text()
-        setup = workflow.split('uses: actions/setup-go@v5', 1)[1].split('      - name:', 1)[0]
+        setup = workflow.split('uses: actions/setup-go@', 1)[1].split('      - name:', 1)[0]
         self.assertRegex(setup, r'(?m)^          cache: false$')
         self.assertIn('cache=$(mktemp -d "${RUNNER_TEMP}/network-go-cache.XXXXXXXX")', workflow)
         self.assertIn('echo "GOCACHE=${cache}" >> "${GITHUB_ENV}"', workflow)
