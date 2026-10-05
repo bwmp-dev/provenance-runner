@@ -156,6 +156,9 @@ func assertSelfHostedJobPolicy(t *testing.T, repositoryRoot string) {
 	}
 	assertPrivilegedGVisorConcurrency(t, "short gVisor smoke", ciJobs["gvisor-smoke"])
 	assertQueuedConcurrency(t, "systemd-user smoke", ciJobs["systemd-user-smoke"], systemdUserSmokeGroup)
+	if !strings.Contains(ciJobs["systemd-user-smoke"], "\n    if: github.actor != 'dependabot[bot]'\n") {
+		t.Fatal("systemd-user smoke must skip only Dependabot runs, which never receive the dedicated-host SSH key")
+	}
 	if strings.Contains(ci, "github.event.pull_request") {
 		t.Fatal("push-only normal CI must not derive checkout or artifact identity from a pull-request event")
 	}
