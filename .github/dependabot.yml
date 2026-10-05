@@ -4,6 +4,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # First-party runner protocol module. It lives in a nested module of
+      # bwmp-dev/provenance that has no gen/proto/v* tags, so Dependabot
+      # mistakes the repository's root v0.1.0-alpha.N tags for its versions
+      # and every update job fails with dependency_file_not_resolvable.
+      # The pinned pseudo-version is advanced deliberately with protocol work.
+      - dependency-name: github.com/bwmp-dev/provenance/gen/proto
     groups:
       go-dependencies:
         patterns:
