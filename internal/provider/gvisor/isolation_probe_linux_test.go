@@ -62,10 +62,10 @@ probe docker_socket_run test -S /run/docker.sock
 probe containerd_socket test -S /run/containerd/containerd.sock
 # Host PID / network namespace escapes.
 probe host_init_ns nsenter --net=/proc/1/ns/net -- true
-probe host_init_root test -r /proc/1/root/etc/shadow
+probe host_init_root test -r "/proc/1/root$PROVENANCE_HOST_FIXTURE"
 probe host_route sh -c 'test "$(tail -n +2 /proc/net/route | wc -l)" -gt 0'
 # Cross-job / host filesystem reads.
-probe read_etc_shadow test -r /etc/shadow
+probe read_host_fixture test -r "$PROVENANCE_HOST_FIXTURE"
 probe read_other_job test -r /inputs/../smoke-cancel
 probe read_host_home test -r /root/.ssh/id_rsa
 probe write_root touch /provenance-root-write-test
@@ -93,6 +93,19 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 	}
 	// A host credential must not appear in the guest's explicitly built environment.
 	t.Setenv("PROVENANCE_DECOY_PASSWORD", "must-not-be-scraped")
+	// Guest /etc/shadow belongs to the public image, not the host. Use a
+	// readable host-only sentinel so denial cannot come from its permissions.
+	hostFixture, err := os.CreateTemp("", "provenance-host-probe-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(hostFixture.Name())
+	if err := hostFixture.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hostFixture.Name(), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	temporaryRoot := t.TempDir()
 	inputsRoot := filepath.Join(temporaryRoot, "inputs")
 	for _, jobID := range []string{"probe", "smoke-cancel"} {
@@ -122,6 +135,7 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 	prepared := prepareSmokeEnvironment(t, provider, "probe", configuration{
 		Command:     "/bin/sh",
 		Arguments:   []string{"-c", isolationProbeScript},
+		Environment: map[string]string{"PROVENANCE_HOST_FIXTURE": hostFixture.Name()},
 		Network:     "none",
 		MemoryBytes: 128 << 20,
 		CPUMillis:   500,
@@ -156,7 +170,7 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 		"temporal_private_a", "temporal_private_b", "coolify_mgmt_http", "coolify_mgmt_https",
 		"cloud_metadata", "cloud_metadata_ecs", "docker_socket", "docker_socket_run",
 		"containerd_socket", "host_init_ns", "host_init_root",
-		"host_route", "read_etc_shadow", "read_other_job", "read_host_home",
+		"host_route", "read_host_fixture", "read_other_job", "read_host_home",
 		"write_root", "env_scrape", "identity_uid",
 	}
 	for _, name := range required {
