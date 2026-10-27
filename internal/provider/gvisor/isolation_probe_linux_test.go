@@ -29,14 +29,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/bwmp-dev/provenance-runner/internal/execution"
 )
 
 // isolationProbeScript prints one "PROBE <name> <PASS|DENIED>" line per attempt.
 // PASS means isolation held (the escape was denied); DENIED means the sandbox
 // blocked the action. Any "PROBE <name> REACHED" line is a containment failure.
 const isolationProbeScript = `
+command -v nc >/dev/null && command -v nsenter >/dev/null || exit 1
 probe() {
   name="$1"; shift
   if "$@" >/dev/null 2>&1; then
@@ -62,12 +61,11 @@ probe docker_socket test -S /var/run/docker.sock
 probe docker_socket_run test -S /run/docker.sock
 probe containerd_socket test -S /run/containerd/containerd.sock
 # Host PID / network namespace escapes.
-probe host_init_ns test -e /proc/1/ns/net
-probe host_init_root test -r /proc/1/root/etc/shadow
-probe nsenter_present sh -c 'command -v nsenter'
+probe host_init_ns nsenter --net=/proc/1/ns/net -- true
+probe host_init_root test -r "/proc/1/root$PROVENANCE_HOST_FIXTURE"
 probe host_route sh -c 'test "$(tail -n +2 /proc/net/route | wc -l)" -gt 0'
 # Cross-job / host filesystem reads.
-probe read_etc_shadow test -r /etc/shadow
+probe read_host_fixture test -r "$PROVENANCE_HOST_FIXTURE"
 probe read_other_job test -r /inputs/../smoke-cancel
 probe read_host_home test -r /root/.ssh/id_rsa
 probe write_root touch /provenance-root-write-test
@@ -92,6 +90,21 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 	rootFS := os.Getenv("PROVENANCE_RUNSC_ROOTFS")
 	if rootFS == "" {
 		t.Fatal("PROVENANCE_RUNSC_SMOKE=1 requires PROVENANCE_RUNSC_ROOTFS containing /bin/sh and nc")
+	}
+	// A host credential must not appear in the guest's explicitly built environment.
+	t.Setenv("PROVENANCE_DECOY_PASSWORD", "must-not-be-scraped")
+	// Guest /etc/shadow belongs to the public image, not the host. Use a
+	// readable host-only sentinel so denial cannot come from its permissions.
+	hostFixture, err := os.CreateTemp("", "provenance-host-probe-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(hostFixture.Name())
+	if err := hostFixture.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hostFixture.Name(), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	temporaryRoot := t.TempDir()
 	inputsRoot := filepath.Join(temporaryRoot, "inputs")
@@ -122,7 +135,7 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 	prepared := prepareSmokeEnvironment(t, provider, "probe", configuration{
 		Command:     "/bin/sh",
 		Arguments:   []string{"-c", isolationProbeScript},
-		Environment: map[string]string{"PROVENANCE_DECOY_PASSWORD": "must-not-be-scraped"},
+		Environment: map[string]string{"PROVENANCE_HOST_FIXTURE": hostFixture.Name()},
 		Network:     "none",
 		MemoryBytes: 128 << 20,
 		CPUMillis:   500,
@@ -141,11 +154,9 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 	if collectErr != nil {
 		t.Fatalf("Collect() error = %v", collectErr)
 	}
-	// The environment scrape sees the decoy variable we injected, so the probe
-	// job exits nonzero (env_scrape "REACHED" would be a real finding, but the
-	// decoy is deliberately not a credential name). We assert on structured
-	// probe lines rather than the exit code.
-	_ = outcome
+	if outcome.Failure != nil {
+		t.Fatalf("isolation probe did not exit successfully: %v", outcome)
+	}
 	if !strings.Contains(output.Stdout, "PROBE_COMPLETE") {
 		t.Fatalf("isolation probe did not run to completion; stdout=%q stderr=%q", output.Stdout, output.Stderr)
 	}
@@ -158,8 +169,8 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 		"postgres_private_a", "postgres_private_b", "postgres_loopback",
 		"temporal_private_a", "temporal_private_b", "coolify_mgmt_http", "coolify_mgmt_https",
 		"cloud_metadata", "cloud_metadata_ecs", "docker_socket", "docker_socket_run",
-		"containerd_socket", "host_init_ns", "host_init_root", "nsenter_present",
-		"host_route", "read_etc_shadow", "read_other_job", "read_host_home",
+		"containerd_socket", "host_init_ns", "host_init_root",
+		"host_route", "read_host_fixture", "read_other_job", "read_host_home",
 		"write_root", "env_scrape", "identity_uid",
 	}
 	for _, name := range required {
@@ -181,5 +192,4 @@ func TestIsolationProbeSandboxDeniesEscapes(t *testing.T) {
 	if output.CompleteLog == nil {
 		t.Fatal("isolation probe produced no complete log")
 	}
-	_ = execution.ClassificationPassed
 }
