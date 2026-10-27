@@ -1,6 +1,6 @@
 module github.com/bwmp-dev/provenance-runner
 
-go 1.26.8
+go 1.26.10
 
 require (
 	github.com/bwmp-dev/provenance/gen/proto v0.0.0-20260914002628-0975f9931a40
