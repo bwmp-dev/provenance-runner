@@ -212,16 +212,16 @@ jobs:
             printf '+%s\n' "${controllers// / +}" | sudo tee "${cgroup_parent}/cgroup.subtree_control" > /dev/null
           fi
           echo "PROVENANCE_CGROUP_PARENT=${cgroup_parent}" >> "${GITHUB_ENV}"
-      - name: Run real gVisor smoke test
+      - name: Run real gVisor smoke and isolation tests
         shell: bash
         run: |
           sudo --preserve-env=PROVENANCE_RUNSC_SMOKE,PROVENANCE_RUNSC_PATH,PROVENANCE_RUNSC_ROOTFS,PROVENANCE_CGROUP_PARENT \
             bash -c 'printf "%s\n" "$$" > "${PROVENANCE_CGROUP_PARENT}/runner/cgroup.procs"; exec "$@"' bash \
             "${RUNNER_TEMP}/gvisor-smoke.test" \
             -test.v \
-            -test.run '^TestRunscSmoke$' \
+            -test.run '^TestRunscSmoke$|^TestIsolationProbeSandboxDeniesEscapes$' \
             -test.count=1 \
-            -test.timeout=60s
+            -test.timeout=180s
       - name: Run disposable measured runtime systemd acceptance
         shell: bash
         run: |
