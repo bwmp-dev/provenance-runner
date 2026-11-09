@@ -28,15 +28,15 @@ PACKAGES = [
  ("pool/main/l/lz4/liblz4-1_1.9.4-1build1.1_amd64.deb",
   "319331270d5cc52d5ebffe51c941d7b01b432bc402c2924b557209a64d4ecbad",
   [("./usr/lib/x86_64-linux-gnu/liblz4.so.1.9.4", "lib/liblz4.so.1", "40bffd0a098387368b16b992abd5f7cf43c0fa2f05cabe5a6d483719554adfda")]),
- ("pool/main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb",
-  "d2eabd41ca77d2c2dd9d5d4ef478cccb64ffde6279c47cf4699a857d46785a52",
-  [("./usr/lib/x86_64-linux-gnu/liblzma.so.5.4.5", "lib/liblzma.so.5", "696e868dd0700a19a6d65fc01608ec2d70d3cb91f65710e89180cd2e688f30cb")]),
+ ("pool/main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1ubuntu0.4_amd64.deb",
+  "5bcf5da2339331e21d3f42a831e82c61c54c6b2f29804010e8d59abd0ae52167",
+  [("./usr/lib/x86_64-linux-gnu/liblzma.so.5.4.5", "lib/liblzma.so.5", "26b37d25f7ca2a2d348de8ecabacda12e921cd933b21fa069a179760db77219d")]),
  ("pool/main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1.1_amd64.deb",
   "dfcf25061e07aad7efd3f4f880ba5ad4d4d09ebe7fc8cc77ab6b8a161d6d4727",
   [("./usr/lib/x86_64-linux-gnu/libzstd.so.1.5.5", "lib/libzstd.so.1", "0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb")]),
- ("pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.2_amd64.deb",
-  "84b9cf5752b29c9f92c27cd4c4ba9bbcc70b5ccf9b1b515421a28ae23212e273",
-  [("./usr/lib/x86_64-linux-gnu/libz.so.1.3", "lib/libz.so.1", "86200da370f20476a2507e9097a789b5ef97269b4ca8d5e164ad82dab9d99892")]),
+ ("pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.3_amd64.deb",
+  "376249c8de139568221dbb242318cc8cb8f02299e3a62b7432948e1754fbddf9",
+  [("./usr/lib/x86_64-linux-gnu/libz.so.1.3", "lib/libz.so.1", "f61677c7bdb7c2aa2a243ea781bfd16afcb361cede7b4ef76127a9d8eb9a5242")]),
 ]
 
 

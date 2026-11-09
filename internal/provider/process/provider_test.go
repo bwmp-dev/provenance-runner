@@ -32,9 +32,10 @@ func TestProviderExecutesAndBoundsOutput(t *testing.T) {
 	configuration := fmt.Sprintf(`{
 		"acknowledgeUnsandboxed":true,
 		"command":%q,
+		"workspaceRoot":%q,
 		"arguments":["-test.run=TestProcessHelper","--","output"],
 		"environment":{"PROVENANCE_PROCESS_HELPER":"1"}
-	}`, os.Args[0])
+	}`, os.Args[0], t.TempDir())
 	job := localjob.Job{
 		SchemaVersion:  localjob.SchemaVersion,
 		ID:             "job/process-output",
@@ -73,9 +74,10 @@ func TestProviderClassifiesNonzeroExit(t *testing.T) {
 	configuration := fmt.Sprintf(`{
 		"acknowledgeUnsandboxed":true,
 		"command":%q,
+		"workspaceRoot":%q,
 		"arguments":["-test.run=TestProcessHelper","--","failure"],
 		"environment":{"PROVENANCE_PROCESS_HELPER":"1"}
-	}`, os.Args[0])
+	}`, os.Args[0], t.TempDir())
 	job := localjob.Job{
 		SchemaVersion: localjob.SchemaVersion,
 		ID:            "job/process-failure",
@@ -104,9 +106,10 @@ func TestProviderHonorsJobTimeout(t *testing.T) {
 	configuration := fmt.Sprintf(`{
 		"acknowledgeUnsandboxed":true,
 		"command":%q,
+		"workspaceRoot":%q,
 		"arguments":["-test.run=TestProcessHelper","--","sleep"],
 		"environment":{"PROVENANCE_PROCESS_HELPER":"1"}
-	}`, os.Args[0])
+	}`, os.Args[0], t.TempDir())
 	job := localjob.Job{
 		SchemaVersion:                       localjob.SchemaVersion,
 		ID:                                  "job/process-timeout",
@@ -185,10 +188,11 @@ func TestProviderProducesSanitizedCompressedEvidence(t *testing.T) {
 	configuration := fmt.Sprintf(`{
 		"acknowledgeUnsandboxed":true,
 		"command":%q,
+		"workspaceRoot":%q,
 		"arguments":["-test.run=TestProcessHelper","--","evidence"],
 		"redactSecrets":["secret-value"],
 		"environment":{"PROVENANCE_PROCESS_HELPER":"1"}
-	}`, os.Args[0])
+	}`, os.Args[0], t.TempDir())
 	job := localjob.Job{
 		SchemaVersion:  localjob.SchemaVersion,
 		ID:             "job/process-evidence",
